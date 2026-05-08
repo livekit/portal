@@ -153,7 +153,7 @@ def test_random_values_roundtrip_through_wrapper(dtype):
             values={"v": delivered},
             timestamp_us=0,
             in_reply_to_ts_us=None,
-            sender=None,
+            sender="",
         )
         got = _wrap_action(ffi_action, schema).values["v"]
 

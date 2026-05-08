@@ -137,7 +137,7 @@ def test_action_wrapper_values_are_typed_by_default():
         },
         timestamp_us=100,
         in_reply_to_ts_us=None,
-        sender=None,
+        sender="",
     )
     action = _wrap_action(ffi_action, portal._action_schema)
     assert action.timestamp_us == 100
@@ -203,7 +203,7 @@ def test_wrapper_drops_fields_missing_from_payload():
         values={"shoulder": 0.25},
         timestamp_us=0,
         in_reply_to_ts_us=None,
-        sender=None,
+        sender="",
     )
     action = _wrap_action(ffi_action, portal._action_schema)
     # Partial payload → wrapper returns only the fields that were sent.
@@ -344,7 +344,7 @@ def test_action_chunk_wrapper_reconstructs_numpy_arrays():
         data={"j1": [0.0, 0.5, 1.0, 1.5], "gripper": [0.0, 1.0, 1.0, 0.0]},
         timestamp_us=42,
         in_reply_to_ts_us=10,
-        sender=None,
+        sender="",
     )
     chunk = _wrap_action_chunk(ffi_chunk, portal._chunk_schemas)
     assert chunk.name == "act"

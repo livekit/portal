@@ -18,10 +18,7 @@ import pytest
 from livekit.portal import (
     ActionChunk,
     DType,
-    Portal,
-    PortalConfig,
     PortalError,
-    Role,
 )
 
 # Tests are async — pytest-asyncio 0.23+ supports per-test marker.
@@ -284,19 +281,6 @@ async def test_undeclared_chunk_send_raises(pair):
         pair.operator.send_action_chunk("never_declared", {"j": [0.0] * 4})
 
 
-async def test_robot_send_chunk_wrong_role(pair):
-    pair.robot_cfg.add_action_chunk(
-        "act", horizon=4, fields=[("j", DType.F32)]
-    )
-    pair.operator_cfg.add_action_chunk(
-        "act", horizon=4, fields=[("j", DType.F32)]
-    )
-    await pair.start()
-
-    with pytest.raises(PortalError.WrongRole):
-        pair.robot.send_action_chunk("act", {"j": [0.0] * 4})
-
-
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -319,14 +303,9 @@ async def test_send_then_immediate_disconnect(pair):
 async def test_disconnect_then_reconnect_fresh_room():
     """Reconnect path: end the first session, start a fresh Pair, verify
     chunks flow on the new connection. Tests that publishers/slots reset
-    correctly across `Portal.disconnect()` + new construction.
+    correctly across disconnect + new construction.
     """
-    from livekit.portal import (  # local import to avoid module-level
-        DType,
-        Portal,
-        PortalConfig,
-        Role,
-    )
+    from livekit.portal import DType  # local import to avoid module-level
     from .conftest import Pair
 
     fields = [("j", DType.F32)]

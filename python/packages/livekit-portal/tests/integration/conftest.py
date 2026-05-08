@@ -21,7 +21,7 @@ from typing import Optional
 
 import pytest
 
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Operator, OperatorConfig, Robot, RobotConfig
 
 
 # `LIVEKIT_URL` is the explicit opt-in: integration tests are skipped
@@ -84,24 +84,29 @@ class Pair:
     `operator_cfg` BEFORE calling `start()`. State schema is preset on
     both sides so observations can form, even when the test only cares
     about chunks.
+
+    The operator self-claims the active-operator pointer after connect so
+    its actions actually reach the robot — the action gate drops anything
+    from a non-active operator.
     """
 
     def __init__(self) -> None:
         self.room = f"stress-{int(time.time()*1000)}-{os.urandom(2).hex()}"
-        self.robot_cfg = PortalConfig(self.room, Role.ROBOT)
-        self.operator_cfg = PortalConfig(self.room, Role.OPERATOR)
+        self.robot_cfg = RobotConfig(self.room)
+        self.operator_cfg = OperatorConfig(self.room, identity="operator")
         self.robot_cfg.add_state_typed([("j", DType.F32)])
         self.operator_cfg.add_state_typed([("j", DType.F32)])
-        self.robot: Optional[Portal] = None
-        self.operator: Optional[Portal] = None
+        self.robot: Optional[Robot] = None
+        self.operator: Optional[Operator] = None
 
     async def start(self) -> None:
         import asyncio
-        self.robot = Portal(self.robot_cfg)
-        self.operator = Portal(self.operator_cfg)
+        self.robot = Robot(self.robot_cfg)
+        self.operator = Operator(self.operator_cfg)
         await self.robot.connect(URL, _make_token("robot", self.room))
         await asyncio.sleep(0.2)
         await self.operator.connect(URL, _make_token("operator", self.room))
+        await self.operator.set_active_operator(self.operator.local_identity())
         await asyncio.sleep(0.1)
 
     async def stop(self) -> None:

@@ -277,6 +277,11 @@ uv run robot.py                 # terminal 1
 uv run teleoperator.py          # terminal 2
 ```
 
+The same directory ships `robot_yaml.py` / `teleoperator_yaml.py`, which
+load the wire contract from a shared [`portal.yaml`](examples/python/basic/portal.yaml)
+instead of declaring it in code. See [Config from YAML](docs/config-file.md)
+for the schema reference.
+
 **[`examples/python/inference/`](examples/python/inference)**
 
 VLA-style remote inference. The robot streams obs to a remote "policy"
@@ -336,6 +341,7 @@ this. A direct socket is enough.
 | [Quickstart](docs/quickstart.md) | Install, tokens, first run with `Robot` and `Operator` |
 | [Portal API](docs/portal-api.md) | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
 | [Concepts](docs/concepts.md) | Roles, the observation model, multi-controller, frame format |
+| [Config from YAML](docs/config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file |
 | [Tuning](docs/tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
 | [RPC](docs/rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
 | [Synchronization deep dive](docs/synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |

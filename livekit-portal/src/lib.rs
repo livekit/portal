@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod config;
+pub mod config_file;
 mod data;
 pub mod dtype;
 pub mod error;
@@ -15,6 +16,7 @@ mod video;
 
 pub use codec::Codec;
 pub use config::{ChunkSpec, FieldSpec, FrameVideoSpec, PortalConfig};
+pub use config_file::ConfigFileError;
 pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};

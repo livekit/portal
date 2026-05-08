@@ -245,5 +245,7 @@ and CLI mode: [lerobot integration](lerobot.md).
 - [Portal API](portal-api.md). The full surface. All callbacks, send
   methods, role semantics.
 - [Concepts](concepts.md). Roles, the observation model, frame format.
+- [Config from YAML](config-file.md). Build the same configs from a
+  shareable file so the wire contract lives in one place.
 - [Tuning](tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates,
   reliability.

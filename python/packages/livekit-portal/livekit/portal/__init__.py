@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import numbers
+import os
 import threading
 import traceback
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ BufferMetrics = _ffi.BufferMetrics
 RttMetrics = _ffi.RttMetrics
 PolicyMetrics = _ffi.PolicyMetrics
 PortalError = _ffi.PortalError
+ConfigFileError = _ffi.ConfigFileError
 RpcInvocationData = _ffi.RpcInvocationData
 RpcError = _ffi.RpcError
 
@@ -635,6 +637,64 @@ class PortalConfig:
         self._action_schema: List[FieldSpec] = []
         self._action_chunks: List[ChunkSpec] = []
 
+    @classmethod
+    def from_yaml_str(
+        cls,
+        yaml: str,
+        session: str,
+        role: Role,
+    ) -> "PortalConfig":
+        """Build a `PortalConfig` from a YAML string.
+
+        The YAML describes the shareable wire contract — schemas, video
+        tracks, sync knobs. `session` and `role` are supplied at the call
+        site since they're per-process identity, so the same file is
+        reusable across robot and operator processes. The shared E2EE
+        key, when used, must be applied with `set_e2ee_key` after loading.
+
+        Raises `ConfigFileError` for parse errors, unknown versions, and
+        invalid configs (duplicate tracks, bad dtypes, out-of-range
+        values).
+        """
+        inner = _ffi.PortalConfig.from_yaml_str(yaml, session, role)
+        return cls._from_inner(inner, session, role)
+
+    @classmethod
+    def from_yaml_file(
+        cls,
+        path: Union[str, os.PathLike],
+        session: str,
+        role: Role,
+    ) -> "PortalConfig":
+        """Convenience wrapper around `from_yaml_str` that reads `path`
+        from disk first.
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.from_yaml_str(f.read(), session, role)
+
+    @classmethod
+    def _from_inner(
+        cls,
+        inner: _ffi.PortalConfig,
+        session: str,
+        role: Role,
+    ) -> "PortalConfig":
+        # Bypass __init__ — `inner` is already a fully built FFI config.
+        # Mirror the schemas back into Python-side state by reading the
+        # FFI accessors so downstream consumers (`Portal.__init__`,
+        # introspection properties) see the same shape they would on a
+        # programmatic build.
+        instance = cls.__new__(cls)
+        instance._inner = inner
+        instance._session = session
+        instance._role = role
+        instance._video_tracks = list(inner.video_tracks())
+        instance._frame_video_tracks = list(inner.frame_video_tracks())
+        instance._state_schema = list(inner.state_schema())
+        instance._action_schema = list(inner.action_schema())
+        instance._action_chunks = list(inner.action_chunks())
+        return instance
+
     @property
     def session(self) -> str:
         return self._session
@@ -1156,6 +1216,12 @@ class _RoleConfigBase:
     def __init__(self, session: str, role: Role) -> None:
         self._inner = PortalConfig(session, role)
 
+    @classmethod
+    def _from_portal_config(cls, inner: PortalConfig) -> "_RoleConfigBase":
+        instance = cls.__new__(cls)
+        instance._inner = inner
+        return instance
+
     @property
     def session(self) -> str:
         return self._inner.session
@@ -1246,6 +1312,23 @@ class RobotConfig(_RoleConfigBase):
     def __init__(self, session: str) -> None:
         super().__init__(session, Role.ROBOT)
 
+    @classmethod
+    def from_yaml_str(cls, yaml: str, session: str) -> "RobotConfig":
+        """Build a `RobotConfig` from a YAML string. See
+        `PortalConfig.from_yaml_str` for the schema and semantics.
+        """
+        inner = PortalConfig.from_yaml_str(yaml, session, Role.ROBOT)
+        return cls._from_portal_config(inner)  # type: ignore[return-value]
+
+    @classmethod
+    def from_yaml_file(
+        cls,
+        path: Union[str, os.PathLike],
+        session: str,
+    ) -> "RobotConfig":
+        inner = PortalConfig.from_yaml_file(path, session, Role.ROBOT)
+        return cls._from_portal_config(inner)  # type: ignore[return-value]
+
 
 class OperatorConfig(_RoleConfigBase):
     """Operator-side session config. Same declarative surface as
@@ -1260,6 +1343,23 @@ class OperatorConfig(_RoleConfigBase):
 
     def __init__(self, session: str) -> None:
         super().__init__(session, Role.OPERATOR)
+
+    @classmethod
+    def from_yaml_str(cls, yaml: str, session: str) -> "OperatorConfig":
+        """Build an `OperatorConfig` from a YAML string. See
+        `PortalConfig.from_yaml_str` for the schema and semantics.
+        """
+        inner = PortalConfig.from_yaml_str(yaml, session, Role.OPERATOR)
+        return cls._from_portal_config(inner)  # type: ignore[return-value]
+
+    @classmethod
+    def from_yaml_file(
+        cls,
+        path: Union[str, os.PathLike],
+        session: str,
+    ) -> "OperatorConfig":
+        inner = PortalConfig.from_yaml_file(path, session, Role.OPERATOR)
+        return cls._from_portal_config(inner)  # type: ignore[return-value]
 
 
 class Robot:
@@ -1581,6 +1681,7 @@ __all__ = [
     "RttMetrics",
     "PolicyMetrics",
     "PortalError",
+    "ConfigFileError",
     "RpcInvocationData",
     "RpcError",
     "frame_bytes_to_numpy_rgb",

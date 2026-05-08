@@ -21,3 +21,9 @@ log = "0.4"
 # every supported format and would bloat link time and binary size; we only
 # need PNG and JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# `serde-saphyr` is pinned exactly: pre-1.0 and may break across patch
+# releases. Bump deliberately. `serde` follows semver and floats so the
+# workspace's transitive deps don't conflict. Both are required: YAML
+# config-file loading is part of the public surface, not opt-in.
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "=0.0.26"

@@ -147,10 +147,16 @@ async def test_robot_side_write_reaches_every_operator():
         elapsed_ms = (time.monotonic() - start) * 1000.0
         assert propagated, f"propagation took >500ms ({elapsed_ms:.0f}ms)"
 
-        # Each operator's on_active_operator_changed fired at least once with X.
-        assert any(v == "X" for v in seen_a)
-        assert any(v == "X" for v in seen_b)
-        assert any(v == "X" for v in seen_c)
+        # Each operator's on_active_operator_changed fires at least once with
+        # X. Wait for it rather than asserting synchronously: the Rust event
+        # path updates the mirror before firing the callback, and the Python
+        # dispatcher hops the callback onto the asyncio loop via
+        # `call_soon_threadsafe`, so there is a brief window where
+        # `active_operator()` already reads "X" but the user callback has
+        # not appended yet.
+        assert await _wait_for(lambda: any(v == "X" for v in seen_a))
+        assert await _wait_for(lambda: any(v == "X" for v in seen_b))
+        assert await _wait_for(lambda: any(v == "X" for v in seen_c))
     finally:
         for o in (op_a, op_b, op_c):
             await o.disconnect()

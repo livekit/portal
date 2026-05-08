@@ -1,13 +1,9 @@
-# Multi-operator support: spec delta
+# v0.2: multi-operator and HITL recording
 
-Target: **v0.2.0**. First minor bump after the v0.1.x line. Additive on
-both the Python and Rust surfaces. The existing `Portal` / `PortalConfig`
-classes remain in `livekit.portal` and continue to work unchanged. The
-new `Robot` and `Operator` classes are added alongside as the recommended
-surface going forward.
-
-Adds human-in-the-loop and multi-controller support to Portal. Status:
-proposal, pending review.
+Adds multi-controller support and operator-side action subscription for
+HITL recording. Both behaviors are always-on whenever Portal is used,
+regardless of which surface (`Robot`, `Operator`, or the unified
+`Portal`) the caller picks.
 
 ## Motivation
 
@@ -169,17 +165,14 @@ The operator-side `set_active_operator` is fully general. It can claim
 self, hand to a peer, or clear with `None`. Same method name as on the
 robot, different transport.
 
-### Coexistence with the v0.1 surface
+### Direct `Portal` usage
 
-`Portal`, `PortalConfig`, and `Role` stay in `livekit.portal`. Existing code
-keeps working without changes. New code should prefer `Robot` / `Operator`.
-We will mark the unified class as deprecated in a later minor release once
-`Robot` / `Operator` have shipped and the lerobot wrappers have migrated.
-
-The two surfaces do not interoperate inside a single session. A v0.1 robot
-does not publish the new `role` or `active_operator` attributes, and a v0.2
-robot expects every operator to be addressable by free-form identity. Pick
-one surface per room.
+`Portal`, `PortalConfig`, and `Role` stay in `livekit.portal` for callers
+that want the unified surface (advanced use, the FFI host's typed entry
+point). They get the same multi-controller behavior `Robot` / `Operator`
+do — there is no opt-in flag. Choosing the unified class only affects
+which methods the type system exposes; the wire and runtime behavior are
+identical.
 
 ## Defaults
 
@@ -196,16 +189,15 @@ one surface per room.
 
 ## Rust core
 
-Single `Portal` struct stays. The Rust crate is purely additive across
-v0.2 — direct Rust users gain new methods and one new field, no existing
-signature changes.
+Single `Portal` struct. Multi-controller is always-on; there is no
+opt-in flag.
 
-### Multi-controller surface (v0.2 base)
+### Public surface additions
 
 ```rust
 // PortalConfig
-fn set_multi_controller(&mut self, enable: bool);   // default false
-fn multi_controller(&self) -> bool;
+fn set_action_subscription(&mut self, enable: bool);   // default false
+fn action_subscription(&self) -> bool;
 
 // Portal (post-connect)
 fn local_identity(&self) -> Option<String>;
@@ -218,29 +210,6 @@ fn robot_identity(&self) -> Option<String>;
 fn on_operator_joined(&self, cb: impl Fn(&str) + Send + Sync + 'static);
 fn on_operator_left(&self, cb: impl Fn(&str) + Send + Sync + 'static);
 fn on_active_operator_changed(&self, cb: impl Fn(Option<&str>) + Send + Sync + 'static);
-```
-
-Plus internal wiring:
-
-- Constants: `ROLE_ATTR_KEY`, `ACTIVE_OPERATOR_ATTR_KEY`,
-  `SET_ACTIVE_OPERATOR_RPC` (`portal.set_active_operator`).
-- Action gate at the receive site in `portal.rs::handle_room_event`
-  (`DataReceived ACTION_TOPIC` and `ByteStreamOpened ACTION_CHUNK_TOPIC`)
-  drops when `sender != active_operator`.
-- `set_active_operator` RPC handler registered automatically on
-  `Role::Robot` connect.
-- Self-set of `lk.portal.role` attribute on connect (requires
-  `canUpdateOwnMetadata` in the token).
-- `ParticipantConnected` / `ParticipantDisconnected` /
-  `ParticipantAttributesChanged` events update the controller mirror
-  via `classify_and_update`.
-
-### Operator-side action subscription (v0.2 HITL)
-
-```rust
-// PortalConfig
-fn set_action_subscription(&mut self, enable: bool);   // default false
-fn action_subscription(&self) -> bool;
 
 // Action / ActionChunk records gain `sender`
 pub struct Action {
@@ -248,67 +217,59 @@ pub struct Action {
     pub raw_values: HashMap<String, f64>,
     pub timestamp_us: u64,
     pub in_reply_to_ts_us: Option<u64>,
-    pub sender: Option<String>,           // NEW. set at gate time, None on
-                                          //      paths that bypass the gate.
+    pub sender: String,                   // identity at gate time / echo
 }
 
 pub struct ActionChunk {
     // ...existing fields...
-    pub sender: Option<String>,           // NEW.
+    pub sender: String,
 }
 ```
 
-Plus internal wiring:
+### Internal wiring
 
-- `data.rs::handle_data_received` adds a `(Role::Operator, ACTION_TOPIC)`
-  arm behind `multi_controller && action_subscription`. Same deserialize
-  path as the robot, plus stamps `sender` from the participant identity
-  the gate validated.
-- `portal.rs::handle_room_event::ByteStreamOpened` adds a
-  `(Role::Operator, ACTION_CHUNK_TOPIC)` arm behind the same two flags.
+- Constants: `ROLE_ATTR_KEY`, `ACTIVE_OPERATOR_ATTR_KEY`,
+  `SET_ACTIVE_OPERATOR_RPC` (`portal.set_active_operator`).
+- Self-set of `lk.portal.role` attribute on connect (requires
+  `canUpdateOwnMetadata` in the token).
+- `ParticipantConnected` / `ParticipantDisconnected` /
+  `ParticipantAttributesChanged` events update the controller mirror
+  via `classify_and_update`.
+- `set_active_operator` RPC handler registered automatically on
+  `Role::Robot` connect.
+- Action gate at the receive site in `portal.rs::handle_room_event`
+  (`DataReceived ACTION_TOPIC` and `ByteStreamOpened ACTION_CHUNK_TOPIC`)
+  drops when `sender != active_operator`. Sender identity is stamped
+  into the delivered record so recorders can label rows without
+  consulting any room state.
+- `data.rs::handle_data_received` accepts `Role::Operator, ACTION_TOPIC`
+  packets too, behind the `action_subscription` flag, for HITL
+  recording / shadow eval / live monitoring.
 - `Portal::send_action` and `Portal::send_action_chunk`: when
   `action_subscription` is on AND `local_identity == active_operator`,
-  build a record with `sender = local_identity` and call
-  `action.deliver(...)` / the chunk slot's deliver path locally after
-  publishing. Closes the LiveKit "no echo to publisher" gap.
-- Existing `ActionSlot` / `ChunkSlot` structures are reused as-is — they
-  already power the robot-side `on_action` / `on_action_chunk` /
-  `get_action` / `get_action_chunk` API. The operator side just becomes
-  a second writer.
+  call `action.deliver(...)` / the chunk slot's deliver path locally
+  after publishing. Closes the LiveKit "no echo to publisher" gap so
+  `on_action` is uniform regardless of who produced the action.
+- Existing `ActionSlot` / `ChunkSlot` structures are reused as-is —
+  they already power `on_action` / `on_action_chunk` / `get_action` /
+  `get_action_chunk`. The operator side becomes a second writer.
 
 ### What stays unchanged
 
-- All non-multi-controller code paths (transport, codec, sync buffer,
-  RPC plumbing, metrics).
-- Robot-side action handling: gate is on whenever `multi_controller` is
-  on, regardless of `action_subscription`. The new flag is operator-side
-  only.
+- All non-multi-controller code paths: transport, codec, sync buffer,
+  RPC plumbing, metrics.
 - Schema fingerprinting, `WrongRole` errors, dtype validation.
 
 The Python class split (`Robot` / `Operator` / `RobotConfig` /
-`OperatorConfig`) lives in the binding layer; nothing in the Rust core
-encodes the role-specific facade.
+`OperatorConfig`) lives in the binding layer; the Rust core stays
+unified.
 
-## Migration (optional)
+## Token requirements
 
-No mandatory migration. `Portal` / `PortalConfig` / `Role` keep working.
-For projects that want multi-operator or HITL support, the equivalent on
-the new surface:
-
-| v0.1 (still works) | v0.2 (new) |
-|---|---|
-| `from livekit.portal import Portal, PortalConfig, Role` | `from livekit.portal import Robot, RobotConfig` or `Operator, OperatorConfig` |
-| `PortalConfig("session", Role.ROBOT)` | `RobotConfig(session_id="session")` |
-| `PortalConfig("session", Role.OPERATOR)` | `OperatorConfig(session_id="session", identity="...")` |
-| `portal.peer_identity()` (operator) | `op.robot_identity()` |
-| `portal.peer_identity()` (robot) | `robot.operators()` or `robot.active_operator()` |
-
-Token-mint scripts for `Robot` and `Operator` must add
-`canUpdateOwnMetadata` to participant grants. v0.1 token-mint is
-unchanged.
-
-The `livekit-portal` Rust crate is purely additive. Direct Rust users
-gain new methods, no existing ones change.
+All Portal participants self-set the `lk.portal.role` attribute on
+connect, so every token-mint must include `canUpdateOwnMetadata`.
+Connecting with a token missing this grant fails at `set_attributes`
+time with a clear error.
 
 ## lerobot wrappers
 
@@ -383,21 +344,19 @@ Action {
     values: dict,
     raw_values: dict,
     timestamp_us: int,
+    sender: str,                   # gate-time identity (or self on echo)
     in_reply_to_ts_us: Optional[int],
-    sender: Optional[str],         # NEW. set when delivered via the gate.
 }
 
 ActionChunk {
     name, horizon, data, raw_data,
-    timestamp_us, in_reply_to_ts_us,
-    sender: Optional[str],         # NEW.
+    timestamp_us, sender, in_reply_to_ts_us,
 }
 ```
 
-`sender` is `None` for paths that do not flow through the gate (e.g. v0.1
-unified `Portal` callers with `multi_controller` off). Adding the field
-is non-breaking on the Python side (new attribute on the dataclass);
-Rust callers that destructure these records will need a one-line update.
+The local echo path stamps `sender` with the publisher's own identity,
+so an active operator with subscription on sees its own actions on
+`on_action` with `sender = self.local_identity()`.
 
 ### Recording recipe
 
@@ -466,14 +425,6 @@ The Python `Operator` class re-exposes `on_action`, `on_action_chunk`,
 `get_action`, `get_action_chunk` (slots already on the underlying
 Portal; the wrapper just forwards). `OperatorConfig` exposes
 `set_action_subscription(bool)`. Default off — same as the Rust core.
-
-### Migration
-
-Existing `Robot`, `Operator`, and `Portal` callers see no change unless
-they call `set_action_subscription(True)`. The new `sender` field on
-`Action` / `ActionChunk` is `None` on paths that previously delivered
-records, so destructuring keeps working in Python. Rust callers that
-explicitly construct `Action` / `ActionChunk` literals add `sender: None`.
 
 ## End-to-end testing plan
 
@@ -596,25 +547,13 @@ token grant **must** include `canUpdateOwnMetadata`.
 24. **Bad arg type to RPC.** Passing a non-string identity returns a
     validation error. Robot's attribute is unchanged.
 
-### Coexistence
-
-25. **v0.1 `Portal` still works in a v0.2 codebase.** Existing tests for
-    the unified `Portal` continue to pass.
-26. **v0.1 robot + v0.2 operator in same room.** Document expected
-    behavior even if it is "best effort". Likely outcome: operator
-    cannot find the robot via role attribute, falls back to the v0.1
-    identity convention or fails. Test it and pin the behavior.
-27. **v0.2 robot + v0.1 operator in same room.** Likely outcome: v0.1
-    operator's identity is `"operator"`, v0.2 robot's `active_operator`
-    is empty by default, v0.1 operator's actions are dropped. Verify.
-
 ### Observation correctness under multi-operator load
 
-28. **Non-active operator's stream does not affect robot's action sync.**
+25. **Non-active operator's stream does not affect robot's action sync.**
     With 5 operators streaming and 1 active, robot's `on_action` rate
     matches the active operator's send rate. CPU and bandwidth on the
     robot grow linearly with operator count (acceptable for now).
-29. **`on_drop` semantics unchanged.** Multi-operator activity does not
+26. **`on_drop` semantics unchanged.** Multi-operator activity does not
     change observation drop behavior on the operator side. Each operator
     still sees its own observation stream from the robot.
 
@@ -625,29 +564,29 @@ reaches every participant within a bounded window after a write, and
 that the action gate engages on the new value as soon as the mirror
 updates.
 
-30. **Robot-side write reaches every operator within 500 ms.** Three
+27. **Robot-side write reaches every operator within 500 ms.** Three
     operators connected. Robot calls `set_active_operator("X")`. All
     three operators see `op.active_operator() == "X"` within 500 ms
     (LAN test); each operator's `on_active_operator_changed` fires
     exactly once with `"X"`.
-31. **Operator-side write reaches every operator and the robot within
+28. **Operator-side write reaches every operator and the robot within
     500 ms.** Operator A calls `set_active_operator("B")`. The robot's
     own `active_operator()` returns `"B"`, all other operators' mirrors
     return `"B"`, all `on_active_operator_changed` callbacks fire
     exactly once. Pinning the bound at 500 ms covers the extra RPC hop.
-32. **Action acceptance follows the mirror.** Robot calls
+29. **Action acceptance follows the mirror.** Robot calls
     `set_active_operator("policy")`. Within 500 ms, actions sent by
     `"policy"` reach the robot's `on_action` and actions sent by other
     operators do not. After a second `set_active_operator("human")`,
     `"human"` is accepted and `"policy"` is dropped.
-33. **Idempotent write does not fire the change callback.** Robot calls
+30. **Idempotent write does not fire the change callback.** Robot calls
     `set_active_operator("X")` twice with the same value. The second
     call does not fire `on_active_operator_changed`.
-34. **Late joiner reads the current value at connect.** Operator C
+31. **Late joiner reads the current value at connect.** Operator C
     connects after Robot already wrote `set_active_operator("policy")`.
     `c.active_operator()` returns `"policy"` immediately (no
     `_wait_for` polling).
-35. **Cross-write race converges.** Operator A calls
+32. **Cross-write race converges.** Operator A calls
     `set_active_operator("A")` and Operator B calls
     `set_active_operator("B")` within 50 ms of each other. Both writes
     succeed (both RPCs return `Ok`). Final state is deterministic and
@@ -662,45 +601,45 @@ These tests cover the v0.2 HITL recording feature: operators with
 via the same gate the robot uses, the active operator gets local echo,
 and `Action.sender` / `ActionChunk.sender` is set at gate time.
 
-36. **Default is off.** Operator without `set_action_subscription(True)`
+33. **Default is off.** Operator without `set_action_subscription(True)`
     never fires `on_action` even when actions are flowing through the
     room. Verifies we don't accidentally subscribe everyone.
-37. **Recorder receives the active operator's actions.** Recorder
+34. **Recorder receives the active operator's actions.** Recorder
     operator (subscription on) plus an active operator. Active sends
     actions; recorder's `on_action` fires for each, with
     `action.sender == active_operator_identity`.
-38. **Non-active operators are dropped at the recorder.** Two
+35. **Non-active operators are dropped at the recorder.** Two
     operators streaming, only one active. Recorder's `on_action` fires
     only for the active one's actions; the non-active one's are
     silently dropped at the recorder (matching the robot's gate).
-39. **Self-echo when active.** Active operator with subscription on
+36. **Self-echo when active.** Active operator with subscription on
     calls `send_action`. Its own `on_action` fires locally with
     `action.sender == self.local_identity()`. The mirror in
     `get_action()` reflects the latest sent action.
-40. **No echo when inactive.** Operator with subscription on but not
+37. **No echo when inactive.** Operator with subscription on but not
     active calls `send_action` (the gate at the robot will drop it).
     Local `on_action` does not fire — echo only triggers when self ==
     active. The action goes nowhere.
-41. **Recorder sees handoff in action stream.** Recorder + two
+38. **Recorder sees handoff in action stream.** Recorder + two
     operators A and B. A is active; recorder receives A's actions with
     `sender == "A"`. Handoff to B; recorder now receives B's actions
     with `sender == "B"`. The `sender` field flips on the boundary,
     no race between handoff event and label.
-42. **`sender` is set on every delivered action.** Every record fired
+39. **`sender` is set on every delivered action.** Every record fired
     on `on_action` has `sender` populated and equal to the operator
     who produced the action. Verifies the gate-time stamping path.
-43. **Action chunks subscription works.** Recorder subscribes; active
+40. **Action chunks subscription works.** Recorder subscribes; active
     operator sends a chunk; recorder's `on_action_chunk` fires with
     `chunk.sender == active_operator_identity`.
-44. **Pull surface populates on operator side.** Recorder calls
+41. **Pull surface populates on operator side.** Recorder calls
     `get_action()` after an action arrives; returns the latest action.
     `get_action_chunk(name)` returns the latest chunk. Both reflect
     the gate-passed values, not raw firehose.
-45. **Subscription does not affect non-subscribers.** Three operators
+42. **Subscription does not affect non-subscribers.** Three operators
     in the room; only one has `set_action_subscription(True)`. The
     other two never fire `on_action`. Verifies the flag is per-operator
     and does not leak.
-46. **Subscription does not affect the robot.** Robot's `on_action`
+43. **Subscription does not affect the robot.** Robot's `on_action`
     rate is unchanged whether 0, 1, or N operators have subscription
     on. Recorders are pure observers.
 

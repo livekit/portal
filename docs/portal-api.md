@@ -370,11 +370,10 @@ cfg.set_e2ee_key(os.environ["PORTAL_E2EE_KEY"].encode())
 See [e2ee.md](e2ee.md) for key generation, distribution patterns, and coverage
 details.
 
-## Legacy `Portal` class
+## Direct `Portal` usage
 
-`Robot` and `Operator` are role-specific facades around a unified `Portal`
-class that still ships in `livekit.portal`. Existing v0.1 code keeps
-working unchanged:
+`Robot` and `Operator` are role-specific facades around a unified
+`Portal` class that also ships in `livekit.portal` for advanced use:
 
 ```python
 from livekit.portal import DType, Portal, PortalConfig, Role
@@ -382,12 +381,11 @@ cfg = PortalConfig("session", Role.ROBOT)
 portal = Portal(cfg)
 ```
 
-Two practical differences. The unified `Portal` does not enable the
-multi-controller layer by default, so the action gate is off and the
-`role` attribute is not self-set. Mixing a v0.1 `Portal` participant
-with v0.2 `Robot` / `Operator` participants in the same session is not
-supported — pick one surface per room. New code should use `Robot` and
-`Operator`.
+The unified surface gets the same multi-controller behavior `Robot` /
+`Operator` do (gate, role attribute, RPC handler, etc.) — there is no
+opt-in flag. The class choice only affects which methods the type system
+exposes; runtime behavior is identical. New code should usually pick
+`Robot` or `Operator` for the role-correct surface.
 
 ## Reference
 

@@ -80,7 +80,17 @@ def mint_token(
             "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set (see .env.example)"
         )
 
-    grants = api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True)
+    grants = api.VideoGrants(
+        room_join=True,
+        room=room,
+        can_publish=True,
+        can_subscribe=True,
+        # `Robot` and `Operator` self-set the `lk.portal.role` attribute on
+        # connect so other participants can discover them. The grant must
+        # permit it. Tokens that omit this flag fail at connect with a clear
+        # error message.
+        can_update_own_metadata=True,
+    )
 
     from livekit.protocol.room import RoomConfiguration
     room_config = RoomConfiguration(

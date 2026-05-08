@@ -24,9 +24,8 @@ import numpy as np
 from livekit.portal import (
     DType,
     Observation,
-    Portal,
-    PortalConfig,
-    Role,
+    Operator,
+    OperatorConfig,
 )
 from _common import env_float, env_int, load_env, mint_token, required_env
 
@@ -79,13 +78,13 @@ async def main() -> None:
     inference_latency_ms = env_float("PORTAL_INFERENCE_LATENCY_MS", 30.0)
     chunks_per_second = env_float("PORTAL_CHUNKS_PER_SECOND", 5.0)
 
-    cfg = PortalConfig(room, Role.OPERATOR)
+    cfg = OperatorConfig(room, identity=IDENTITY)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(JOINT_FIELDS)
     cfg.add_action_chunk("act", horizon=horizon, fields=JOINT_FIELDS)
     cfg.set_fps(env_int("PORTAL_FPS", 30))
 
-    portal = Portal(cfg)
+    op = Operator(cfg)
 
     # Inference is too slow to run synchronously inside the obs callback —
     # that would block the receive loop. Buffer the latest few obs in a
@@ -98,14 +97,20 @@ async def main() -> None:
         obs_queue.append(obs)
         loop.call_soon_threadsafe(obs_event.set)
 
-    portal.on_observation(on_observation)
+    op.on_observation(on_observation)
 
     print(f"[policy] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
-    await portal.connect(url, token)
+    await op.connect(url, token)
     print(
         f"[policy] connected; emitting chunks horizon={horizon} "
         f"target {chunks_per_second:.1f} Hz, simulated inference {inference_latency_ms:.0f}ms"
     )
+
+    # Self-claim control. Without this the robot drops every action chunk
+    # because `active_operator` defaults to None. In an HITL setup a human
+    # could later preempt with `await op.set_active_operator("human-id")`.
+    await op.set_active_operator(op.local_identity())
+    print(f"[policy] claimed control as '{op.local_identity()}'")
 
     chunks_sent = 0
     last_chunk_at = time.monotonic()
@@ -138,14 +143,14 @@ async def main() -> None:
             # e2e latency loop. The robot side computes
             # `now_robot - obs.timestamp_us` and feeds it into
             # metrics.policy.e2e_us_*.
-            portal.send_action_chunk(
+            op.send_action_chunk(
                 "act", chunk, in_reply_to_ts_us=obs.timestamp_us
             )
             chunks_sent += 1
             last_chunk_at = now
 
             if now - last_log >= 1.0:
-                m = portal.metrics()
+                m = op.metrics()
                 print(
                     f"[policy] chunks_sent={chunks_sent} "
                     f"obs_seen={m.sync.observations_emitted} "
@@ -154,9 +159,8 @@ async def main() -> None:
                 last_log = now
     finally:
         print(f"[policy] sent {chunks_sent} chunks; disconnecting...")
-        await portal.disconnect()
-        portal.close()
-        cfg.close()
+        await op.disconnect()
+        op.close()
 
 
 if __name__ == "__main__":

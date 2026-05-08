@@ -234,7 +234,6 @@ wheels = [
 
 [[package]]
 name = "livekit-portal"
-version = "0.1.0"
 source = { editable = "../../../python/packages/livekit-portal" }
 dependencies = [
     { name = "numpy" },
@@ -243,12 +242,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "livekit-api", marker = "extra == 'examples'", specifier = ">=0.7" },
+    { name = "livekit-api", marker = "extra == 'integration'", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", marker = "extra == 'examples'", specifier = ">=1" },
 ]
-provides-extras = ["dev", "examples"]
+provides-extras = ["dev", "examples", "integration"]
 
 [[package]]
 name = "livekit-portal-inference-example"

@@ -14,7 +14,7 @@ import asyncio
 import math
 import time
 
-from livekit.portal import DType, Observation, Portal, PortalConfig, Role
+from livekit.portal import DType, Observation, Operator, OperatorConfig
 from _common import _dump_metrics, env_float, env_int, load_env, mint_token, periodic_metrics, required_env
 
 IDENTITY = "teleoperator"
@@ -41,13 +41,13 @@ async def main() -> None:
     fps = env_int("PORTAL_FPS", 30)
     duration = env_float("PORTAL_DURATION_SECONDS", 30.0)
 
-    cfg = PortalConfig(room, Role.OPERATOR)
+    cfg = OperatorConfig(room, identity=IDENTITY)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(STATE_SCHEMA)
     cfg.add_action_typed(STATE_SCHEMA)
     cfg.set_fps(fps)
 
-    portal = Portal(cfg)
+    op = Operator(cfg)
 
     observations = 0
     drops = 0
@@ -74,16 +74,23 @@ async def main() -> None:
         drops += len(dropped)
         print(f"[operator] {len(dropped)} state(s) dropped (total {drops})")
 
-    portal.on_observation(on_observation)
-    portal.on_drop(on_drop)
+    op.on_observation(on_observation)
+    op.on_drop(on_drop)
 
     print(f"[operator] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
-    await portal.connect(url, token)
+    await op.connect(url, token)
     print(f"[operator] connected; echoing actions at {fps} fps for {duration:.0f}s")
 
-    metrics_task = asyncio.create_task(periodic_metrics(portal, "[operator]", interval=2.0))
+    # Self-claim control. The robot only accepts actions whose sender matches
+    # `active_operator`, and the default is `None` (drop all). In a HITL or
+    # multi-operator setup a supervisor or another operator might do this
+    # call; here we are the only operator, so claim ourselves.
+    await op.set_active_operator(op.local_identity())
+    print(f"[operator] claimed control as '{op.local_identity()}'")
 
-    await portal.perform_rpc("say", payload="hello from the operator")
+    metrics_task = asyncio.create_task(periodic_metrics(op, "[operator]", interval=2.0))
+
+    await op.perform_rpc("say", payload="hello from the operator")
 
     try:
         # Echo a synthetic action back to the robot at the configured rate.
@@ -97,13 +104,13 @@ async def main() -> None:
             # Send Python floats; the publisher casts bool/int fields at
             # the wire boundary. `mode=5` fits in I8; out-of-range values
             # would saturate and log once per field.
-            portal.send_action(
+            op.send_action(
                 {
                     "j1": 0.5 * math.sin(phase * 2),
                     "j2": 0.5 * math.cos(phase * 2),
                     "j3": 0.0,
-                    "gripper": 1.0 if int(phase) % 2 == 0 else 0.0,
-                    "mode": float(i % 4),
+                    "gripper": int(phase) % 2 == 0,
+                    "mode": i % 4,
                 },
                 timestamp_us=ts_us,
             )
@@ -113,7 +120,7 @@ async def main() -> None:
                 await asyncio.sleep(sleep_for)
 
         print(f"[operator] observations={observations} drops={drops}")
-        _dump_metrics("[operator]", portal.metrics())
+        _dump_metrics("[operator]", op.metrics())
     finally:
         metrics_task.cancel()
         try:
@@ -121,9 +128,8 @@ async def main() -> None:
         except asyncio.CancelledError:
             pass
         print("[operator] disconnecting...")
-        await portal.disconnect()
-        portal.close()
-        cfg.close()
+        await op.disconnect()
+        op.close()
 
 
 if __name__ == "__main__":

@@ -602,7 +602,36 @@ impl Portal {
     ) -> PortalResult<()> {
         let publisher =
             self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Robot))?;
-        publisher.send_map(values, timestamp_us, in_reply_to_ts_us)
+        // Resolve the actual send timestamp the publisher will stamp onto
+        // the wire so the local echo (if any) sees the same value the
+        // robot sees. `send_map` would default `None` to `now_us()` and
+        // we'd pick a slightly later timestamp here.
+        let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
+        publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
+        // Echo path. LiveKit does not fan out a publisher's own data
+        // packets, so without this an active operator would never see its
+        // own action through `on_action`. We only echo when subscription
+        // is on AND we are the active operator: otherwise this would just
+        // be local noise that nobody else in the room sees either.
+        if self.config.action_subscription && self.is_self_active() {
+            let raw_values: Vec<f64> =
+                self.config.action_schema.iter().map(|f| {
+                    values
+                        .get(&f.name)
+                        .map(|v| v.as_f64())
+                        .unwrap_or(0.0)
+                }).collect();
+            let local_id = self.local_identity();
+            let action = crate::data::build_action(
+                send_ts,
+                in_reply_to_ts_us,
+                &self.config.action_schema,
+                &raw_values,
+                local_id,
+            );
+            self.action.deliver(action);
+        }
+        Ok(())
     }
 
     /// Publish an action chunk on the named chunk schema (operator only).
@@ -635,7 +664,42 @@ impl Portal {
                 Err(PortalError::NotConnected)
             };
         };
-        publisher.send(data, timestamp_us, in_reply_to_ts_us)
+        let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
+        publisher.send(data, Some(send_ts), in_reply_to_ts_us)?;
+        // Echo path: same conditions as `send_action`. Unlike scalar
+        // actions where we rebuild the typed values, chunks already carry
+        // raw `f64` columns — we hand the same `data` map straight to the
+        // slot, padded/truncated to the declared horizon to match what
+        // the wire path emits.
+        if self.config.action_subscription && self.is_self_active() {
+            if let Some(slot) = self.chunk_slots.get(chunk_name) {
+                let local_id = self.local_identity();
+                let horizon = slot.spec.horizon as usize;
+                let normalized: HashMap<String, Vec<f64>> = slot
+                    .spec
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let mut col = data.get(&f.name).cloned().unwrap_or_default();
+                        if col.len() < horizon {
+                            col.resize(horizon, 0.0);
+                        } else if col.len() > horizon {
+                            col.truncate(horizon);
+                        }
+                        (f.name.clone(), col)
+                    })
+                    .collect();
+                slot.deliver(ActionChunk {
+                    name: slot.spec.name.clone(),
+                    horizon: slot.spec.horizon,
+                    data: normalized,
+                    timestamp_us: send_ts,
+                    in_reply_to_ts_us,
+                    sender: local_id,
+                });
+            }
+        }
+        Ok(())
     }
 
     // --- RPC ---
@@ -676,6 +740,18 @@ impl Portal {
     /// On Operator side it is a mirror of the robot's attribute.
     pub fn active_operator(&self) -> Option<String> {
         self.controller.active_operator.lock().clone()
+    }
+
+    /// `true` iff this Portal's local identity is the current
+    /// `active_operator`. Used internally by the echo path; exposed so
+    /// callers can decide whether to record their own outgoing actions.
+    fn is_self_active(&self) -> bool {
+        let local = self.local_identity();
+        let active = self.controller.active_operator.lock().clone();
+        match (local, active) {
+            (Some(local), Some(active)) => local == active,
+            _ => false,
+        }
     }
 
     /// Set the active operator. On Robot side this updates the local pointer
@@ -1396,29 +1472,40 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     latch_peer(&ctx.peer_identity, &ctx.config.session, p.identity());
                 }
             }
-            // Multi-controller gate: when running as Robot with multi_controller
-            // enabled, drop incoming actions whose sender identity does not
-            // match `active_operator`. Other topics (state for the operator,
-            // RTT for both) are unaffected. The drop is silent so non-active
-            // operators can keep streaming (e.g. shadow policies) without
-            // affecting the robot. v0.1 callers don't enable the gate so all
-            // actions pass through, preserving the original behavior.
-            if ctx.config.multi_controller
-                && ctx.config.role == Role::Robot
-                && topic.as_str() == ACTION_TOPIC
-            {
-                if let Some(p) = &participant {
-                    let sender = p.identity();
+            // Multi-controller gate. When `multi_controller` is on, drop
+            // incoming actions whose sender does not match `active_operator`.
+            // Applies to both the robot (always processes ACTION_TOPIC) and
+            // operators with `action_subscription` on (the v0.2 HITL path:
+            // recorders, shadow eval, live monitoring). v0.1 callers leave
+            // `multi_controller` off and skip the gate entirely.
+            //
+            // Operators without `action_subscription` short-circuit before
+            // the deserialize so the receive hot path costs nothing for the
+            // common controller-only case.
+            let gate_sender: Option<String> = match (ctx.config.role, topic.as_str()) {
+                (Role::Robot, ACTION_TOPIC) if ctx.config.multi_controller => {
+                    let Some(p) = &participant else { return; };
+                    let sender_id = p.identity().as_str().to_string();
                     let active = ctx.controller.active_operator.lock().clone();
-                    let pass = match active {
-                        Some(active_id) => active_id == sender.as_str(),
-                        None => false,
-                    };
-                    if !pass {
+                    if active.as_deref() != Some(sender_id.as_str()) {
                         return;
                     }
+                    Some(sender_id)
                 }
-            }
+                (Role::Operator, ACTION_TOPIC) => {
+                    if !ctx.config.multi_controller || !ctx.config.action_subscription {
+                        return;
+                    }
+                    let Some(p) = &participant else { return; };
+                    let sender_id = p.identity().as_str().to_string();
+                    let active = ctx.controller.active_operator.lock().clone();
+                    if active.as_deref() != Some(sender_id.as_str()) {
+                        return;
+                    }
+                    Some(sender_id)
+                }
+                _ => None,
+            };
             let output = handle_data_received(
                 &payload,
                 &topic,
@@ -1432,6 +1519,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
                 &ctx.rtt,
+                gate_sender,
             );
             if !output.is_empty() {
                 ctx.obs_sink.dispatch(output);
@@ -1447,7 +1535,17 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // it owns; other applications using byte streams on unrelated
             // topics are left untouched.
             match (ctx.config.role, topic.as_str()) {
-                (Role::Robot, ACTION_CHUNK_TOPIC) => {
+                (Role::Robot, ACTION_CHUNK_TOPIC)
+                | (Role::Operator, ACTION_CHUNK_TOPIC) => {
+                    // Robot always consumes chunks. Operators only consume
+                    // when `action_subscription` is on (HITL recording,
+                    // shadow eval). Bail out early on operators with
+                    // subscription off so we never spawn the read task.
+                    if matches!(ctx.config.role, Role::Operator)
+                        && (!ctx.config.multi_controller || !ctx.config.action_subscription)
+                    {
+                        return;
+                    }
                     let Some(reader) =
                         reader.take_if(|info| info.topic == ACTION_CHUNK_TOPIC)
                     else {
@@ -1491,6 +1589,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                                     &chunk_slots,
                                     &unknown_fp_warns,
                                     &metrics,
+                                    Some(sender_id),
                                 )
                             }
                             Err(e) => {

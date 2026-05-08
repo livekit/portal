@@ -128,6 +128,14 @@ pub struct Action {
     /// action was published unsolicited (no observation it answers to).
     /// Used to derive end-to-end policy latency (`metrics.policy.e2e_us_*`).
     pub in_reply_to_ts_us: Option<u64>,
+    /// Identity of the operator that produced this action, captured at the
+    /// moment the multi-controller gate accepted the packet. `None` on
+    /// paths that bypass the gate (v0.1 unified `Portal` with
+    /// `multi_controller` off, or operator-side echo before the
+    /// active-operator pointer is set). Recording / shadow-eval code
+    /// should use this field rather than `Portal::active_operator()` to
+    /// label rows so the label cannot race with a handoff.
+    pub sender: Option<String>,
 }
 
 /// One action chunk received from the operator. Surfaces in
@@ -156,6 +164,10 @@ pub struct ActionChunk {
     /// the operator passed one to `send_action_chunk`. `None` means the
     /// chunk was published unsolicited.
     pub in_reply_to_ts_us: Option<u64>,
+    /// Identity of the operator that produced this chunk, captured at the
+    /// moment the multi-controller gate accepted the byte stream. See the
+    /// note on `Action::sender` — same semantics.
+    pub sender: Option<String>,
 }
 
 /// One state sample received from the robot. Surfaces in `on_state` and

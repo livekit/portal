@@ -509,6 +509,7 @@ pub(crate) fn dispatch_chunk_payload(
     chunk_slots: &[Arc<ChunkSlot>],
     unknown_fp_warns: &Mutex<HashSet<u32>>,
     metrics: &MetricsRegistry,
+    sender: Option<String>,
 ) {
     if payload.len() < 4 {
         log::warn!("chunk byte stream payload shorter than 4-byte fingerprint header");
@@ -547,6 +548,7 @@ pub(crate) fn dispatch_chunk_payload(
                 data,
                 timestamp_us: send_ts,
                 in_reply_to_ts_us,
+                sender: sender.clone(),
             });
         }
         Err(DecodeError::SchemaMismatch { expected, got }) => {
@@ -560,15 +562,17 @@ pub(crate) fn dispatch_chunk_payload(
 
 /// Build an `Action` from the schema and the decoded f64 values. Kept
 /// here so `handle_data_received` and any test helpers share the same
-/// path.
-fn build_action(
+/// path. `sender` is populated at the gate when known; `None` for paths
+/// that bypass the gate (v0.1 unified Portal, unit tests).
+pub(crate) fn build_action(
     timestamp_us: u64,
     in_reply_to_ts_us: Option<u64>,
     schema: &[FieldSpec],
     values: &[f64],
+    sender: Option<String>,
 ) -> Action {
     let (typed, raw) = to_value_maps(schema, values);
-    Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us }
+    Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us, sender }
 }
 
 fn build_state(
@@ -583,6 +587,11 @@ fn build_state(
 /// Handle a `DataReceived` event. Pushes into the sync buffer if applicable and
 /// returns any observations/drops that resulted, for the caller to dispatch
 /// outside any locks.
+///
+/// `sender` is the identity of the participant who published the packet,
+/// when known (always populated by `portal.rs` for the live receive path).
+/// Stamped into `Action::sender` so recorders can label rows by producer
+/// without consulting any room state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_data_received(
     payload: &[u8],
@@ -597,19 +606,26 @@ pub(crate) fn handle_data_received(
     sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     metrics: &MetricsRegistry,
     rtt: &RttService,
+    sender: Option<String>,
 ) -> SyncOutput {
     if topic == RTT_TOPIC {
         rtt.handle_packet(payload);
         return SyncOutput::empty();
     }
     match (config_role, topic) {
-        (Role::Robot, ACTION_TOPIC) => {
+        (Role::Robot, ACTION_TOPIC) | (Role::Operator, ACTION_TOPIC) => {
             match deserialize_action(payload, action_fp, action_schema) {
                 Ok((send_ts, in_reply_to_ts_us, values)) => {
                     let now = now_us();
                     metrics.record_received(DataStream::Action, send_ts, now);
                     metrics.record_e2e(in_reply_to_ts_us, now);
-                    action.deliver(build_action(send_ts, in_reply_to_ts_us, action_schema, &values));
+                    action.deliver(build_action(
+                        send_ts,
+                        in_reply_to_ts_us,
+                        action_schema,
+                        &values,
+                        sender.clone(),
+                    ));
                 }
                 Err(DecodeError::SchemaMismatch { expected, got }) => {
                     action.warn_mismatch(topic, expected, got);

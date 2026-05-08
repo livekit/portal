@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from livekit.portal import Action, DType, Portal, PortalConfig, Role, RpcInvocationData
+from livekit.portal import Action, DType, Robot, RobotConfig, RpcInvocationData
 from _common import _dump_metrics, env_float, env_int, load_env, mint_token, periodic_metrics, required_env
 
 IDENTITY = "robot"
@@ -87,13 +87,13 @@ async def main() -> None:
     height = env_int("PORTAL_FRAME_HEIGHT", 240)
     duration = env_float("PORTAL_DURATION_SECONDS", 30.0)
 
-    cfg = PortalConfig(room, Role.ROBOT)
+    cfg = RobotConfig(room)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(STATE_SCHEMA)
     cfg.add_action_typed(STATE_SCHEMA)
     cfg.set_fps(fps)
 
-    portal = Portal(cfg)
+    robot_portal = Robot(cfg)
 
     actions_received = 0
 
@@ -107,22 +107,31 @@ async def main() -> None:
             # into a numpy buffer without per-field casting.
             print(
                 f"[robot] action #{actions_received}: ts={action.timestamp_us} "
-                f"values={action.values}"
+                f"values={action.values} from={robot_portal.active_operator()}"
             )
 
-    portal.on_action(on_action)
+    robot_portal.on_action(on_action)
+
+    # Multi-controller awareness: log when an operator joins/leaves and when
+    # control changes hands. Useful for HITL scenarios with several operators
+    # in the room. None of these callbacks are required for the basic loop.
+    robot_portal.on_operator_joined(lambda i: print(f"[robot] operator joined: {i}"))
+    robot_portal.on_operator_left(lambda i: print(f"[robot] operator left: {i}"))
+    robot_portal.on_active_operator_changed(
+        lambda i: print(f"[robot] active operator now: {i}")
+    )
 
     def say(data: RpcInvocationData) -> str:
         print(f"[robot] operator says: {data.payload}")
         return "ok"
 
-    portal.register_rpc_method("say", say)
+    robot_portal.register_rpc_method("say", say)
 
     print(f"[robot] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
-    await portal.connect(url, token)
+    await robot_portal.connect(url, token)
     print(f"[robot] connected; streaming at {fps} fps for {duration:.0f}s")
 
-    metrics_task = asyncio.create_task(periodic_metrics(portal, "[robot]", interval=2.0))
+    metrics_task = asyncio.create_task(periodic_metrics(robot_portal, "[robot]", interval=2.0))
 
     try:
         n_frames = int(duration * fps)
@@ -133,17 +142,17 @@ async def main() -> None:
             phase = i / fps  # seconds
             frame = _make_frame(width, height, phase)
             ts_us = int(time.time() * 1_000_000)
-            portal.send_video_frame(TRACK_NAME, frame, timestamp_us=ts_us)
+            robot_portal.send_video_frame(TRACK_NAME, frame, timestamp_us=ts_us)
             # Send Python-native values; the publisher casts to the declared
             # dtype at the wire boundary. `gripper=True` becomes one byte,
             # `mode=2` becomes one signed byte.
-            portal.send_state(
+            robot_portal.send_state(
                 {
                     "j1": math.sin(phase),
                     "j2": math.cos(phase),
                     "j3": 0.1 * phase,
-                    "gripper": 1.0 if int(phase) % 2 == 0 else 0.0,
-                    "mode": float(int(phase) % 3),
+                    "gripper": int(phase) % 2 == 0,
+                    "mode": int(phase) % 3,
                 },
                 timestamp_us=ts_us,
             )
@@ -152,7 +161,7 @@ async def main() -> None:
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
 
-        _dump_metrics("[robot]", portal.metrics())
+        _dump_metrics("[robot]", robot_portal.metrics())
     finally:
         metrics_task.cancel()
         try:
@@ -160,9 +169,8 @@ async def main() -> None:
         except asyncio.CancelledError:
             pass
         print("[robot] disconnecting...")
-        await portal.disconnect()
-        portal.close()
-        cfg.close()
+        await robot_portal.disconnect()
+        robot_portal.close()
 
 
 if __name__ == "__main__":

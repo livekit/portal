@@ -1,6 +1,6 @@
 """LiveKit Portal robot implementation.
 
-Runs on the operator side. Opens a Portal as ``Role.OPERATOR`` and presents
+Runs on the operator side. Opens a Portal `Operator` session and presents
 the remote physical robot as a local lerobot ``Robot``. When constructed
 with a local lerobot ``Teleoperator`` (e.g. a leader arm, a gamepad), it
 introspects ``action_features`` to derive motor keys automatically. the
@@ -21,9 +21,8 @@ from lerobot.robots.robot import Robot
 from livekit.portal import (
     DEFAULT_MJPEG_QUALITY,
     DType,
-    Portal,
-    PortalConfig,
-    Role,
+    Operator as PortalOperator,
+    OperatorConfig as PortalOperatorConfig,
     VideoCodec,
     frame_bytes_to_numpy_rgb,
 )
@@ -39,6 +38,16 @@ class LiveKitRobotConfig(RobotConfig):
     url: str = ""
     token: str = ""
     session: str = ""
+    # Auto-claim control after connect via
+    # ``set_active_operator(local_identity)``. On for the convenience
+    # single-op case so existing lerobot scripts keep working unchanged.
+    # Turn off in HITL setups where another participant (human
+    # teleoperator, supervisor UI) decides who has control.
+    #
+    # The operator's identity comes from the LiveKit token
+    # (``with_identity(...)`` at mint time). Use a stable token identity
+    # when you want to be named in `set_active_operator` calls from peers.
+    auto_claim_control: bool = True
     fps: int = 30
 
     # Explicit-mode fallbacks used only when no local Teleoperator is passed.
@@ -120,8 +129,8 @@ class LiveKitRobot(Robot):
                 self._obs_features[name] = shape
         self._act_features: dict = {k: float for k in self._action_keys}
 
-        self._portal: Portal | None = None
-        self._portal_cfg: PortalConfig | None = None
+        self._portal: PortalOperator | None = None
+        self._portal_cfg: PortalOperatorConfig | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._connected = False
@@ -157,13 +166,14 @@ class LiveKitRobot(Robot):
             return
         if not self.config.url or not self.config.token:
             raise RuntimeError(
-                "LiveKitRobotConfig.url and .token are required; mint a token"
-                " with Role.OPERATOR grants before calling connect()."
+                "LiveKitRobotConfig.url and .token are required; mint an"
+                " operator-side token with can_update_own_metadata=True"
+                " before calling connect()."
             )
 
         self._start_loop()
 
-        self._portal_cfg = PortalConfig(self.config.session or "lerobot", Role.OPERATOR)
+        self._portal_cfg = PortalOperatorConfig(self.config.session or "lerobot")
         for cam in self._camera_names:
             self._portal_cfg.add_video(
                 cam,
@@ -187,8 +197,16 @@ class LiveKitRobot(Robot):
         self._portal_cfg.set_action_reliable(self.config.action_reliable)
         self._portal_cfg.set_reuse_stale_frames(self.config.reuse_stale_frames)
 
-        self._portal = Portal(self._portal_cfg)
+        self._portal = PortalOperator(self._portal_cfg)
         self._run(self._portal.connect(self.config.url, self.config.token))
+        if self.config.auto_claim_control:
+            # Claim ourselves as the active operator so the robot accepts our
+            # actions. Without this the Portal robot drops every action because
+            # `active_operator` defaults to None. HITL or multi-operator setups
+            # disable this and let a separate participant arbitrate control.
+            local_id = self._portal.local_identity()
+            if local_id is not None:
+                self._run(self._portal.set_active_operator(local_id))
         self._connected = True
 
     def disconnect(self) -> None:
@@ -201,9 +219,7 @@ class LiveKitRobot(Robot):
             if self._portal is not None:
                 self._portal.close()
                 self._portal = None
-            if self._portal_cfg is not None:
-                self._portal_cfg.close()
-                self._portal_cfg = None
+            self._portal_cfg = None
             self._stop_loop()
             self._connected = False
 

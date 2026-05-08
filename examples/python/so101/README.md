@@ -188,7 +188,7 @@ library: `cd ../../.. && bash scripts/build_ffi_python.sh`.
 │      │              │                       │       │              │
 │      ▼              │                       │       ▼              │
 │ LiveKitTeleoperator │◀─── LiveKit Portal ──▶│  LiveKitRobot        │
-│   (Role.ROBOT)      │    (room = LIVEKIT_   │    (Role.OPERATOR)   │
+│   (Portal Robot)    │    (room = LIVEKIT_   │   (Portal Operator)  │
 │                     │     ROOM)             │       │              │
 └─────────────────────┘                       │       ▼              │
                                               │   rerun viewer       │

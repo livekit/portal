@@ -1,8 +1,8 @@
 """Run on the **operator** side.
 
 Drives a local SO-101 leader arm and presents the remote SO-101 follower
-as a local lerobot ``Robot`` over a LiveKit Portal session as
-``Role.OPERATOR``. Each tick: read leader pose, push as action; pull
+as a local lerobot ``Robot`` over a LiveKit Portal `Operator` session.
+Each tick: read leader pose, push as action; pull
 synced observation back (joint positions + camera frame) and stream it
 to a rerun viewer along with Portal transport metrics.
 

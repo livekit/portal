@@ -32,9 +32,6 @@ import pytest
 from livekit.portal import (
     DType,
     Observation,
-    Portal,
-    PortalConfig,
-    Role,
     VideoCodec,
     VideoFrameData,
     frame_bytes_to_numpy_rgb,
@@ -442,26 +439,6 @@ async def test_uniform_fill_byte_exact(pair, fill):
         bytes(received[0].data), received[0].width, received[0].height
     )
     np.testing.assert_array_equal(arr, sent)
-
-
-async def test_operator_send_video_frame_wrong_role(pair):
-    """Operator declared a frame-video track and tries to send into it.
-    Frame-video publishers only spawn on the robot side, so the call must
-    surface as `WrongRole`, not as the misleading `UnknownVideoTrack` it
-    used to return.
-    """
-    pair.robot_cfg.add_video("cam", codec=VideoCodec.PNG)
-    pair.operator_cfg.add_video("cam", codec=VideoCodec.PNG)
-    await pair.start()
-
-    sent = _gradient(8, 8)
-    with pytest.raises(Exception) as excinfo:
-        pair.operator.send_video_frame("cam", sent)
-    # PortalError variants surface as their flat-error class names; the
-    # message embeds the structured detail.
-    assert "WrongRole" in type(excinfo.value).__name__ or "wrong role" in str(
-        excinfo.value
-    ).lower(), f"unexpected error: {type(excinfo.value).__name__}: {excinfo.value}"
 
 
 async def test_publisher_full_metric_increments_on_burst(pair):

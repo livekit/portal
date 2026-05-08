@@ -203,6 +203,10 @@ pub struct Action {
     /// Sender-side observation timestamp this action was produced from,
     /// or `None` for unsolicited publishes.
     pub in_reply_to_ts_us: Option<u64>,
+    /// Identity of the operator that produced this action, captured at
+    /// the active-operator gate (or, for the local echo path, the
+    /// publisher's own identity).
+    pub sender: String,
 }
 
 /// A received action chunk. `data` is `field -> column of length horizon`,
@@ -216,6 +220,9 @@ pub struct ActionChunk {
     pub data: HashMap<String, Vec<f64>>,
     pub timestamp_us: u64,
     pub in_reply_to_ts_us: Option<u64>,
+    /// Identity of the operator that produced this chunk; same semantics
+    /// as `Action::sender`.
+    pub sender: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -448,6 +455,15 @@ pub trait PortalCallbacks: Send + Sync {
     /// Fires for every chunk received. Bindings dispatch by `chunk.name`
     /// to per-chunk user callbacks if needed.
     fn on_action_chunk(&self, chunk: ActionChunk);
+    /// Fires when an operator joins the room (post role-attribute discovery).
+    fn on_operator_joined(&self, identity: String);
+    /// Fires when an operator leaves the room. The robot's
+    /// `active_operator` pointer is **not** auto-cleared on disconnect.
+    fn on_operator_left(&self, identity: String);
+    /// Fires when the robot's `active_operator` attribute changes (or, on
+    /// the Robot side, when the local pointer is updated). Empty string
+    /// means the pointer was cleared.
+    fn on_active_operator_changed(&self, identity: Option<String>);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +546,15 @@ impl PortalConfig {
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
         self.inner.lock().set_e2ee_key(key);
     }
+
+    /// Operator-side opt-in to receiving executed actions ("HITL
+    /// recording"). Off by default. When on, `on_action` / `on_action_chunk`
+    /// / `get_action` / `get_action_chunk` fire on the operator for actions
+    /// the active operator sends, plus a local echo when self == active.
+    /// No-op on the Robot side — the robot always processes actions.
+    pub fn set_action_subscription(&self, enable: bool) {
+        self.inner.lock().set_action_subscription(enable);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +611,7 @@ impl Portal {
                 values: action.raw_values.clone(),
                 timestamp_us: action.timestamp_us,
                 in_reply_to_ts_us: action.in_reply_to_ts_us,
+                sender: action.sender.clone(),
             });
         });
         let cb = callbacks.clone();
@@ -629,6 +655,19 @@ impl Portal {
                 cb.on_action_chunk(actionchunk_from_core(chunk));
             });
         }
+
+        let cb = callbacks.clone();
+        inner.on_operator_joined(move |id| {
+            cb.on_operator_joined(id.to_string());
+        });
+        let cb = callbacks.clone();
+        inner.on_operator_left(move |id| {
+            cb.on_operator_left(id.to_string());
+        });
+        let cb = callbacks.clone();
+        inner.on_active_operator_changed(move |id| {
+            cb.on_active_operator_changed(id.map(|s| s.to_string()));
+        });
 
         Arc::new(Self {
             inner,
@@ -709,6 +748,7 @@ impl Portal {
             values: a.raw_values,
             timestamp_us: a.timestamp_us,
             in_reply_to_ts_us: a.in_reply_to_ts_us,
+            sender: a.sender,
         })
     }
 
@@ -758,12 +798,34 @@ impl Portal {
         self.action_chunks.clone()
     }
 
-    // --- RPC ---
+    // --- Multi-controller ---
 
-    /// Identity of the identified peer, or `None` if Portal has not yet
-    /// seen any Portal-topic traffic from a remote participant.
-    pub fn peer_identity(&self) -> Option<String> {
-        self.inner.peer_identity()
+    /// Own LiveKit identity once connected. `None` before `connect()`.
+    pub fn local_identity(&self) -> Option<String> {
+        self.inner.local_identity()
+    }
+
+    /// Identity of the operator the robot is currently listening to, or
+    /// `None`. On Robot side, the local pointer. On Operator side, a mirror
+    /// of the robot's `lk.portal.active_operator` attribute.
+    pub fn active_operator(&self) -> Option<String> {
+        self.inner.active_operator()
+    }
+
+    /// Set the active operator. Local + broadcast on Robot side. RPC to
+    /// the robot on Operator side. Pass `None` to clear.
+    pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
+        self.inner.set_active_operator(identity).await.map_err(Into::into)
+    }
+
+    /// Currently-connected operator identities (excluding self), sorted.
+    pub fn operators(&self) -> Vec<String> {
+        self.inner.operators()
+    }
+
+    /// Robot's identity if discovered, else `None`. Operator-side helper.
+    pub fn robot_identity(&self) -> Option<String> {
+        self.inner.robot_identity()
     }
 
     /// Register a method handler. Handlers may be registered before or
@@ -828,6 +890,7 @@ fn actionchunk_from_core(c: &core::ActionChunk) -> ActionChunk {
         data: c.data.clone(),
         timestamp_us: c.timestamp_us,
         in_reply_to_ts_us: c.in_reply_to_ts_us,
+        sender: c.sender.clone(),
     }
 }
 

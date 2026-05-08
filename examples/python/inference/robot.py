@@ -27,9 +27,8 @@ import numpy as np
 from livekit.portal import (
     ActionChunk,
     DType,
-    Portal,
-    PortalConfig,
-    Role,
+    Robot,
+    RobotConfig,
 )
 from _common import env_float, env_int, fmt_us, load_env, mint_token, required_env
 
@@ -110,13 +109,13 @@ async def main() -> None:
     horizon = env_int("PORTAL_HORIZON", 20)
     duration = env_float("PORTAL_DURATION_SECONDS", 20.0)
 
-    cfg = PortalConfig(room, Role.ROBOT)
+    cfg = RobotConfig(room)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(JOINT_FIELDS)
     cfg.add_action_chunk("act", horizon=horizon, fields=JOINT_FIELDS)
     cfg.set_fps(fps)
 
-    portal = Portal(cfg)
+    robot_portal = Robot(cfg)
     player = ChunkPlayer()
 
     chunks_received = 0
@@ -126,10 +125,10 @@ async def main() -> None:
         chunks_received += 1
         player.push(chunk)
 
-    portal.on_action_chunk("act", on_chunk)
+    robot_portal.on_action_chunk("act", on_chunk)
 
     print(f"[robot] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
-    await portal.connect(url, token)
+    await robot_portal.connect(url, token)
     print(
         f"[robot] connected; streaming {fps} fps for {duration:.0f}s, "
         f"playing back chunks of horizon {horizon}"
@@ -150,10 +149,10 @@ async def main() -> None:
             # timestamp_us becomes the operator's `obs.timestamp_us`,
             # which the policy passes back as `in_reply_to_ts_us` —
             # closing the e2e latency loop.
-            portal.send_video_frame(
+            robot_portal.send_video_frame(
                 TRACK_NAME, _make_frame(320, 240, phase), timestamp_us=ts_us
             )
-            portal.send_state(
+            robot_portal.send_state(
                 {
                     "j1": math.sin(phase),
                     "j2": math.cos(phase),
@@ -172,12 +171,13 @@ async def main() -> None:
 
             now = time.monotonic()
             if now - last_log >= 1.0:
-                m = portal.metrics()
+                m = robot_portal.metrics()
                 age = player.age_ms()
                 age_str = "-" if age is None else f"{age:.0f}ms"
                 print(
                     f"[robot] t={i // fps:>2}s "
                     f"chunks={chunks_received} chunk_age={age_str} "
+                    f"active={robot_portal.active_operator()} "
                     f"e2e={fmt_us(m.policy.e2e_us_p50)}/{fmt_us(m.policy.e2e_us_p95)} "
                     f"(p50/p95) correlated={m.policy.correlated_received} "
                     f"rtt={fmt_us(m.rtt.rtt_us_last)}"
@@ -189,7 +189,7 @@ async def main() -> None:
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
 
-        m = portal.metrics()
+        m = robot_portal.metrics()
         print()
         print("[robot] final policy metrics:")
         print(f"  e2e_us_p50:           {fmt_us(m.policy.e2e_us_p50)}")
@@ -199,9 +199,8 @@ async def main() -> None:
         print(f"  chunk_jitter:         {fmt_us(m.transport.action_chunk_jitter_us)}")
     finally:
         print("[robot] disconnecting...")
-        await portal.disconnect()
-        portal.close()
-        cfg.close()
+        await robot_portal.disconnect()
+        robot_portal.close()
 
 
 if __name__ == "__main__":

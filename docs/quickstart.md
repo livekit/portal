@@ -75,7 +75,15 @@ from livekit.protocol.room import RoomConfiguration
 
 def mint(identity: str, room: str, key: str, secret: str) -> str:
     grants = api.VideoGrants(
-        room_join=True, room=room, can_publish=True, can_subscribe=True,
+        room_join=True,
+        room=room,
+        can_publish=True,
+        can_subscribe=True,
+        # `Robot` and `Operator` self-set the `lk.portal.role` attribute on
+        # connect so other participants can discover them. The grant must
+        # include this; tokens that omit it fail at connect with a clear
+        # error.
+        can_update_own_metadata=True,
     )
     return (
         api.AccessToken(key, secret)
@@ -90,7 +98,9 @@ def mint(identity: str, room: str, key: str, secret: str) -> str:
     )
 ```
 
-Identities must be unique within the room (e.g. `"robot"`, `"operator"`).
+Identities must be unique within the room. The robot is a singleton so
+`"robot"` is fine; operators get their own free-form identity per
+participant (e.g. `"policy-v1"`, `"binh-teleop"`, `"supervisor-ui"`).
 
 ## 3. Robot host
 
@@ -102,20 +112,22 @@ capture rate.
 
 ```python
 import asyncio, time
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Robot, RobotConfig
 
 async def main():
-    cfg = PortalConfig("session-1", Role.ROBOT)
+    cfg = RobotConfig("session-1")
     cfg.add_video("cam1")
     cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.set_fps(30)
 
-    portal = Portal(cfg)
+    portal = Robot(cfg)
 
     def on_action(a):
         # a.values is the action dict.
         # a.timestamp_us is the sender's clock.
+        # a comes from whichever operator currently holds control. Other
+        # operators in the room are silently dropped at the gate.
         robot.send_action(a.values)
 
     portal.on_action(on_action)
@@ -142,16 +154,16 @@ synchronized observations and publishes actions.
 
 ```python
 import asyncio
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Operator, OperatorConfig
 
 async def main():
-    cfg = PortalConfig("session-1", Role.OPERATOR)
+    cfg = OperatorConfig("session-1")
     cfg.add_video("cam1")
     cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.set_fps(30)
 
-    portal = Portal(cfg)
+    portal = Operator(cfg)
 
     def on_observation(obs):
         # obs.frames: dict[str, np.ndarray]      # one per registered video track
@@ -161,7 +173,13 @@ async def main():
         portal.send_action(action)
 
     portal.on_observation(on_observation)
-    await portal.connect(URL, mint("operator", "session-1", API_KEY, API_SECRET))
+    await portal.connect(URL, mint("policy-v1", "session-1", API_KEY, API_SECRET))
+
+    # Robot starts with `active_operator=None` and drops every action.
+    # Self-claim so this operator's actions are accepted. In a HITL setup
+    # a human or supervisor could later call
+    # `await portal.set_active_operator("human-id")` to preempt.
+    await portal.set_active_operator(portal.local_identity())
 
     while running:
         await asyncio.sleep(1)

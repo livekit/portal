@@ -1,6 +1,6 @@
 """LiveKit Portal teleoperator implementation.
 
-Runs on the physical robot. Opens a Portal as ``Role.ROBOT``, publishing
+Runs on the physical robot. Opens a Portal `Robot` session, publishing
 camera frames + state via ``send_feedback(...)`` and surfacing received
 actions via ``get_action()``. When constructed with a local lerobot
 ``Robot`` instance, it introspects ``observation_features`` /
@@ -22,9 +22,8 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 from livekit.portal import (
     DEFAULT_MJPEG_QUALITY,
     DType,
-    Portal,
-    PortalConfig,
-    Role,
+    Robot as PortalRobot,
+    RobotConfig as PortalRobotConfig,
     VideoCodec,
 )
 
@@ -109,8 +108,8 @@ class LiveKitTeleoperator(Teleoperator):
         for name, shape in self._cameras.items():
             self._feedback_features[name] = shape
 
-        self._portal: Portal | None = None
-        self._portal_cfg: PortalConfig | None = None
+        self._portal: PortalRobot | None = None
+        self._portal_cfg: PortalRobotConfig | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
         self._connected = False
@@ -144,13 +143,14 @@ class LiveKitTeleoperator(Teleoperator):
             return
         if not self.config.url or not self.config.token:
             raise RuntimeError(
-                "LiveKitTeleoperatorConfig.url and .token are required; mint a"
-                " token with Role.ROBOT grants before calling connect()."
+                "LiveKitTeleoperatorConfig.url and .token are required; mint"
+                " a robot-side token with can_update_own_metadata=True before"
+                " calling connect()."
             )
 
         self._start_loop()
 
-        self._portal_cfg = PortalConfig(self.config.session or "lerobot", Role.ROBOT)
+        self._portal_cfg = PortalRobotConfig(self.config.session or "lerobot")
         for cam in self._camera_names:
             self._portal_cfg.add_video(
                 cam,
@@ -174,7 +174,7 @@ class LiveKitTeleoperator(Teleoperator):
         self._portal_cfg.set_action_reliable(self.config.action_reliable)
         self._portal_cfg.set_reuse_stale_frames(self.config.reuse_stale_frames)
 
-        self._portal = Portal(self._portal_cfg)
+        self._portal = PortalRobot(self._portal_cfg)
         self._run(self._portal.connect(self.config.url, self.config.token))
         self._connected = True
 
@@ -188,9 +188,7 @@ class LiveKitTeleoperator(Teleoperator):
             if self._portal is not None:
                 self._portal.close()
                 self._portal = None
-            if self._portal_cfg is not None:
-                self._portal_cfg.close()
-                self._portal_cfg = None
+            self._portal_cfg = None
             self._stop_loop()
             self._connected = False
 

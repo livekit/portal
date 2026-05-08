@@ -108,6 +108,19 @@ pub struct PortalConfig {
     pub(crate) ping_ms: u64,
     pub(crate) reuse_stale_frames: bool,
     pub(crate) shared_key: Option<Vec<u8>>,
+    /// Operator-side: subscribe to executed actions. Off by default —
+    /// most operators are pure controllers and do not want the bandwidth
+    /// or callback noise. Recorders, shadow eval policies, and live
+    /// monitoring opt in. When on:
+    ///   * `(Role::Operator, ACTION_TOPIC)` packets are deserialized and
+    ///     fired through `on_action` / `get_action`, gated by
+    ///     `sender == active_operator` (same gate the robot applies)
+    ///   * `(Role::Operator, ACTION_CHUNK_TOPIC)` byte streams are read
+    ///     and fired through `on_action_chunk` / `get_action_chunk`
+    ///   * `send_action` / `send_action_chunk` echo a local copy after
+    ///     publish when `local_identity == active_operator`, since
+    ///     LiveKit does not fan out a publisher's own data packets
+    pub(crate) action_subscription: bool,
 }
 
 impl PortalConfig {
@@ -128,7 +141,22 @@ impl PortalConfig {
             ping_ms: 1000,
             reuse_stale_frames: false,
             shared_key: None,
+            action_subscription: false,
         }
+    }
+
+    /// Operator-side opt-in for receiving executed actions. Off by default.
+    /// When on, the operator subscribes to actions and chunks from the
+    /// active operator and gets a local echo of its own sends when active.
+    /// Used by recorders, shadow eval policies, and monitoring UIs.
+    /// No-op on the Robot side — the robot always processes actions.
+    pub fn set_action_subscription(&mut self, enable: bool) {
+        self.action_subscription = enable;
+    }
+
+    /// Whether action subscription is enabled for this config.
+    pub fn action_subscription(&self) -> bool {
+        self.action_subscription
     }
 
     /// Set a shared E2EE key. Both peers must call this with the same key

@@ -5,17 +5,24 @@ full detail, see [synchronization.md](synchronization.md).
 
 ## Roles
 
-Portal is a **two-role** system. Each side commits to one role at
-`PortalConfig` construction. Calling the wrong send method returns `WrongRole`.
+Portal is a **two-role** system. You instantiate either `Robot` or
+`Operator`, configured by `RobotConfig` / `OperatorConfig`. There is one
+robot per session and any number of operators (humans teleoperating,
+policies running inference, supervisors arbitrating control).
 
-| Role | Publishes | Subscribes |
+| Class | Publishes | Subscribes |
 |------|-----------|------------|
-| `Role.ROBOT` | video frames, state | actions |
-| `Role.OPERATOR` | actions | video frames + state → **synced observations** |
+| `Robot` | video frames, state | actions |
+| `Operator` | actions | video frames + state → **synced observations** |
 
 Both sides register the same schema via `add_video`, `add_state_typed`, and
 `add_action_typed`. Field names, per-field dtypes, and camera names must
 match across sides.
+
+The robot listens to one operator at a time, identified by the
+`active_operator` pointer. Other operators stream silently and are dropped
+at the gate. See [Multi-controller](#multi-controller) for the full
+mechanics.
 
 ## The observation model
 
@@ -37,13 +44,46 @@ observation fires only when every registered video track has a frame within
 the match window for a given state. Unmatched states are reported separately
 via `on_drop`.
 
+## Multi-controller
+
+The robot exposes a single piece of state, `active_operator`, naming the
+operator it is currently listening to. Anyone in the room can read or
+update it. The robot's attribute is the source of truth. Other operators
+can keep streaming actions without affecting the robot — the gate at the
+receive site drops anything from a sender that is not active.
+
+```text
++-----------+        +------------------------------+        +-----------+
+| operator  | -----> |                              | <----- | operator  |
+| policy-v1 |        |  robot (active_operator =    |        | human-id  |
++-----------+        |             "policy-v1")     |        +-----------+
+                     |                              |
+                     |  on_action(...) fires only   |
+                     |  for "policy-v1". Actions    |
+                     |  from "human-id" are dropped |
+                     |  silently at the gate.       |
+                     +------------------------------+
+```
+
+Handoff: a human runs `await op.set_active_operator("human-id")` to
+preempt; from then on the robot accepts the human's actions and drops the
+policy's. Either side (robot or operator) can call this; the operator
+form sends an RPC to the robot which then writes its own attribute.
+
+When the active operator disconnects, the pointer **stays pinned** so a
+reconnect with the same identity resumes control. To reassign, anyone in
+the room can call `set_active_operator("...")` with a new identity.
+
+Mechanics, edge cases, and the full set of methods live in
+[Portal API: Multi-controller](portal-api.md#multi-controller-and-active_operator).
+
 ## End-to-end picture
 
 ```mermaid
 flowchart LR
-    subgraph Robot["Robot side  (Role.ROBOT)"]
+    subgraph Robot["Robot side"]
         H[Hardware<br/>cameras + motors]
-        RP[Portal<br/>publish frames/state<br/>subscribe actions]
+        RP[Robot Portal<br/>publish frames/state<br/>subscribe actions]
         H --> RP
     end
 
@@ -53,8 +93,8 @@ flowchart LR
         A[(Action stream<br/>SCTP)]
     end
 
-    subgraph Operator["Operator side  (Role.OPERATOR)"]
-        OP[Portal<br/>subscribe + sync<br/>publish actions]
+    subgraph Operator["Operator side"]
+        OP[Operator Portal<br/>subscribe + sync<br/>publish actions]
         M[VLA policy /<br/>teleop / viewer]
         OP --> M
         M --> OP

@@ -78,7 +78,12 @@ def _e2ee_pair(key: bytes | None, operator_key: bytes | None = "same") -> tuple:
 
     def _token(identity: str) -> str:
         grants = api.VideoGrants(
-            room_join=True, room=room, can_publish=True, can_subscribe=True
+            room_join=True,
+            room=room,
+            can_publish=True,
+            can_subscribe=True,
+            # Portal self-sets the `lk.portal.role` attribute on connect.
+            can_update_own_metadata=True,
         )
         return (
             api.AccessToken(API_KEY, API_SECRET)

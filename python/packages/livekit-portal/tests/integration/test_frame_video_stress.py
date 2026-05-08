@@ -22,10 +22,7 @@ import pytest
 from livekit.portal import (
     DType,
     Observation,
-    Portal,
-    PortalConfig,
     PortalError,
-    Role,
     VideoCodec,
     VideoFrameData,
     frame_bytes_to_numpy_rgb,
@@ -285,7 +282,8 @@ async def test_operator_joins_after_robot_starts_sending():
 
     try:
         # Robot connects first, sends a few "pre-operator" frames.
-        p.robot = Portal(p.robot_cfg)
+        from livekit.portal import Robot, Operator
+        p.robot = Robot(p.robot_cfg)
         await p.robot.connect(URL, _make_token("robot", p.room))
         rgb = _gradient(160, 120)
         for i in range(5):
@@ -296,7 +294,7 @@ async def test_operator_joins_after_robot_starts_sending():
         # Operator joins. Frames sent before this won't surface (no peer
         # subscribed). Then send post-join frames and assert delivery.
         received: list[VideoFrameData] = []
-        p.operator = Portal(p.operator_cfg)
+        p.operator = Operator(p.operator_cfg)
         await p.operator.connect(URL, _make_token("operator", p.room))
         p.operator.on_video_frame(
             "cam", lambda name, f: received.append(f)
@@ -645,13 +643,15 @@ async def test_repeated_reconnect_no_leak():
     byte stream would manifest as a hang or send error here."""
     from integration.conftest import URL, _make_token, Pair
 
+    from livekit.portal import Robot, Operator
+
     for cycle in range(5):
         p = Pair()
         p.robot_cfg.add_video("cam", codec=VideoCodec.MJPEG, quality=80)
         p.operator_cfg.add_video("cam", codec=VideoCodec.MJPEG, quality=80)
         try:
-            p.robot = Portal(p.robot_cfg)
-            p.operator = Portal(p.operator_cfg)
+            p.robot = Robot(p.robot_cfg)
+            p.operator = Operator(p.operator_cfg)
             await p.robot.connect(URL, _make_token("robot", p.room))
             await p.operator.connect(URL, _make_token("operator", p.room))
             await asyncio.sleep(0.2)

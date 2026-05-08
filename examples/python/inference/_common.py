@@ -52,7 +52,14 @@ def mint_token(identity: str, room: str, ttl_hours: int = 1) -> str:
             "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set (see .env.example)"
         )
     grants = api.VideoGrants(
-        room_join=True, room=room, can_publish=True, can_subscribe=True
+        room_join=True,
+        room=room,
+        can_publish=True,
+        can_subscribe=True,
+        # `Robot` and `Operator` self-set the `lk.portal.role` attribute on
+        # connect so participants can discover one another. The grant must
+        # permit it.
+        can_update_own_metadata=True,
     )
     return (
         api.AccessToken(key, secret)

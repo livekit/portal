@@ -190,8 +190,8 @@ Shared between both plugin configs:
 | `fps` | `30` | Unified capture rate. Drives the sync match window. |
 | `motors` | `()` | Fallback motor names (no `.pos`) when no local instance is passed. |
 | `camera_names` | `()` | Camera names; on the operator side must match the robot side's publisher. |
-| `slack` | `None` | `PortalConfig.set_slack(...)`. Bump under jitter or asymmetric rates. |
-| `tolerance` | `None` | `PortalConfig.set_tolerance(...)`. `1.5` widens to ±1 frame; `0.5` drops on loss. |
+| `slack` | `None` | `set_slack(...)`. Bump under jitter or asymmetric rates. |
+| `tolerance` | `None` | `set_tolerance(...)`. `1.5` widens to ±1 frame; `0.5` drops on loss. |
 | `state_reliable` | `True` | SCTP reliable delivery for state. |
 | `action_reliable` | `True` | SCTP reliable delivery for action. |
 | `reuse_stale_frames` | `False` | Re-emit the last matched frame when a newer one hasn't arrived yet. |
@@ -200,6 +200,7 @@ Operator-only (`LiveKitRobotConfig`):
 
 | Field | Default | Purpose |
 |---|---|---|
+| `auto_claim_control` | `True` | Self-claim the active-operator pointer on connect so the robot accepts our actions. Disable in HITL setups where another participant arbitrates. The operator's room identity comes from the LiveKit token the user mints (`with_identity(...)`), not from this config. |
 | `camera_height` | `480` | Camera shape advertised in `observation_features` (metadata only — Portal accepts any resolution at runtime). |
 | `camera_width` | `640` | See above. |
 | `observation_features` | `None` | Full state schema when the robot reports state beyond the action keys (e.g. `{"shoulder.pos": float, "slider.pos": float}`). When set, replaces the default "state mirrors action" assumption. Follows lerobot's `observation_features` convention: scalar types for motors, shape tuples for cameras. |
@@ -211,7 +212,7 @@ See [tuning.md](tuning.md) for the math behind `fps`, `slack`, and `tolerance`.
 - **send (robot side)**: `robot.get_observation()["camera"]` must be `np.ndarray` of shape `(H, W, 3)` dtype uint8 in RGB order. That's what every stock lerobot Robot subclass already returns.
 - **receive (operator side)**: `livekit_robot.get_observation()["camera"]` is the same shape/dtype/order. Portal delivers I420 on the wire; the plugin converts to RGB on the way out.
 
-If you already have I420 bytes from a hardware pipeline, bypass the plugin and call `livekit.portal.Portal.send_video_frame(...)` directly (it takes RGB bytes, not I420). The ergonomic numpy path is the only thing the plugin adds on top.
+If you already have I420 bytes from a hardware pipeline, bypass the plugin and call `livekit.portal.Robot.send_video_frame(...)` directly (it takes RGB bytes, not I420). The ergonomic numpy path is the only thing the plugin adds on top.
 
 ## Async internals
 
@@ -236,6 +237,8 @@ The loop also handles Portal's callback dispatch, so if you ever want to registe
 | Observations always empty | First sync hasn't happened yet. Confirm both sides joined the same room, camera names match, and `fps` is identical. |
 | Observations always empty (state only) | State schema mismatch — the operator and robot declared different motor keys. A `WARNING` log fires on the first dropped sync naming the missing and unexpected fields. Check `logging` output or set `logging.basicConfig(level=logging.WARNING)` to surface it. Use `observation_features` on `LiveKitRobotConfig` to declare the exact schema the robot sends. |
 | High `states_dropped` | Encoder is throttling or a camera stopped publishing. Compare `portal.metrics().transport.frames_received` (operator) with `frames_sent` (robot). |
-| `WrongRole` `PortalError` | You're calling `send_action` on the robot side or `send_state`/`send_video_frame` on the operator side. Role is fixed at `PortalConfig` construction. |
+| `WrongRole` `PortalError` | You're calling `send_action` on the robot side or `send_state`/`send_video_frame` on the operator side. Role is fixed by which class you instantiated (`Robot` vs `Operator`). |
+| Robot receives no actions, no errors | `active_operator` is unset or pointing somewhere else. The plugin auto-claims on connect by default; if you turned `auto_claim_control` off, claim explicitly via `plugin._portal.set_active_operator(...)` or have a peer (supervisor, human) do it. |
+| `failed to publish role attribute (token may be missing canUpdateOwnMetadata)` | Token-mint omitted `can_update_own_metadata=True`. The new `Robot` / `Operator` classes self-set the role attribute on connect; the grant must allow it. |
 | `InvalidFrameDimensions` | Frame width or height is odd. Portal requires even dimensions for I420 chroma subsampling. |
 | `ValueError: ... cannot infer schema` | Constructor got neither a local instance nor `motors`/`camera_names` on the config. Pass one or the other. |

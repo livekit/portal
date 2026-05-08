@@ -13,12 +13,12 @@ def say(data):
     print(f"operator says: {data.payload}")
     return "ok"
 
-portal.register_rpc_method("say", say)
+robot.register_rpc_method("say", say)
 ```
 
 ```python
 # Operator side: invoke it
-reply = await portal.perform_rpc("say", payload="hello")
+reply = await op.perform_rpc("say", payload="hello")
 ```
 
 Handlers may be `def` or `async def` and **must return a string**.
@@ -47,13 +47,24 @@ Any other exception becomes a generic application error (code 1500).
 ## Routing
 
 `perform_rpc` routes to the peer Portal has identified (whoever has sent
-Portal-topic traffic first). If no peer is known yet but the room has a single
-remote participant, it's used as a fallback. Pass `destination="identity"`
-explicitly for rooms with multiple participants.
+Portal-topic traffic first). If no peer is known yet but the room has a
+single remote participant, it's used as a fallback. With multiple
+operators in the room, the robot's identity is unambiguous (singleton),
+but if you ever need to address a specific operator (a supervisor sending
+a message to one peer, for instance), pass `destination` explicitly.
 
 ```python
-await portal.perform_rpc("home", payload="{}", destination="robot")
+# Operator → robot
+await op.perform_rpc("home", payload="{}", destination=op.robot_identity())
+
+# Robot → operator (e.g. send something to a specific operator)
+await robot.perform_rpc("notify", payload="ack", destination="policy-v1")
 ```
+
+Portal also reserves one built-in RPC: `portal.set_active_operator`, used
+internally by the operator-side `set_active_operator(...)` method to ask
+the robot to update its attribute. You generally call the high-level
+method rather than invoking the RPC by name.
 
 ## Payload format and limits
 

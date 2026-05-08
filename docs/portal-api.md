@@ -401,6 +401,23 @@ op.metrics() / op.reset_metrics()
 await op.connect(url, token) / await op.disconnect()
 ```
 
+## Loading a config from YAML
+
+`RobotConfig`, `OperatorConfig`, and `PortalConfig` each have
+`from_yaml_str` / `from_yaml_file` classmethods that build the config
+from a shareable YAML file. The file describes the wire contract only
+— schemas, video tracks, sync knobs — and `session`, `role`, and the
+E2EE key are supplied at the call site. The same file is reusable
+across the robot and operator processes.
+
+```python
+from livekit.portal import RobotConfig
+
+cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
+```
+
+See [Config from YAML](config-file.md) for the schema reference.
+
 ## End-to-end encryption
 
 Call `cfg.set_e2ee_key(key: bytes)` before `connect`. Both peers must use the
@@ -436,6 +453,8 @@ exposes; runtime behavior is identical. New code should usually pick
 ## Reference
 
 - [Concepts](concepts.md). Roles, observation model, frame format.
+- [Config from YAML](config-file.md). Build configs from a shareable
+  file instead of declaring them in code.
 - [Frame video](frame-video.md). Codec choice, latency math, wire format
   for byte-stream-based per-frame video.
 - [Tuning](tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates.

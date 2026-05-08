@@ -1,0 +1,30 @@
+# Example portal config matching the basic/ robot.py + teleoperator.py
+# scripts. Loaded via `RobotConfig.from_yaml_file(...)` and
+# `OperatorConfig.from_yaml_file(...)` in robot_yaml.py / teleoperator_yaml.py.
+#
+# The file describes the shareable wire contract only: schemas, video
+# tracks, sync knobs. Identity (session, role, E2EE key) is supplied at
+# load time so the same file is reusable across robot and operator.
+
+version: 1
+
+fps: 30
+
+videos:
+  - { name: cam1, codec: h264 }
+
+# Mixed-dtype state and action schema. Both peers must declare the same
+# fields in the same order; a fingerprint mismatch drops the packets.
+state:
+  - { name: j1, dtype: f32 }
+  - { name: j2, dtype: f32 }
+  - { name: j3, dtype: f32 }
+  - { name: gripper, dtype: bool }
+  - { name: mode, dtype: i8 }
+
+action:
+  - { name: j1, dtype: f32 }
+  - { name: j2, dtype: f32 }
+  - { name: j3, dtype: f32 }
+  - { name: gripper, dtype: bool }
+  - { name: mode, dtype: i8 }

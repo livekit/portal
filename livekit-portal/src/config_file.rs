@@ -1,9 +1,9 @@
 //! YAML config-file loader for `PortalConfig`.
 //!
-//! Gated behind the `config-file` Cargo feature. Lets users describe the
-//! wire contract (schemas, video tracks, sync knobs) once in a YAML file
-//! and load it as a `PortalConfig` at runtime, supplying `session` and
-//! `role` as kwargs since those are per-process identity, not shareable.
+//! Lets users describe the wire contract (schemas, video tracks, sync
+//! knobs) once in a YAML file and load it as a `PortalConfig` at runtime,
+//! supplying `session` and `role` at the call site since those are
+//! per-process identity, not shareable.
 //!
 //! The file format is versioned: every document must declare `version: 1`
 //! at the top level. Unknown majors are rejected so additive changes can

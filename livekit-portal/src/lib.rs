@@ -1,6 +1,5 @@
 pub mod codec;
 pub mod config;
-#[cfg(feature = "config-file")]
 pub mod config_file;
 mod data;
 pub mod dtype;
@@ -17,7 +16,6 @@ mod video;
 
 pub use codec::Codec;
 pub use config::{ChunkSpec, FieldSpec, FrameVideoSpec, PortalConfig};
-#[cfg(feature = "config-file")]
 pub use config_file::ConfigFileError;
 pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use dtype::DType;

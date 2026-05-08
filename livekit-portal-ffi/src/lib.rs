@@ -385,6 +385,36 @@ impl From<core::PortalError> for PortalError {
 
 pub type PortalResult<T> = Result<T, PortalError>;
 
+/// Errors raised by `PortalConfig::from_yaml_str`. Mirrors
+/// `livekit_portal::ConfigFileError` and is exposed as its own UniFFI
+/// error type so bindings can catch YAML problems separately from
+/// runtime portal failures.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum ConfigFileError {
+    #[error("yaml parse error: {0}")]
+    Parse(String),
+    #[error("io error: {0}")]
+    Io(String),
+    #[error("unsupported config-file version {got}; this build supports version {supported}")]
+    UnsupportedVersion { got: u32, supported: u32 },
+    #[error("invalid config: {0}")]
+    Invalid(String),
+}
+
+impl From<core::ConfigFileError> for ConfigFileError {
+    fn from(e: core::ConfigFileError) -> Self {
+        match e {
+            core::ConfigFileError::Parse(s) => ConfigFileError::Parse(s),
+            core::ConfigFileError::Io(e) => ConfigFileError::Io(e.to_string()),
+            core::ConfigFileError::UnsupportedVersion { got, supported } => {
+                ConfigFileError::UnsupportedVersion { got, supported }
+            }
+            core::ConfigFileError::Invalid(s) => ConfigFileError::Invalid(s),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RPC types
 // ---------------------------------------------------------------------------
@@ -482,6 +512,21 @@ impl PortalConfig {
         Arc::new(Self { inner: Mutex::new(core::PortalConfig::new(session, role.into())) })
     }
 
+    /// Build a `PortalConfig` from a YAML string. The file describes the
+    /// shareable wire contract (schemas, video tracks, sync knobs);
+    /// `session` and `role` are supplied here because they're per-process
+    /// identity. The shared E2EE key, when used, must be applied with
+    /// `set_e2ee_key` after loading.
+    #[uniffi::constructor]
+    pub fn from_yaml_str(
+        yaml: String,
+        session: String,
+        role: Role,
+    ) -> Result<Arc<Self>, ConfigFileError> {
+        let cfg = core::PortalConfig::from_yaml_str(&yaml, session, role.into())?;
+        Ok(Arc::new(Self { inner: Mutex::new(cfg) }))
+    }
+
     /// Declare a video track. `codec` picks both the encoding and the wire
     /// transport: `H264` rides the WebRTC media path; `Mjpeg`, `Png`, and
     /// `Raw` ride a reliable per-frame byte-stream channel and the
@@ -554,6 +599,53 @@ impl PortalConfig {
     /// No-op on the Robot side — the robot always processes actions.
     pub fn set_action_subscription(&self, enable: bool) {
         self.inner.lock().set_action_subscription(enable);
+    }
+
+    /// Declared WebRTC video track names (H264).
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.lock().video_tracks().to_vec()
+    }
+
+    /// Declared byte-stream video tracks (Raw / Png / Mjpeg) with codec
+    /// and per-codec quality.
+    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+        self.inner
+            .lock()
+            .frame_video_tracks()
+            .iter()
+            .map(|s| FrameVideoSpec {
+                name: s.name.clone(),
+                codec: s.codec.into(),
+                quality: s.quality,
+            })
+            .collect()
+    }
+
+    /// Declared state schema, in declaration order.
+    pub fn state_schema(&self) -> Vec<FieldSpec> {
+        self.inner
+            .lock()
+            .state_schema()
+            .iter()
+            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
+            .collect()
+    }
+
+    /// Declared action schema, in declaration order.
+    pub fn action_schema(&self) -> Vec<FieldSpec> {
+        self.inner
+            .lock()
+            .action_schema()
+            .iter()
+            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
+            .collect()
+    }
+
+    /// Declared action chunks. Used by bindings that load a config from
+    /// YAML and need to mirror chunk schemas into their own typed-state
+    /// tracking after construction.
+    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
+        self.inner.lock().action_chunks().iter().map(chunkspec_from_core).collect()
     }
 }
 

@@ -93,7 +93,7 @@ class Pair:
     def __init__(self) -> None:
         self.room = f"stress-{int(time.time()*1000)}-{os.urandom(2).hex()}"
         self.robot_cfg = RobotConfig(self.room)
-        self.operator_cfg = OperatorConfig(self.room, identity="operator")
+        self.operator_cfg = OperatorConfig(self.room)
         self.robot_cfg.add_state_typed([("j", DType.F32)])
         self.operator_cfg.add_state_typed([("j", DType.F32)])
         self.robot: Optional[Robot] = None

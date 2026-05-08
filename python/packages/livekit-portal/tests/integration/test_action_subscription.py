@@ -83,7 +83,7 @@ def _make_operator(
     subscribe: bool = False,
     with_chunk: bool = False,
 ) -> Operator:
-    cfg = OperatorConfig(room, identity=identity)
+    cfg = OperatorConfig(room)
     cfg.add_state_typed(_STATE_SCHEMA)
     cfg.add_action_typed(_ACTION_SCHEMA)
     if with_chunk:
@@ -108,13 +108,13 @@ async def _wait_for(
 
 
 # ---------------------------------------------------------------------------
-# Active operator propagation (spec 30-35)
+# Active operator propagation (spec 27-32)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_robot_side_write_reaches_every_operator():
-    """Spec 30: Robot writes; all operators see the new value within 500 ms,
+    """Spec 27: Robot writes; all operators see the new value within 500 ms,
     and `on_active_operator_changed` fires exactly once on each.
     """
     room = _room_name()
@@ -159,7 +159,7 @@ async def test_robot_side_write_reaches_every_operator():
 
 @pytest.mark.asyncio
 async def test_operator_side_write_reaches_robot_and_peers():
-    """Spec 31: Operator A calls set_active_operator("B"). Robot's own mirror
+    """Spec 28: Operator A calls set_active_operator("B"). Robot's own mirror
     and all other operators' mirrors converge within 500 ms (extra RPC hop).
     """
     room = _room_name()
@@ -196,7 +196,7 @@ async def test_operator_side_write_reaches_robot_and_peers():
 
 @pytest.mark.asyncio
 async def test_action_acceptance_follows_mirror():
-    """Spec 32: After handoff, the new active operator's actions reach the
+    """Spec 29: After handoff, the new active operator's actions reach the
     robot's `on_action` and the previous operator's are dropped.
     """
     room = _room_name()
@@ -238,7 +238,7 @@ async def test_action_acceptance_follows_mirror():
 
 @pytest.mark.asyncio
 async def test_idempotent_write_does_not_refire_callback():
-    """Spec 33: writing the same value twice fires
+    """Spec 30: writing the same value twice fires
     `on_active_operator_changed` only on the first transition.
     """
     room = _room_name()
@@ -266,7 +266,7 @@ async def test_idempotent_write_does_not_refire_callback():
 
 @pytest.mark.asyncio
 async def test_late_joiner_reads_current_value_at_connect():
-    """Spec 34: a late-joining operator reads `active_operator` immediately
+    """Spec 31: a late-joining operator reads `active_operator` immediately
     after connect, no `_wait_for` needed.
     """
     room = _room_name()
@@ -295,7 +295,7 @@ async def test_late_joiner_reads_current_value_at_connect():
 
 @pytest.mark.asyncio
 async def test_concurrent_writes_converge():
-    """Spec 35: two operators race set_active_operator. Both calls succeed.
+    """Spec 32: two operators race set_active_operator. Both calls succeed.
     Final state is the same on every participant (LiveKit serializes
     attribute writes through the server).
     """
@@ -336,13 +336,13 @@ async def test_concurrent_writes_converge():
 
 
 # ---------------------------------------------------------------------------
-# Operator-side action subscription (spec 36-46)
+# Operator-side action subscription (spec 33-43)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_default_subscription_is_off():
-    """Spec 36: an operator without `set_action_subscription(True)` never
+    """Spec 33: an operator without `set_action_subscription(True)` never
     fires `on_action`, even when actions flow.
     """
     room = _room_name()
@@ -373,7 +373,7 @@ async def test_default_subscription_is_off():
 
 @pytest.mark.asyncio
 async def test_recorder_receives_active_operator_actions():
-    """Spec 37: a recorder operator with subscription on receives the
+    """Spec 34: a recorder operator with subscription on receives the
     active operator's actions, with `action.sender` set to the producer.
     """
     room = _room_name()
@@ -407,7 +407,7 @@ async def test_recorder_receives_active_operator_actions():
 
 @pytest.mark.asyncio
 async def test_non_active_operators_dropped_at_recorder():
-    """Spec 38: a recorder receives actions only from the active operator;
+    """Spec 35: a recorder receives actions only from the active operator;
     others are dropped at the recorder's gate (matching the robot).
     """
     room = _room_name()
@@ -441,7 +441,7 @@ async def test_non_active_operators_dropped_at_recorder():
 
 @pytest.mark.asyncio
 async def test_self_echo_when_active():
-    """Spec 39: an active operator with subscription on receives its own
+    """Spec 36: an active operator with subscription on receives its own
     actions through `on_action` via the local echo path.
     """
     room = _room_name()
@@ -472,7 +472,7 @@ async def test_self_echo_when_active():
 
 @pytest.mark.asyncio
 async def test_no_echo_when_inactive():
-    """Spec 40: an operator with subscription on but not active does not
+    """Spec 37: an operator with subscription on but not active does not
     fire `on_action` on its own sends. Echo only triggers when self ==
     active.
     """
@@ -505,7 +505,7 @@ async def test_no_echo_when_inactive():
 
 @pytest.mark.asyncio
 async def test_recorder_sees_handoff_in_action_stream():
-    """Spec 41: across a handoff, the recorder's action stream flips
+    """Spec 38: across a handoff, the recorder's action stream flips
     `sender` from old to new without race.
     """
     room = _room_name()
@@ -548,7 +548,7 @@ async def test_recorder_sees_handoff_in_action_stream():
 
 @pytest.mark.asyncio
 async def test_sender_set_on_every_delivered_action():
-    """Spec 42: every record delivered through `on_action` has `sender`
+    """Spec 39: every record delivered through `on_action` has `sender`
     populated.
     """
     room = _room_name()
@@ -582,7 +582,7 @@ async def test_sender_set_on_every_delivered_action():
 
 @pytest.mark.asyncio
 async def test_chunk_subscription_works():
-    """Spec 43: action chunks subscription delivers chunks to the recorder
+    """Spec 40: action chunks subscription delivers chunks to the recorder
     with `chunk.sender` populated.
     """
     room = _room_name()
@@ -613,7 +613,7 @@ async def test_chunk_subscription_works():
 
 @pytest.mark.asyncio
 async def test_pull_surface_populates_on_operator_side():
-    """Spec 44: `get_action()` and `get_action_chunk(name)` return the
+    """Spec 41: `get_action()` and `get_action_chunk(name)` return the
     latest gate-passed values on the recorder.
     """
     room = _room_name()
@@ -654,7 +654,7 @@ async def test_pull_surface_populates_on_operator_side():
 
 @pytest.mark.asyncio
 async def test_subscription_does_not_leak_across_operators():
-    """Spec 45: enabling subscription on one operator does not affect the
+    """Spec 42: enabling subscription on one operator does not affect the
     others. Per-config flag, scoped to the participant.
     """
     room = _room_name()
@@ -692,7 +692,7 @@ async def test_subscription_does_not_leak_across_operators():
 
 @pytest.mark.asyncio
 async def test_subscription_does_not_affect_robot():
-    """Spec 46: number of subscribed operators in the room does not change
+    """Spec 43: number of subscribed operators in the room does not change
     the robot's `on_action` rate.
     """
     room = _room_name()

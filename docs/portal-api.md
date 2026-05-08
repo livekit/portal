@@ -116,7 +116,7 @@ import asyncio
 from livekit.portal import DType, Operator, OperatorConfig
 
 async def main():
-    cfg = OperatorConfig("session", identity="policy-v1")
+    cfg = OperatorConfig("session")
     cfg.add_video("camera1")
     cfg.add_video("camera2")
     cfg.add_state_typed([
@@ -207,8 +207,54 @@ portal.on_active_operator_changed(lambda new_identity: ...)
   `lk.portal.role` attribute on connect; without the grant the call
   fails.
 
-For HITL patterns and the full design rationale, see
-[`spec.md`](../spec.md).
+## Operator-side action subscription (HITL recording)
+
+By default an operator only sends actions; it does not see what the
+robot ends up executing. Recorders, shadow-evaluation policies, and
+live-monitoring UIs need that view. Turn it on with one config flag:
+
+```python
+cfg = OperatorConfig("session")
+cfg.add_action_typed([("a", DType.F32)])     # required to deserialize
+cfg.set_action_subscription(True)
+op = Operator(cfg)
+op.on_action(lambda a: log.append(a))
+```
+
+When enabled, the operator runs the same active-operator gate the robot
+uses. `on_action` / `on_action_chunk` fire only for the active operator's
+output, and `get_action()` / `get_action_chunk(name)` mirror the
+latest gate-passed value. Off by default — most operators are pure
+controllers and do not want the bandwidth or callback noise.
+
+**Self-echo when active.** LiveKit does not fan a publisher's own data
+packets back to itself, so an active operator with subscription on would
+otherwise miss its own actions. Portal closes the gap by firing the
+local callback after `send_action` / `send_action_chunk` whenever
+`local_identity == active_operator`. An inactive subscriber sending an
+action gets no echo — the gate would have dropped it on the receive side
+too, so nothing reaches the robot or the local callback.
+
+**Sender attribution.** Every `Action` and `ActionChunk` carries a
+`sender` field stamped at gate time (or, for echo, the publisher's own
+identity). Use it for dataset labels rather than `active_operator()` —
+the latter can race against a handoff that already moved the pointer
+forward by the time the callback runs.
+
+```python
+def on_action(action):
+    log.append({
+        "ts_us": action.timestamp_us,
+        "in_reply_to": action.in_reply_to_ts_us,
+        "sender": action.sender,         # gate-time identity
+        "values": action.values,
+    })
+```
+
+The same shape covers shadow eval (replace logging with a `model.compare`
+call) and live monitoring (push to a UI websocket). One flag covers
+both subscription and self-echo by design — the single-knob behaviour
+matches the common recorder + HITL self-record cases.
 
 ## Typed values on receive
 

@@ -38,16 +38,15 @@ class LiveKitRobotConfig(RobotConfig):
     url: str = ""
     token: str = ""
     session: str = ""
-    # Operator-side identity. Used by Portal's multi-controller layer to
-    # route the active-operator pointer. Defaults to ``"operator"`` to
-    # preserve the v0.1 single-operator UX. Set explicitly when running
-    # multiple operators (HITL with a human + a policy, ensemble policies,
-    # etc.) so each gets a unique identity.
-    identity: str = "operator"
-    # Auto-claim control after connect via ``set_active_operator(identity)``.
-    # On for the convenience single-op case so existing lerobot scripts keep
-    # working unchanged. Turn off in HITL setups where another participant
-    # (human teleoperator, supervisor UI) decides who has control.
+    # Auto-claim control after connect via
+    # ``set_active_operator(local_identity)``. On for the convenience
+    # single-op case so existing lerobot scripts keep working unchanged.
+    # Turn off in HITL setups where another participant (human
+    # teleoperator, supervisor UI) decides who has control.
+    #
+    # The operator's identity comes from the LiveKit token
+    # (``with_identity(...)`` at mint time). Use a stable token identity
+    # when you want to be named in `set_active_operator` calls from peers.
     auto_claim_control: bool = True
     fps: int = 30
 
@@ -174,10 +173,7 @@ class LiveKitRobot(Robot):
 
         self._start_loop()
 
-        self._portal_cfg = PortalOperatorConfig(
-            self.config.session or "lerobot",
-            identity=self.config.identity,
-        )
+        self._portal_cfg = PortalOperatorConfig(self.config.session or "lerobot")
         for cam in self._camera_names:
             self._portal_cfg.add_video(
                 cam,

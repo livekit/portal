@@ -41,7 +41,7 @@ async def main() -> None:
     fps = env_int("PORTAL_FPS", 30)
     duration = env_float("PORTAL_DURATION_SECONDS", 30.0)
 
-    cfg = OperatorConfig(room, identity=IDENTITY)
+    cfg = OperatorConfig(room)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(STATE_SCHEMA)
     cfg.add_action_typed(STATE_SCHEMA)

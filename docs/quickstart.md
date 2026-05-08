@@ -157,7 +157,7 @@ import asyncio
 from livekit.portal import DType, Operator, OperatorConfig
 
 async def main():
-    cfg = OperatorConfig("session-1", identity="policy-v1")
+    cfg = OperatorConfig("session-1")
     cfg.add_video("cam1")
     cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])

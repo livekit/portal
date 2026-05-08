@@ -104,7 +104,6 @@ except ImportError:  # pragma: no cover
 def _validate_send_values(
     values: Dict[str, Any],
     schema: List[FieldSpec],
-    stream: str,
 ) -> None:
     """Reject a send payload whose values' Python types disagree with the
     declared dtype. Mirrors the core Rust `PortalError::DtypeMismatch`
@@ -902,7 +901,7 @@ class Portal:
         float dtypes. A mismatch raises `PortalError.DtypeMismatch`
         before any packet is sent.
         """
-        _validate_send_values(values, self._state_schema, "state")
+        _validate_send_values(values, self._state_schema)
         self._inner.send_state(values, timestamp_us)
 
     def send_action(
@@ -919,7 +918,7 @@ class Portal:
         (`metrics.policy.e2e_us_*`). Leave it `None` for unsolicited
         publishes (teleop, idle commands).
         """
-        _validate_send_values(values, self._action_schema, "action")
+        _validate_send_values(values, self._action_schema)
         self._inner.send_action(values, timestamp_us, in_reply_to_ts_us)
 
     def send_action_chunk(
@@ -1252,19 +1251,15 @@ class OperatorConfig(_RoleConfigBase):
     """Operator-side session config. Same declarative surface as
     `RobotConfig`; the Role is pinned to `Role.OPERATOR`.
 
-    `identity` is informational. The actual LiveKit participant identity
-    comes from the access token. Setting it here lets your own code know
-    which identity it is supposed to claim, but does not validate against
-    the token. Defaults to `None`; callers that want a stable identity
-    should generate one and use it for both `OperatorConfig.identity` and
-    the token mint.
+    Identity is set on the LiveKit access token (`with_identity(...)` at
+    mint time) and read back via `Operator.local_identity()` after
+    `connect()`. There is no config-level identity field — the token is
+    the only source of truth, and accepting one here would only let the
+    two disagree.
     """
 
-    __slots__ = ("identity",)
-
-    def __init__(self, session: str, identity: Optional[str] = None) -> None:
+    def __init__(self, session: str) -> None:
         super().__init__(session, Role.OPERATOR)
-        self.identity = identity
 
 
 class Robot:
@@ -1396,11 +1391,10 @@ class Operator:
     want the unified surface can keep using `Portal` directly.
     """
 
-    __slots__ = ("_portal", "_identity_hint")
+    __slots__ = ("_portal",)
 
     def __init__(self, config: OperatorConfig) -> None:
         self._portal = Portal(config._inner)
-        self._identity_hint = config.identity
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1503,14 +1497,6 @@ class Operator:
 
     def local_identity(self) -> Optional[str]:
         return self._portal.local_identity()
-
-    @property
-    def identity_hint(self) -> Optional[str]:
-        """Identity supplied to `OperatorConfig`, if any. Informational —
-        the LiveKit participant identity comes from the token, not this
-        field. Use `local_identity()` for the actual connected identity.
-        """
-        return self._identity_hint
 
     def active_operator(self) -> Optional[str]:
         return self._portal.active_operator()

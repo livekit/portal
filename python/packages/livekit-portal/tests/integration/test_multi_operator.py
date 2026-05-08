@@ -76,7 +76,7 @@ def _make_robot(room: str, *, seed_active: Optional[str] = None) -> Robot:
 
 
 def _make_operator(room: str, identity: str) -> Operator:
-    cfg = OperatorConfig(room, identity=identity)
+    cfg = OperatorConfig(room)
     cfg.add_state_typed(_state_schema())
     cfg.add_action_typed(_action_schema())
     return Operator(cfg)
@@ -440,12 +440,12 @@ async def test_chunk_dropped_when_sender_not_active():
     cfg_robot.add_action_chunk("ck", horizon=4, fields=[("a", DType.F32)])
     robot = Robot(cfg_robot)
 
-    cfg_op_a = OperatorConfig(room, identity="op-a")
+    cfg_op_a = OperatorConfig(room)
     cfg_op_a.add_state_typed(_state_schema())
     cfg_op_a.add_action_chunk("ck", horizon=4, fields=[("a", DType.F32)])
     op_a = Operator(cfg_op_a)
 
-    cfg_op_b = OperatorConfig(room, identity="op-b")
+    cfg_op_b = OperatorConfig(room)
     cfg_op_b.add_state_typed(_state_schema())
     cfg_op_b.add_action_chunk("ck", horizon=4, fields=[("a", DType.F32)])
     op_b = Operator(cfg_op_b)

@@ -1,7 +1,7 @@
 """Run on the **physical SO-101** side.
 
 Drives a local SO-101 follower with one OpenCV camera, and exposes it over
-a LiveKit Portal session as `Role.ROBOT`. Pulls actions from the remote
+a LiveKit Portal `Robot` session. Pulls actions from the remote
 operator each tick and forwards them to the arm; pushes the arm's
 observation (joint positions + camera frame) back upstream.
 

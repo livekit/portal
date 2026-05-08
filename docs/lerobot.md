@@ -200,8 +200,7 @@ Operator-only (`LiveKitRobotConfig`):
 
 | Field | Default | Purpose |
 |---|---|---|
-| `identity` | `"operator"` | Portal operator identity. Set per-instance when running multiple operators (HITL, ensemble policies). |
-| `auto_claim_control` | `True` | Self-claim the active-operator pointer on connect so the robot accepts our actions. Disable in HITL setups where another participant arbitrates. |
+| `auto_claim_control` | `True` | Self-claim the active-operator pointer on connect so the robot accepts our actions. Disable in HITL setups where another participant arbitrates. The operator's room identity comes from the LiveKit token the user mints (`with_identity(...)`), not from this config. |
 | `camera_height` | `480` | Camera shape advertised in `observation_features` (metadata only — Portal accepts any resolution at runtime). |
 | `camera_width` | `640` | See above. |
 | `observation_features` | `None` | Full state schema when the robot reports state beyond the action keys (e.g. `{"shoulder.pos": float, "slider.pos": float}`). When set, replaces the default "state mirrors action" assumption. Follows lerobot's `observation_features` convention: scalar types for motors, shape tuples for cameras. |

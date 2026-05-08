@@ -116,6 +116,28 @@ impl ControllerState {
         self.operators.lock().clear();
         *self.robot_identity.lock() = None;
     }
+
+    /// Partial clear used on `RoomEvent::Reconnected`. Drops the per-room
+    /// rosters (`operators`, `robot_identity`) so post-reconnect
+    /// `ParticipantConnected` events can rebuild them from scratch, but
+    /// keeps `active_operator` pinned. Two reasons:
+    ///
+    /// * **Robot side.** The robot's `active_operator` is the source of
+    ///   truth (mirrored as its own `lk.portal.active_operator` attribute).
+    ///   The robot ignores attribute events on its local identity (see
+    ///   `ParticipantAttributesChanged` filter), and the SDK never fires
+    ///   `ParticipantConnected` for self, so a full clear here would leave
+    ///   the gate stuck at `None` until something explicitly re-set it —
+    ///   silently halting control across a transient reconnect.
+    /// * **Operator side.** The mirror is reseeded by the next
+    ///   `ParticipantConnected` for the robot (via `classify_and_update`).
+    ///   `classify_and_update` only fires `on_active_operator_changed` on
+    ///   a value change, so retaining a stale value across the reconnect
+    ///   does not produce a spurious callback when it gets re-read.
+    fn clear_for_reconnect(&self) {
+        self.operators.lock().clear();
+        *self.robot_identity.lock() = None;
+    }
 }
 
 /// Classify a participant by their `lk.portal.role` attribute. Returns
@@ -426,7 +448,11 @@ impl Portal {
             // Most common cause: the token grant did not include
             // `canUpdateOwnMetadata`. Surface a clear error so callers fix
             // their token-mint script rather than silently leaving the
-            // participant unidentified.
+            // participant unidentified. Roll back the partial state we
+            // already wrote (LP slot, RPC handler bindings) so a retry
+            // starts from a clean slate.
+            self.rollback_partial_connect();
+            let _ = room.close().await;
             return Err(PortalError::Room(format!(
                 "failed to publish role attribute (token may be missing canUpdateOwnMetadata): {e}"
             )));
@@ -455,9 +481,21 @@ impl Portal {
             );
         }
 
-        match self.config.role {
-            Role::Robot => self.setup_robot(&room).await?,
-            Role::Operator => self.setup_operator(&room),
+        let setup_result = match self.config.role {
+            Role::Robot => self.setup_robot(&room).await,
+            Role::Operator => {
+                self.setup_operator(&room);
+                Ok(())
+            }
+        };
+        if let Err(e) = setup_result {
+            // setup_robot can fail mid-way through publishing video tracks.
+            // Its own rollback already clears the partial video_publishers
+            // map; we still need to undo the LP slot, controller mirror,
+            // and any other state written above before bailing.
+            self.rollback_partial_connect();
+            let _ = room.close().await;
+            return Err(e);
         }
 
         let rtt = Arc::new(RttService::spawn(
@@ -563,7 +601,9 @@ impl Portal {
             .lock()
             .clone()
             .ok_or(PortalError::WrongRole(Role::Operator))?;
-        publisher.send_map(values, timestamp_us, None)
+        // State has no echo path; drop the wire-values vector that
+        // `send_map` returns for action callers.
+        publisher.send_map(values, timestamp_us, None).map(|_| ())
     }
 
     /// Publish an action (operator only).
@@ -586,29 +626,30 @@ impl Portal {
         // robot sees. `send_map` would default `None` to `now_us()` and
         // we'd pick a slightly later timestamp here.
         let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
-        publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
+        let wire_values = publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
         // Echo path. LiveKit does not fan out a publisher's own data
         // packets, so without this an active operator would never see its
         // own action through `on_action`. We only echo when subscription
         // is on AND we are the active operator: otherwise this would just
         // be local noise that nobody else in the room sees either.
+        //
+        // `wire_values` is what the receiver will reconstruct after decode:
+        // post-carry-forward (so omitted fields keep their last-sent value
+        // rather than reading as 0.0) and post-saturation (so out-of-range
+        // inputs match the clipped wire bytes). Building the echo from the
+        // caller's input map directly would silently diverge whenever a
+        // partial update or saturating value is involved.
         if self.config.action_subscription && self.is_self_active() {
             // We only echo when self is the active operator, which means
             // we are connected and have a local identity. Unwrap is safe.
             let local_id = self
                 .local_identity()
                 .expect("local_identity is Some when self == active_operator");
-            let raw_values: Vec<f64> = self
-                .config
-                .action_schema
-                .iter()
-                .map(|f| values.get(&f.name).map(|v| v.as_f64()).unwrap_or(0.0))
-                .collect();
             let action = crate::data::build_action(
                 send_ts,
                 in_reply_to_ts_us,
                 &self.config.action_schema,
-                &raw_values,
+                &wire_values,
                 local_id,
             );
             self.action.deliver(action);
@@ -959,6 +1000,44 @@ impl Portal {
         let handlers = self.rpc_handlers.lock().clone();
         for (method, handler) in handlers {
             register_handler_on(lp, method, handler);
+        }
+    }
+
+    /// Reset Portal-side state written during a `connect()` that failed
+    /// before reaching the final commit (where `conn.room` / `conn.event_task`
+    /// would be stored). Mirrors the cleanup `disconnect()` does, except it
+    /// (a) doesn't take the lifecycle lock — `connect()` already holds it —
+    /// and (b) leaves the room handle for the caller to close, since the
+    /// failing connect path holds it as a local. Without this, a failed
+    /// connect would leave a stale `LocalParticipant` slot, RPC handler
+    /// bindings on a dropped LP, and partial publisher maps that the next
+    /// `connect()` (or any pre-connect getter) would still see.
+    fn rollback_partial_connect(&self) {
+        *self.local_participant.lock() = None;
+        self.controller.clear();
+        {
+            let mut receivers = self.video_receivers.lock();
+            for receiver in receivers.values() {
+                receiver.abort();
+            }
+            receivers.clear();
+        }
+        self.video_publishers.lock().clear();
+        self.frame_video_publishers.lock().clear();
+        *self.state_publisher.lock() = None;
+        *self.action_publisher.lock() = None;
+        self.chunk_publishers.lock().clear();
+        if let Some(sb) = self.sync_buffer.lock().take() {
+            sb.lock().clear();
+        }
+        self.obs_sink.clear();
+        self.action.clear();
+        self.state.clear();
+        for slot in self.chunk_slots.values() {
+            slot.clear();
+        }
+        for slots in self.video_tracks.values() {
+            slots.clear();
         }
     }
 
@@ -1645,11 +1724,13 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             for slots in ctx.video_tracks.values() {
                 slots.clear();
             }
-            // Multi-controller mirror is per-connection; clear and let the
-            // post-reconnect ParticipantConnected / AttributesChanged events
-            // repopulate. The robot's `active_operator` server-side attribute
-            // is preserved, so the mirror lands on the right value soon after.
-            ctx.controller.clear();
+            // Reset the per-room rosters but keep `active_operator` pinned —
+            // the robot has no self-event to re-read its own attribute, and
+            // the operator-side mirror gets reseeded by the post-reconnect
+            // `ParticipantConnected` for the robot (idempotent on equal
+            // values). Clearing it here would silently stall control on the
+            // robot side across any transient reconnect.
+            ctx.controller.clear_for_reconnect();
         }
         _ => {}
     }

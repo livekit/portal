@@ -129,16 +129,22 @@ impl DataPublisher {
     ///
     /// Typed values are widened to `f64` via `TypedValue::as_f64` before
     /// carry-forward; the widening is lossless for every supported dtype.
+    ///
+    /// Returns the f64 vector that was actually shipped on the wire — that
+    /// is, the post-carry-forward, post-saturation snapshot the receiver
+    /// will reconstruct after decode. The active-operator self-echo path
+    /// uses this to record exactly what the robot will execute, even when
+    /// the caller passed a partial update or an out-of-range value.
     pub fn send_map(
         &self,
         map: &HashMap<String, TypedValue>,
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
+    ) -> PortalResult<Vec<f64>> {
         self.check_dtypes(map)?;
         self.warn_unknown_keys(map);
         let ts = timestamp_us.unwrap_or_else(now_us);
-        let (payload, saturated_indices) = {
+        let (payload, saturated_indices, wire_values) = {
             let mut last = self.last_values.lock();
             apply_carry_forward(&self.schema, &mut last, map);
             let out = match self.stream {
@@ -156,7 +162,18 @@ impl DataPublisher {
                     "DataPublisher only handles scalar state/action; chunks go through ChunkPublisher"
                 ),
             };
-            (out.payload, out.saturated_indices)
+            // Compute the f64 view a receiver would reconstruct: each value
+            // round-tripped through its declared dtype so out-of-range
+            // inputs reflect the saturated wire bytes, matching what
+            // `deserialize_action` plus `to_value_maps` produce on the
+            // other side. Cheap (one match per field, no allocation
+            // beyond the result vec).
+            let wire_values: Vec<f64> = last
+                .iter()
+                .zip(self.schema.iter())
+                .map(|(v, f)| TypedValue::from_f64(*v, f.dtype).as_f64())
+                .collect();
+            (out.payload, out.saturated_indices, wire_values)
         };
         if !saturated_indices.is_empty() {
             self.warn_saturated(&saturated_indices);
@@ -183,7 +200,7 @@ impl DataPublisher {
                 // already in teardown.
             }
         }
-        Ok(())
+        Ok(wire_values)
     }
 
     /// Reject on the first field whose `TypedValue` variant does not

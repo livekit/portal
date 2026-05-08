@@ -78,7 +78,7 @@ async def main() -> None:
     inference_latency_ms = env_float("PORTAL_INFERENCE_LATENCY_MS", 30.0)
     chunks_per_second = env_float("PORTAL_CHUNKS_PER_SECOND", 5.0)
 
-    cfg = OperatorConfig(room, identity=IDENTITY)
+    cfg = OperatorConfig(room)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(JOINT_FIELDS)
     cfg.add_action_chunk("act", horizon=horizon, fields=JOINT_FIELDS)

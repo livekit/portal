@@ -33,14 +33,12 @@
 
 ## Features
 
-**Multi-operator, HITL-first by design.** This is the part other robotics transports do not give you. A robot session is a *room*, not a connection. A policy, a human teleoperator, a recorder, and a supervisor can all join the same session at once. The robot listens to whichever operator currently holds control. Everyone else streams silently and is dropped at the gate. Handoff is `await op.set_active_operator("human-binh")` from any participant. Instant, attribute-driven, no out-of-band signaling.
+**Multi-operator sessions.** A robot, policies, humans, recorders, and supervisors can all join the same session at once. The robot listens to whichever operator currently holds control. Other operators stream silently and are dropped at the gate. Handoff is `await op.set_active_operator("human-binh")` from any participant. Built on LiveKit participant attributes plus one RPC method.
 
-- **Live human-in-the-loop.** Policy drives, human takes over to demonstrate corrections, policy resumes. Clean cutover, no transport reconfiguration.
-- **HITL data recording.** A separate operator joins as a passive observer with `set_action_subscription(True)`, gets every executed action labeled with `action.sender` (gate-stamped, race-free) plus the matching synchronized observation. Recording is a 50-line script.
-- **Shadow evaluation.** Run a candidate policy alongside the active one. Both stream actions; only the active one is honored. The shadow records its outputs against the same observations for offline comparison.
-- **Supervisor arbitration.** A third participant that never sends actions can still arbitrate control by calling `set_active_operator(...)`. Used for human-overseer setups, scheduling pipelines, or A/B routing.
-
-This falls out of the architecture, not bolted on top. Built on LiveKit's participant attributes (for the active-operator pointer), one RPC method (for the handoff request), and the SFU's data fanout (every operator already sees every other operator's stream, Portal just gates by sender). Try implementing the same on raw gRPC or ROS and you build a custom signaling protocol, a discovery service, and a fanout layer first.
+- **Live human-in-the-loop.** Policy drives, human takes over to demonstrate corrections, policy resumes.
+- **HITL data recording.** A passive operator joins with `set_action_subscription(True)` and receives every executed action labeled with `action.sender` plus the matching observation. Fits in a 50-line script.
+- **Shadow evaluation.** Run a candidate policy alongside the active one. Both stream actions; only the active one is honored. The shadow records its outputs for offline comparison.
+- **Supervisor arbitration.** A participant that never sends actions can still call `set_active_operator(...)` to route control. Useful for human overseers, scheduling pipelines, or A/B routing.
 
 **Remote robot, same code.** Your robot loop keeps its shape. Portal moves the hardware to another machine. Your policy or teleop code still sees a local-looking robot object.
 
@@ -226,13 +224,11 @@ detection. Full walkthrough in
 
 ## Multi-operator and HITL
 
-The architectural difference between Portal and a point-to-point
-robotics transport is the **room**. Every participant (robot, policies,
-humans, recorders, supervisors) joins the same LiveKit session. The
-robot listens to one operator at a time, named by a single attribute it
-publishes (`lk.portal.active_operator`). Everyone else's actions are
-silently dropped at the gate. Handoff is one method call from any
-participant.
+A Portal session is a room. Robot, policies, humans, recorders, and
+supervisors all join the same one. The robot listens to one operator at
+a time, named by an attribute it publishes
+(`lk.portal.active_operator`). Other operators' actions are dropped at
+the gate. Handoff is one method call from any participant.
 
 ```python
 # Policy is driving. Human takes over to demonstrate a correction.
@@ -242,30 +238,21 @@ await human.set_active_operator(human.local_identity())
 await human.set_active_operator("policy-v1")
 ```
 
-That single primitive ("the robot's `active_operator` attribute is the
-source of truth, anyone can read or update it") gives you four patterns
-out of the box:
+Four common patterns:
 
 | Pattern | Who's in the room | What changes |
 |---|---|---|
-| **Single operator** | robot + 1 operator | Default. Operator self-claims at startup. Same shape as a 1:1 transport. |
-| **HITL teleop** | robot + policy + human | Either side calls `set_active_operator(...)` to switch. Robot's stream of executed actions is continuous across the cutover. |
-| **HITL data recording** | robot + policy + human + recorder | Recorder operator joins as a passive observer with `set_action_subscription(True)`. Receives every executed action labeled with `action.sender` and pairs it with the synchronized observation. Single 50-line script, no robot-side instrumentation. |
-| **Shadow eval** | robot + active policy + candidate policy + recorder | Candidate streams its actions; gate drops them at the robot. Recorder captures both streams (active gated, candidate via subscription) for offline divergence scoring. |
-| **Supervisor** | robot + N operators + supervisor UI | Supervisor never claims control or sends actions. Just calls `set_active_operator(...)` to route control to whichever operator should be active. |
+| **Single operator** | robot + 1 operator | Operator self-claims at startup. |
+| **HITL teleop** | robot + policy + human | Either side calls `set_active_operator(...)` to switch. The robot's stream of executed actions is continuous across the cutover. |
+| **HITL data recording** | robot + policy + human + recorder | Recorder joins as a passive observer with `set_action_subscription(True)`. Receives every executed action labeled with `action.sender`, paired with the synchronized observation. |
+| **Shadow eval** | robot + active policy + candidate policy + recorder | Candidate streams its actions; the gate drops them. Recorder captures both streams for offline divergence scoring. |
+| **Supervisor** | robot + N operators + supervisor UI | Supervisor never claims control. Calls `set_active_operator(...)` to route control to whichever operator should be active. |
 
-Three Portal primitives back all of this:
+Backing primitives:
 
-1. **Participant attributes** for the active-operator pointer. Server-managed, broadcast on change, auto-synced to late joiners. No discovery handshake.
+1. **Participant attributes** for the active-operator pointer. Server-managed, broadcast on change, included in JoinResponse for late joiners.
 2. **One RPC method** (`portal.set_active_operator`) for cross-participant writes to the robot's attribute.
-3. **The SFU's data fanout.** Every operator already receives every other operator's action packets; Portal just adds a one-line gate keyed on the active-operator attribute.
-
-What makes this hard on other transports: gRPC streams are
-point-to-point, so multi-controller means a custom routing service. ROS
-over the WAN means rolling your own discovery, NAT traversal, and
-authorization. Raw WebRTC misses the room model and the data
-primitives. LiveKit ships all of it as one SDK, and Portal is what
-falls out when you let robotics ride that primitive.
+3. **The SFU's data fanout.** Every operator already receives every other operator's action packets; Portal adds a one-line gate keyed on `active_operator`.
 
 Recipes:
 [recorder example](python/packages/livekit-portal/tests/integration/test_action_subscription.py),
@@ -324,27 +311,20 @@ lerobot device to any workflow (teleop, dataset recording, policy eval). See
 
 ## Why LiveKit
 
-Portal sits on LiveKit rather than raw WebRTC or a custom transport. The
-multi-operator and HITL story above is the headline reason. None of it
-is feasible without LiveKit's room model. The rest of the choice keeps
-the codebase focused on robotics instead of plumbing.
+Portal sits on LiveKit rather than raw WebRTC or a custom transport.
+The choice keeps the codebase focused on robotics instead of plumbing.
 
 | What LiveKit gives you | Why it matters for Portal |
 |---|---|
-| **Rooms with N participants** | Multi-controller HITL is the room model. A robot, two operators, a recorder, and a supervisor are the same session as 1:1. No new signaling, no mesh, no per-pair connection setup. This is the architectural advantage. |
-| **Participant attributes** | Server-managed key-value state per participant, broadcast on change, included in JoinResponse for late joiners. The active-operator pointer is one attribute on the robot, no custom state-sync layer. |
-| **Cross-participant RPC** | `portal.set_active_operator` is one method registered on the robot. Any operator (or an external supervisor service) calls it with one line. |
-| **Production SFU** | A late joiner gets the full state without warm-up. Bandwidth is fanned out by the server, not by the robot. Recording-shaped operators add one consumer to the SFU, not one outbound stream from the robot. |
-| **Tokens with attributes** | Initial values like `active_operator` can be seeded at token-mint time so the robot starts focused on a specific operator before anyone connects. JWT-based permissions per participant, no identity service to design. |
+| **Rooms with N participants** | A robot, two operators, a recorder, and a supervisor are the same session as 1:1. No new signaling, no mesh, no per-pair connection setup. |
+| **Participant attributes** | Server-managed key-value state per participant, broadcast on change, included in JoinResponse for late joiners. The active-operator pointer is one attribute on the robot. |
+| **Cross-participant RPC** | `portal.set_active_operator` is one method registered on the robot. Any operator calls it with one line. |
+| **Production SFU** | A late joiner gets the full state without warm-up. Bandwidth is fanned out by the server, not by the robot. |
+| **Tokens with attributes** | Initial values like `active_operator` can be seeded at token-mint time so the robot starts focused on a specific operator before anyone connects. JWT-based permissions per participant. |
 | **Transport primitives** | RTP media with pacing and bandwidth adaptation. SCTP data channels, reliable or unreliable. Typed byte streams with chunking. Portal maps observations straight onto these. |
-| **Cross-language SDKs** | Rust, Python, Swift, Kotlin, JavaScript, Unity. A browser teleop UI speaks the same protocol as the robot host, can join the same multi-operator session, and gets the same handoff machinery. |
+| **Cross-language SDKs** | Rust, Python, Swift, Kotlin, JavaScript, Unity. A browser teleop UI speaks the same protocol as the robot host. |
 | **Deploy anywhere** | [LiveKit Cloud](https://livekit.io/cloud) for zero ops, or self-host the open-source server. TURN relays handle NAT traversal. |
-| **Recording and egress** | Server-side session recording is one webhook away. Pairs with Portal's typed `(observation, action)` recorder for offline dataset assembly. |
-
-A custom robotics transport can give you the data path. The room model
-(multi-participant routing, attribute sync, RPC fanout, late-joiner
-state replay) is what you'd build next, and it's the part that takes
-real engineering. Portal exists because LiveKit already shipped it.
+| **Recording and egress** | Server-side session recording is one webhook away. |
 
 Running on a single machine or a LAN-only robot? You do not need any of
 this. A direct socket is enough.

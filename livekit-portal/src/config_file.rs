@@ -258,7 +258,10 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
         }
     }
     if let Some(tol) = p.tolerance {
-        if !(tol > 0.0) {
+        // Equivalent to `!(tol > 0.0)` but explicit about NaN. Mirrors
+        // `PortalConfig::set_tolerance`'s assertion: NaN, zero, and
+        // negative all reject; positive (including +inf) passes.
+        if tol.is_nan() || tol <= 0.0 {
             return Err(ConfigFileError::Invalid("tolerance must be > 0".into()));
         }
     }

@@ -13,7 +13,6 @@ import textwrap
 import pytest
 
 from livekit.portal import (
-    ChunkSpec,
     ConfigFileError,
     DType,
     FieldSpec,

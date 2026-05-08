@@ -204,9 +204,9 @@ pub struct Action {
     /// or `None` for unsolicited publishes.
     pub in_reply_to_ts_us: Option<u64>,
     /// Identity of the operator that produced this action, captured at
-    /// the multi-controller gate. `None` on paths that bypass the gate
-    /// (v0.1 unified Portal path; echoes before active_operator is set).
-    pub sender: Option<String>,
+    /// the active-operator gate (or, for the local echo path, the
+    /// publisher's own identity).
+    pub sender: String,
 }
 
 /// A received action chunk. `data` is `field -> column of length horizon`,
@@ -220,9 +220,9 @@ pub struct ActionChunk {
     pub data: HashMap<String, Vec<f64>>,
     pub timestamp_us: u64,
     pub in_reply_to_ts_us: Option<u64>,
-    /// Identity of the operator that produced this chunk, same semantics
+    /// Identity of the operator that produced this chunk; same semantics
     /// as `Action::sender`.
-    pub sender: Option<String>,
+    pub sender: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -547,19 +547,11 @@ impl PortalConfig {
         self.inner.lock().set_e2ee_key(key);
     }
 
-    /// Opt into the v0.2 multi-controller layer. Off by default. The
-    /// Python `Robot` and `Operator` classes set this on automatically.
-    pub fn set_multi_controller(&self, enable: bool) {
-        self.inner.lock().set_multi_controller(enable);
-    }
-
     /// Operator-side opt-in to receiving executed actions ("HITL
-    /// recording"). Off by default. When on (alongside
-    /// `multi_controller`), `on_action` / `on_action_chunk` /
-    /// `get_action` / `get_action_chunk` fire on the operator for actions
+    /// recording"). Off by default. When on, `on_action` / `on_action_chunk`
+    /// / `get_action` / `get_action_chunk` fire on the operator for actions
     /// the active operator sends, plus a local echo when self == active.
-    /// No-op on the Robot side — the robot always processes actions when
-    /// `multi_controller` is on.
+    /// No-op on the Robot side — the robot always processes actions.
     pub fn set_action_subscription(&self, enable: bool) {
         self.inner.lock().set_action_subscription(enable);
     }
@@ -806,15 +798,7 @@ impl Portal {
         self.action_chunks.clone()
     }
 
-    // --- RPC ---
-
-    /// Identity of the identified peer, or `None` if Portal has not yet
-    /// seen any Portal-topic traffic from a remote participant.
-    pub fn peer_identity(&self) -> Option<String> {
-        self.inner.peer_identity()
-    }
-
-    // --- Multi-controller (v0.2) ---
+    // --- Multi-controller ---
 
     /// Own LiveKit identity once connected. `None` before `connect()`.
     pub fn local_identity(&self) -> Option<String> {

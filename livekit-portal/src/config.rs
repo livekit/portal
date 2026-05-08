@@ -108,18 +108,10 @@ pub struct PortalConfig {
     pub(crate) ping_ms: u64,
     pub(crate) reuse_stale_frames: bool,
     pub(crate) shared_key: Option<Vec<u8>>,
-    /// Opt-in v0.2 multi-controller behavior. Off by default so v0.1 callers
-    /// using the unified `Portal` class keep working unchanged. The v0.2
-    /// `Robot` / `Operator` Python classes flip this on. When enabled, Portal:
-    ///   * self-sets the `lk.portal.role` attribute on connect
-    ///   * tracks operators and `active_operator` via attribute events
-    ///   * gates inbound actions on the Robot side by sender identity
-    ///   * registers the `portal.set_active_operator` RPC (Robot side)
-    pub(crate) multi_controller: bool,
     /// Operator-side: subscribe to executed actions. Off by default —
     /// most operators are pure controllers and do not want the bandwidth
     /// or callback noise. Recorders, shadow eval policies, and live
-    /// monitoring opt in. When on (and `multi_controller` is also on):
+    /// monitoring opt in. When on:
     ///   * `(Role::Operator, ACTION_TOPIC)` packets are deserialized and
     ///     fired through `on_action` / `get_action`, gated by
     ///     `sender == active_operator` (same gate the robot applies)
@@ -149,32 +141,15 @@ impl PortalConfig {
             ping_ms: 1000,
             reuse_stale_frames: false,
             shared_key: None,
-            multi_controller: false,
             action_subscription: false,
         }
     }
 
-    /// Opt into the v0.2 multi-controller layer. Off by default. When
-    /// enabled, Portal self-sets the `lk.portal.role` attribute on connect,
-    /// tracks operators via participant attribute events, gates inbound
-    /// actions on the Robot side, and registers the
-    /// `portal.set_active_operator` RPC. The Python `Robot` and `Operator`
-    /// classes call this automatically.
-    pub fn set_multi_controller(&mut self, enable: bool) {
-        self.multi_controller = enable;
-    }
-
-    /// Whether the multi-controller layer is enabled for this config.
-    pub fn multi_controller(&self) -> bool {
-        self.multi_controller
-    }
-
     /// Operator-side opt-in for receiving executed actions. Off by default.
-    /// When on (alongside `multi_controller`), the operator subscribes to
-    /// actions and chunks from the active operator and gets a local echo
-    /// of its own sends when active. Used by recorders, shadow eval
-    /// policies, and monitoring UIs. No-op on the Robot side — the robot
-    /// always processes actions when `multi_controller` is on.
+    /// When on, the operator subscribes to actions and chunks from the
+    /// active operator and gets a local echo of its own sends when active.
+    /// Used by recorders, shadow eval policies, and monitoring UIs.
+    /// No-op on the Robot side — the robot always processes actions.
     pub fn set_action_subscription(&mut self, enable: bool) {
         self.action_subscription = enable;
     }

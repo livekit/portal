@@ -509,7 +509,7 @@ pub(crate) fn dispatch_chunk_payload(
     chunk_slots: &[Arc<ChunkSlot>],
     unknown_fp_warns: &Mutex<HashSet<u32>>,
     metrics: &MetricsRegistry,
-    sender: Option<String>,
+    sender: String,
 ) {
     if payload.len() < 4 {
         log::warn!("chunk byte stream payload shorter than 4-byte fingerprint header");
@@ -562,14 +562,15 @@ pub(crate) fn dispatch_chunk_payload(
 
 /// Build an `Action` from the schema and the decoded f64 values. Kept
 /// here so `handle_data_received` and any test helpers share the same
-/// path. `sender` is populated at the gate when known; `None` for paths
-/// that bypass the gate (v0.1 unified Portal, unit tests).
+/// path. `sender` is the identity of the operator that produced this
+/// action (set at gate time, or to the publisher's identity on the
+/// local echo path).
 pub(crate) fn build_action(
     timestamp_us: u64,
     in_reply_to_ts_us: Option<u64>,
     schema: &[FieldSpec],
     values: &[f64],
-    sender: Option<String>,
+    sender: String,
 ) -> Action {
     let (typed, raw) = to_value_maps(schema, values);
     Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us, sender }
@@ -589,9 +590,9 @@ fn build_state(
 /// outside any locks.
 ///
 /// `sender` is the identity of the participant who published the packet,
-/// when known (always populated by `portal.rs` for the live receive path).
-/// Stamped into `Action::sender` so recorders can label rows by producer
-/// without consulting any room state.
+/// stamped into `Action::sender` so recorders can label rows by producer
+/// without consulting any room state. Empty on non-action paths (state,
+/// RTT) — those don't carry a sender field.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_data_received(
     payload: &[u8],
@@ -606,7 +607,7 @@ pub(crate) fn handle_data_received(
     sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     metrics: &MetricsRegistry,
     rtt: &RttService,
-    sender: Option<String>,
+    sender: String,
 ) -> SyncOutput {
     if topic == RTT_TOPIC {
         rtt.handle_packet(payload);
@@ -624,7 +625,7 @@ pub(crate) fn handle_data_received(
                         in_reply_to_ts_us,
                         action_schema,
                         &values,
-                        sender.clone(),
+                        sender,
                     ));
                 }
                 Err(DecodeError::SchemaMismatch { expected, got }) => {

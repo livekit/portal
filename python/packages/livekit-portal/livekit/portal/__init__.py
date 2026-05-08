@@ -209,13 +209,13 @@ class Action:
     values: Dict[str, TypedScalar]
     raw_values: Dict[str, float]
     timestamp_us: int
-    in_reply_to_ts_us: Optional[int] = None
-    sender: Optional[str] = None
+    sender: str
     """Identity of the operator that produced this action, captured at the
-    multi-controller gate. Use this rather than `Operator.active_operator()`
-    to label rows in a recording dataset — it is set at gate time and
-    cannot race with a handoff. `None` on paths that bypass the gate
-    (v0.1 unified Portal, echoes before active_operator is set)."""
+    active-operator gate (or, for the local echo path, the publisher's
+    own identity). Use this rather than `Operator.active_operator()` to
+    label rows in a recording dataset — it is set at gate time and
+    cannot race with a handoff."""
+    in_reply_to_ts_us: Optional[int] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,10 +236,10 @@ class ActionChunk:
     data: Dict[str, Any]
     raw_data: Dict[str, List[float]]
     timestamp_us: int
-    in_reply_to_ts_us: Optional[int] = None
-    sender: Optional[str] = None
+    sender: str
     """Same semantics as `Action.sender`: the operator that produced this
     chunk, captured at the gate."""
+    in_reply_to_ts_us: Optional[int] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,27 +800,14 @@ class PortalConfig:
         """
         self._inner.set_reuse_stale_frames(enable)
 
-    def set_multi_controller(self, enable: bool) -> None:
-        """Opt into the v0.2 multi-controller layer.
-
-        Off by default so v0.1 callers using `Portal` directly keep working
-        unchanged. When on, Portal self-sets the `lk.portal.role` attribute
-        on connect, tracks operators via attribute events, gates inbound
-        actions on the Robot side, and registers the
-        `portal.set_active_operator` RPC. The `Robot` / `Operator` classes
-        call this automatically.
-        """
-        self._inner.set_multi_controller(enable)
-
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions.
 
-        Off by default. When on (alongside `multi_controller`), the
-        operator subscribes to actions and chunks from the active operator
-        and gets a local echo of its own sends when active. Used by
-        recorders, shadow eval policies, and live monitoring. No-op on
-        the Robot side — the robot always processes actions when
-        `multi_controller` is on.
+        Off by default. When on, the operator subscribes to actions and
+        chunks from the active operator and gets a local echo of its own
+        sends when active. Used by recorders, shadow eval policies, and
+        live monitoring. No-op on the Robot side — the robot always
+        processes actions.
 
         The `Operator` class re-exposes this directly on `OperatorConfig`.
         """
@@ -1032,17 +1019,7 @@ class Portal:
         """
         self._dispatcher.set_drop(callback)
 
-    # -- rpc -----------------------------------------------------------------
-
-    def peer_identity(self) -> Optional[str]:
-        """Identity of the peer once Portal has seen any traffic from them.
-
-        `None` before the peer has published any Portal-topic data packet
-        or a subscribed video track (whichever happens first).
-        """
-        return self._inner.peer_identity()
-
-    # -- multi-controller (v0.2) --------------------------------------------
+    # -- multi-controller ----------------------------------------------------
 
     def local_identity(self) -> Optional[str]:
         """Own LiveKit identity once connected. `None` before `connect()`."""
@@ -1127,9 +1104,10 @@ class Portal:
         response_timeout_ms: Optional[int] = None,
     ) -> str:
         """Invoke `method` on the peer. When `destination` is omitted,
-        Portal routes to the identified peer (see `peer_identity`),
-        falling back to the single remote participant if none is
-        identified yet. Returns the handler's string payload.
+        Portal routes to the obvious counterpart — robot for an Operator,
+        the active operator for a Robot — falling back to the single
+        remote participant if no pointer is set. Returns the handler's
+        string payload.
         """
         return await self._inner.perform_rpc(
             destination,
@@ -1178,10 +1156,6 @@ class _RoleConfigBase:
 
     def __init__(self, session: str, role: Role) -> None:
         self._inner = PortalConfig(session, role)
-        # `Robot` / `Operator` opt into the v0.2 multi-controller layer
-        # unconditionally. Users who want the v0.1 single-peer behavior keep
-        # using the unified `Portal` / `PortalConfig` classes.
-        self._inner.set_multi_controller(True)
 
     @property
     def session(self) -> str:

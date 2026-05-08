@@ -203,6 +203,10 @@ pub struct Action {
     /// Sender-side observation timestamp this action was produced from,
     /// or `None` for unsolicited publishes.
     pub in_reply_to_ts_us: Option<u64>,
+    /// Identity of the operator that produced this action, captured at
+    /// the multi-controller gate. `None` on paths that bypass the gate
+    /// (v0.1 unified Portal path; echoes before active_operator is set).
+    pub sender: Option<String>,
 }
 
 /// A received action chunk. `data` is `field -> column of length horizon`,
@@ -216,6 +220,9 @@ pub struct ActionChunk {
     pub data: HashMap<String, Vec<f64>>,
     pub timestamp_us: u64,
     pub in_reply_to_ts_us: Option<u64>,
+    /// Identity of the operator that produced this chunk, same semantics
+    /// as `Action::sender`.
+    pub sender: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -545,6 +552,17 @@ impl PortalConfig {
     pub fn set_multi_controller(&self, enable: bool) {
         self.inner.lock().set_multi_controller(enable);
     }
+
+    /// Operator-side opt-in to receiving executed actions ("HITL
+    /// recording"). Off by default. When on (alongside
+    /// `multi_controller`), `on_action` / `on_action_chunk` /
+    /// `get_action` / `get_action_chunk` fire on the operator for actions
+    /// the active operator sends, plus a local echo when self == active.
+    /// No-op on the Robot side — the robot always processes actions when
+    /// `multi_controller` is on.
+    pub fn set_action_subscription(&self, enable: bool) {
+        self.inner.lock().set_action_subscription(enable);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +619,7 @@ impl Portal {
                 values: action.raw_values.clone(),
                 timestamp_us: action.timestamp_us,
                 in_reply_to_ts_us: action.in_reply_to_ts_us,
+                sender: action.sender.clone(),
             });
         });
         let cb = callbacks.clone();
@@ -737,6 +756,7 @@ impl Portal {
             values: a.raw_values,
             timestamp_us: a.timestamp_us,
             in_reply_to_ts_us: a.in_reply_to_ts_us,
+            sender: a.sender,
         })
     }
 
@@ -886,6 +906,7 @@ fn actionchunk_from_core(c: &core::ActionChunk) -> ActionChunk {
         data: c.data.clone(),
         timestamp_us: c.timestamp_us,
         in_reply_to_ts_us: c.in_reply_to_ts_us,
+        sender: c.sender.clone(),
     }
 }
 

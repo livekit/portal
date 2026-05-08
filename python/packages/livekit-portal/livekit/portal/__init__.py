@@ -210,6 +210,12 @@ class Action:
     raw_values: Dict[str, float]
     timestamp_us: int
     in_reply_to_ts_us: Optional[int] = None
+    sender: Optional[str] = None
+    """Identity of the operator that produced this action, captured at the
+    multi-controller gate. Use this rather than `Operator.active_operator()`
+    to label rows in a recording dataset — it is set at gate time and
+    cannot race with a handoff. `None` on paths that bypass the gate
+    (v0.1 unified Portal, echoes before active_operator is set)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +237,9 @@ class ActionChunk:
     raw_data: Dict[str, List[float]]
     timestamp_us: int
     in_reply_to_ts_us: Optional[int] = None
+    sender: Optional[str] = None
+    """Same semantics as `Action.sender`: the operator that produced this
+    chunk, captured at the gate."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +312,7 @@ def _wrap_action(
         raw_values=action.values,
         timestamp_us=action.timestamp_us,
         in_reply_to_ts_us=action.in_reply_to_ts_us,
+        sender=action.sender,
     )
 
 
@@ -356,6 +366,7 @@ def _wrap_action_chunk(
         raw_data=raw_data,
         timestamp_us=chunk.timestamp_us,
         in_reply_to_ts_us=chunk.in_reply_to_ts_us,
+        sender=chunk.sender,
     )
 
 
@@ -801,6 +812,20 @@ class PortalConfig:
         """
         self._inner.set_multi_controller(enable)
 
+    def set_action_subscription(self, enable: bool) -> None:
+        """Operator-side opt-in to receiving executed actions.
+
+        Off by default. When on (alongside `multi_controller`), the
+        operator subscribes to actions and chunks from the active operator
+        and gets a local echo of its own sends when active. Used by
+        recorders, shadow eval policies, and live monitoring. No-op on
+        the Robot side — the robot always processes actions when
+        `multi_controller` is on.
+
+        The `Operator` class re-exposes this directly on `OperatorConfig`.
+        """
+        self._inner.set_action_subscription(enable)
+
     def close(self) -> None:
         """No-op: UniFFI releases the Rust-side handle when Python GC drops
         the last reference. Kept for backwards compatibility with callers
@@ -1232,6 +1257,13 @@ class _RoleConfigBase:
     def set_reuse_stale_frames(self, enable: bool) -> None:
         self._inner.set_reuse_stale_frames(enable)
 
+    def set_action_subscription(self, enable: bool) -> None:
+        """Operator-side opt-in to receiving executed actions ("HITL
+        recording"). Off by default. See `PortalConfig.set_action_subscription`
+        for full semantics. No-op on `RobotConfig`.
+        """
+        self._inner.set_action_subscription(enable)
+
 
 class RobotConfig(_RoleConfigBase):
     """Robot-side session config. Same declarative surface as
@@ -1457,6 +1489,41 @@ class Operator:
 
     def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
         return self._portal.get_video_frame(track_name)
+
+    # -- action subscription (HITL recording, shadow eval) -------------------
+
+    def on_action(self, callback: Callable[[Action], Any]) -> None:
+        """Fire on every executed action when `set_action_subscription(True)`
+        is enabled on the `OperatorConfig`. `action.sender` labels the
+        operator that produced the action; use it for dataset row labels
+        rather than `active_operator()` to avoid handoff races.
+
+        No-op without `set_action_subscription(True)` — the receive side
+        does not subscribe to actions, so the callback is never invoked.
+        """
+        self._portal.on_action(callback)
+
+    def on_action_chunk(
+        self,
+        chunk_name: str,
+        callback: Callable[[ActionChunk], Any],
+    ) -> None:
+        """Same as `on_action` but for chunks declared via
+        `add_action_chunk`. Requires `set_action_subscription(True)`.
+        """
+        self._portal.on_action_chunk(chunk_name, callback)
+
+    def get_action(self) -> Optional[Action]:
+        """Latest executed action, or `None` if none received. Requires
+        `set_action_subscription(True)` for any value to land here.
+        """
+        return self._portal.get_action()
+
+    def get_action_chunk(self, chunk_name: str) -> Optional[ActionChunk]:
+        """Latest executed chunk for `chunk_name`, or `None`. Requires
+        `set_action_subscription(True)`.
+        """
+        return self._portal.get_action_chunk(chunk_name)
 
     # -- multi-controller ----------------------------------------------------
 

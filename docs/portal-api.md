@@ -2,9 +2,10 @@
 
 The primary surface for using livekit-portal from any robotics stack.
 
-You construct a `PortalConfig`, hand it to a `Portal`, register callbacks,
-and push frames and state or actions. Everything else in this repository,
-including the optional lerobot plugins, is built on top of this API.
+You construct a `RobotConfig` or `OperatorConfig`, hand it to a `Robot` or
+`Operator`, register callbacks, and push frames and state or actions.
+Everything else in this repository, including the optional lerobot plugins,
+is built on top of this API.
 
 ## Installation
 
@@ -35,37 +36,44 @@ livekit-portal = { path = "path/to/livekit-portal/livekit-portal" }
 Python bindings ship via the `livekit-portal-ffi` crate (UniFFI + C ABI)
 and a pure-Python package in `python/packages/livekit-portal/`.
 
-## Role semantics
+## Roles
 
-Portal has two roles: `Role.ROBOT` and `Role.OPERATOR`. The role is fixed at
-`PortalConfig` construction. Calling a send method the role does not own
-returns `WrongRole`.
+Portal is a two-role system: one **robot** and one or more **operators**
+per session.
 
 | Role | Publishes | Subscribes |
 |------|-----------|------------|
-| `Role.ROBOT` | video frames, state | actions |
-| `Role.OPERATOR` | actions | video frames + state, merged into synced observations |
+| `Robot` | video frames, state | actions |
+| `Operator` | actions | video frames + state, merged into synced observations |
 
-Both sides must register the same schema via `add_video` / `add_state_typed` /
-`add_action_typed`. Camera names, field names, and per-field dtypes must
-match across sides.
+Roles are baked into the class you instantiate (`Robot` or `Operator`).
+There can be at most one robot per session. There can be any number of
+operators (humans teleoperating, policies running inference, supervisors
+arbitrating control). The robot listens to one operator at a time, named
+by the `active_operator` pointer; everyone else streams silently and the
+robot drops their actions at the gate. See
+[Multi-controller](#multi-controller-and-active_operator) below.
 
-State and action schemas are typed. Each field declares a `DType` that drives
-its on-wire width. `DType.F64` is the lossless default. `F32` halves the
-bytes per field for joint angles. `I8`, `I16`, `U8`, `U16`, `U32` suit
-discrete indices or counters. `Bool` is one byte for binary signals like
-gripper open or estop. Values you send through `send_state` /
-`send_action` stay as Python floats. Saturation applies at the wire boundary
-for out-of-range integer values.
+Both sides must register the same schema via `add_video` /
+`add_state_typed` / `add_action_typed`. Camera names, field names, and
+per-field dtypes must match across sides.
+
+State and action schemas are typed. Each field declares a `DType` that
+drives its on-wire width. `DType.F64` is the lossless default. `F32`
+halves the bytes per field for joint angles. `I8`, `I16`, `U8`, `U16`,
+`U32` suit discrete indices or counters. `Bool` is one byte for binary
+signals like gripper open or estop. Values you send through `send_state`
+/ `send_action` stay as Python floats. Saturation applies at the wire
+boundary for out-of-range integer values.
 
 ## Robot side
 
 ```python
 import asyncio
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Robot, RobotConfig
 
 async def main():
-    cfg = PortalConfig("session", Role.ROBOT)
+    cfg = RobotConfig("session")
     cfg.add_video("camera1")
     cfg.add_video("camera2")
     cfg.add_state_typed([
@@ -79,11 +87,13 @@ async def main():
         ("joint3", DType.F32),
     ])
 
-    portal = Portal(cfg)
+    portal = Robot(cfg)
 
     def on_action(action):
         # action.values is the dict.
         # action.timestamp_us is the sender's clock.
+        # Only actions from the active operator reach this callback;
+        # everyone else is dropped silently at the gate.
         robot.send_action(action.values)
 
     portal.on_action(on_action)
@@ -103,10 +113,10 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Operator, OperatorConfig
 
 async def main():
-    cfg = PortalConfig("session", Role.OPERATOR)
+    cfg = OperatorConfig("session", identity="policy-v1")
     cfg.add_video("camera1")
     cfg.add_video("camera2")
     cfg.add_state_typed([
@@ -120,7 +130,7 @@ async def main():
         ("joint3", DType.F32),
     ])
 
-    portal = Portal(cfg)
+    portal = Operator(cfg)
 
     def on_observation(obs):
         # obs.frames: dict[str, np.ndarray]   # one per registered video track
@@ -132,11 +142,73 @@ async def main():
     portal.on_observation(on_observation)
     await portal.connect(url, token)
 
+    # Robot starts with `active_operator=None` and drops every action.
+    # Claim control to be the one whose actions are accepted.
+    await portal.set_active_operator(portal.local_identity())
+
 asyncio.run(main())
 ```
 
 Callbacks fire on the asyncio loop that was running when you registered
 them. User code never runs on the tokio worker thread.
+
+## Multi-controller and `active_operator`
+
+The robot exposes one piece of state, `active_operator`, naming the
+operator whose actions are accepted. Anyone in the room can read or
+change it. The robot's attribute is the source of truth.
+
+```python
+# Robot side
+portal.active_operator()            # -> Optional[str]
+await portal.set_active_operator("policy-v1")
+portal.operators()                  # currently-connected operator identities
+portal.local_identity()             # this robot's identity (after connect)
+
+# Operator side
+portal.active_operator()            # mirrors the robot's attribute
+await portal.set_active_operator("policy-v1")   # RPC under the hood
+portal.operators()                  # peer operators in the room
+portal.robot_identity()             # the robot's identity (once discovered)
+portal.local_identity()             # this operator's own identity
+```
+
+`set_active_operator` is symmetric. The robot writes its own attribute
+directly; the operator dispatches a `portal.set_active_operator` RPC and
+the robot's handler does the write. Pass `None` to clear the pointer
+(robot will drop everything until something sets it again).
+
+Three callbacks let you react to room changes:
+
+```python
+portal.on_operator_joined(lambda identity: ...)
+portal.on_operator_left(lambda identity: ...)
+portal.on_active_operator_changed(lambda new_identity: ...)
+```
+
+**Defaults and edge cases.**
+
+- `active_operator` defaults to `None`. A robot with no active operator
+  drops every action.
+- When the active operator disconnects, the pointer **stays pinned** at
+  the disconnected identity. A reconnect with the same identity resumes
+  control. To reassign, anyone in the room can call
+  `set_active_operator("...")`.
+- Tokens may seed the robot's `lk.portal.active_operator` attribute at
+  mint time so the pointer is set before anyone connects:
+
+  ```python
+  api.AccessToken(...)
+     .with_attributes({"lk.portal.active_operator": "policy-v1"})
+  ```
+
+- Tokens for `Robot` and `Operator` participants must include
+  `can_update_own_metadata=True`. Both classes self-set the
+  `lk.portal.role` attribute on connect; without the grant the call
+  fails.
+
+For HITL patterns and the full design rationale, see
+[`spec.md`](../spec.md).
 
 ## Typed values on receive
 
@@ -188,6 +260,11 @@ type.
   a one-time `WARN` and are then silently ignored. Check `portal.metrics()`
   and your logs if a field appears to not arrive — the typo is the usual
   cause.
+- **Inactive operators stream into the void.** The robot drops actions
+  whose sender is not the active operator. There is no error or callback
+  on the operator side. Read `op.active_operator()` (or watch
+  `on_active_operator_changed`) to know whether your `send_action` is
+  actually being honored.
 - **NaN into `Bool` becomes `false`.** NaN into integer dtypes becomes
   `0`. Both count as saturation and log once per field.
 - **Boundary values do not saturate.** `127.0` into `I8`, `-128.0` into
@@ -228,22 +305,55 @@ At typical inference resolutions (224×224 to 480p) MJPEG q=80–95 fits.
 See [frame-video.md](frame-video.md) for the codec/fps tables, wire
 format, and metrics surface.
 
-## What else is on `Portal`
+## Surface summary
 
-- `portal.on_observation(cb)`: synced observations (operator only).
-- `portal.on_drop(cb)`: states that could not be matched (operator only).
-- `portal.on_action(cb)`: incoming actions (robot only).
-- `portal.on_state(cb)`: raw state firehose (operator only). Every packet
-  fires. Use `on_observation` if you want paced data.
-- `portal.send_action(values, timestamp_us=...)`: operator only.
-- `portal.send_video_frame(name, frame, timestamp_us=...)`: robot only.
-- `portal.send_state(values, timestamp_us=...)`: robot only.
-- `portal.metrics()`: `PortalMetrics` snapshot (sync, transport, buffers,
-  rtt).
-- `portal.register_rpc_method(name, handler)` /
-  `portal.perform_rpc(name, ...)`: see [rpc.md](rpc.md).
-- `await portal.connect(url, token)` / `await portal.disconnect()`.
-- `portal.close()` / `cfg.close()`: release native handles.
+**Robot**
+
+```text
+# data plane
+robot.send_video_frame(track, frame, [width, height,] timestamp_us=...)
+robot.send_state(values, timestamp_us=...)
+robot.on_action(cb)                      # only fires for the active operator
+robot.on_action_chunk(name, cb)
+robot.get_action() / robot.get_action_chunk(name)
+
+# control plane
+robot.active_operator() / await robot.set_active_operator(id)
+robot.operators()
+robot.local_identity()
+robot.on_operator_joined(cb) / robot.on_operator_left(cb)
+robot.on_active_operator_changed(cb)
+
+# rpc, metrics, lifecycle
+robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
+await robot.perform_rpc(name, payload, destination=None)
+robot.metrics() / robot.reset_metrics()
+await robot.connect(url, token) / await robot.disconnect()
+```
+
+**Operator**
+
+```text
+# data plane
+op.send_action(values, timestamp_us=..., in_reply_to_ts_us=...)
+op.send_action_chunk(name, data, timestamp_us=..., in_reply_to_ts_us=...)
+op.on_state(cb) / op.on_observation(cb) / op.on_drop(cb)
+op.on_video_frame(track, cb)
+op.get_state() / op.get_observation() / op.get_video_frame(track)
+
+# control plane
+op.active_operator() / await op.set_active_operator(id)   # RPC under the hood
+op.operators()
+op.robot_identity() / op.local_identity()
+op.on_operator_joined(cb) / op.on_operator_left(cb)
+op.on_active_operator_changed(cb)
+
+# rpc, metrics, lifecycle
+op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)
+await op.perform_rpc(name, payload, destination=None)
+op.metrics() / op.reset_metrics()
+await op.connect(url, token) / await op.disconnect()
+```
 
 ## End-to-end encryption
 
@@ -259,6 +369,25 @@ cfg.set_e2ee_key(os.environ["PORTAL_E2EE_KEY"].encode())
 
 See [e2ee.md](e2ee.md) for key generation, distribution patterns, and coverage
 details.
+
+## Legacy `Portal` class
+
+`Robot` and `Operator` are role-specific facades around a unified `Portal`
+class that still ships in `livekit.portal`. Existing v0.1 code keeps
+working unchanged:
+
+```python
+from livekit.portal import DType, Portal, PortalConfig, Role
+cfg = PortalConfig("session", Role.ROBOT)
+portal = Portal(cfg)
+```
+
+Two practical differences. The unified `Portal` does not enable the
+multi-controller layer by default, so the action gate is off and the
+`role` attribute is not self-set. Mixing a v0.1 `Portal` participant
+with v0.2 `Robot` / `Operator` participants in the same session is not
+supported — pick one surface per room. New code should use `Robot` and
+`Operator`.
 
 ## Reference
 

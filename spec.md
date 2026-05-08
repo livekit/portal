@@ -1,381 +1,716 @@
-# LiveKit Portal Spec
+# Multi-operator support: spec delta
 
-## Problem
+Target: **v0.2.0**. First minor bump after the v0.1.x line. Additive on
+both the Python and Rust surfaces. The existing `Portal` / `PortalConfig`
+classes remain in `livekit.portal` and continue to work unchanged. The
+new `Robot` and `Operator` classes are added alongside as the recommended
+surface going forward.
 
-Tracks on LiveKit are decoupled by default. Video streams at a different rate than audio. Data streams at a different rate than media.
+Adds human-in-the-loop and multi-controller support to Portal. Status:
+proposal, pending review.
 
-For media streams, we can sync them based on a best approximation. The first frame of audio we received is synced with the first frame of video we received. To avoid jitter, we use a buffer for synchronization and only playback when an amount of frames are synced.
+## Motivation
 
-This works because audio video synchronization can operate with a certain minimal latency/drift. However, in robotics applications, data needs to be accurately coupled with video frames down to the milliseconds while latency must be reduced to the minimal.
+Portal today is 1 robot to 1 operator. Real workloads need more:
 
-That's why we support adding a small timestamp trailer to video frames, to help reconciling data and video on the receiver side.
+- Human-in-the-loop teleop. A policy drives by default, a human takes over
+  when needed.
+- Ensemble or shadow policies. Multiple policies stream actions, one is
+  authoritative, others run for evaluation or recording.
+- Supervisor UIs. A non-controlling participant arbitrates who has control.
 
-Robotics companies can use this feature with their own implementation. But we can also go one layer up and provide a solution that better fits the current robotics stack and provide an opinionated optimized abstraction that uses our stack.
+This delta keeps the existing two-role split (robot, operator) but allows
+N operators per room with one designated as active.
 
-## The current state of robotics
+## Mental model
 
-Classically robotics is distributed. A robot would have multiple components that work and publish data at different rate. That gives the rise to ROS and the use of DDS for a reliable and simple mental model for data distribution and consumption. The architecture is built for multiple services to work together and consume data independently. For example, a SLAM service would work alongside with an obstacle detection service which all consume data streams at different frequencies.
+> The robot is in charge of who it listens to. It exposes that decision as
+> state, and accepts requests to change it.
 
-With the rise of VLAs and other robotics models, this flexibility is traded for simplicity. Different data streams are now consumed at the same frequency and bundled for a model to consume. Instead of using a distributed service model, robots now operate e2e through a server client architecture.
+One pointer on the robot, called `active_operator`, names the operator whose
+actions are accepted. Everyone reads it. Anyone can ask the robot to change
+it. The robot's attribute is the source of truth.
 
-This is an example of the modern robotics loop:
+That is the entire model.
+
+## Wire-level changes
+
+### Identity decoupled from role
+
+Today the role string is the LiveKit participant identity. With N operators
+that breaks, since identity must be unique in a room. Going forward:
+
+- **Robot identity.** Singleton, defaults to `"robot"`.
+- **Operator identity.** Free-form string supplied via config. Defaults to
+  a generated UUID if omitted. Stable values are useful so they can be
+  named in `set_active_operator` calls. Examples: `"binh-teleop"`,
+  `"policy-v2-shadow"`, `"supervisor-ui"`.
+
+### Role as a participant attribute
+
+Role moves into LiveKit participant attributes. Each Portal participant
+publishes:
+
+```
+attributes.role = "robot" | "operator"
+```
+
+Portal sets this attribute itself on connect. We do not assume the
+token-mint script knows about Portal-specific keys. Tokens for Portal
+participants **must** include `canUpdateOwnMetadata`, otherwise the
+self-set call fails and the participant cannot be discovered.
+
+Token-mint may also set this key directly. If both paths are used, the
+token value seeds the initial state and Portal's `setAttributes` is a
+no-op for that key.
+
+Discovery is server-synced. No first-message handshake.
+
+### `active_operator` attribute on the robot
+
+The robot publishes one additional attribute:
+
+```
+attributes.active_operator = "<operator identity>" | ""
+```
+
+Empty string means "drop everything". Can be seeded at token-mint time so
+the robot has an active operator pinned before anyone connects.
+
+The robot does **not** auto-clear `active_operator` when the named
+participant disconnects. The pointer stays pinned. If that identity
+reconnects, control resumes naturally. If it never returns, any other
+operator can claim by calling `set_active_operator`.
+
+### Action gate
+
+The robot drops incoming actions where the sender's identity does not match
+`active_operator`. Non-active operators can keep streaming. Their packets
+are silently ignored at the gate.
+
+This is a one-line filter at the existing dispatch site
+(`livekit-portal/src/data.rs`).
+
+### `set_active_operator` RPC
+
+The robot registers one LiveKit RPC method:
+
+```
+portal.set_active_operator
+  args:   { identity: string | null }
+  result: { ok: bool }
+```
+
+Anyone in the room can call it. Robot's handler updates its own attribute,
+which broadcasts via `ParticipantAttributesChanged`. No built-in gating in
+v1. Apps that want to arbitrate wrap the handler.
+
+## Python API
+
+### Class split
+
+The unified `Portal` class is replaced with role-specific classes in
+`livekit.portal`. The `Role` enum drops from the public surface.
 
 ```python
-from lerobot.robots.myrobot import MyRobot
-
-robot = MyRobot(config=...)
-robot.connect()
-
-obs = robot.get_observation()
-action = model.select_action(obs)
-robot.send_action(action)
+from livekit.portal import Robot, Operator, RobotConfig, OperatorConfig
 ```
 
-This simplicity is going to be the future. This is the bitter lesson of robotics.
+Both classes wrap the same Rust core. They expose only the methods relevant
+to their role.
 
-So how do we support this? The biggest bottleneck for robotics companies to adopt our stack for inference or data collection is **synchronization of states**.
-
-## Solution
-
-**Livekit Portal** is a simple link for robots to their teleoperator or agents. It handles sending video streams, data streams as well as observation syncing. Built to work well with LeRobot or any modern robot model stack.
-
-## Synchronization
-
-State and video frames are tagged with system time on the sender side. The receiver matches them locally from its own receive buffers. No cross-machine clock sync is needed because reconciliation happens on one machine.
-
-Each state and video frame is tagged with the sender's system time at time of sending (with optional custom timestamp override). On the receiver side, a search range defines how close a state timestamp and a video frame timestamp must be to form a pair. The match with the minimum delta wins.
-
-## API
-
-### Configuration
-
-Configuration should be matching on all sides. All sides agree on the same setup.
-
-The `session` maps to a LiveKit room. The `role` sets the client name, which means two robots cannot join the same session — the role is unique per session.
+### Robot
 
 ```python
-# On robot side
-# pub: video, state
-# sub: action
-inference_portal = portal(session="test_session", role=ROBOT)
-inference_portal.add_video("camera1")
-inference_portal.add_video("camera2")
-inference_portal.add_video("camera3")
-inference_portal.add_state("joint1", "joint2", "joint3")
-inference_portal.add_action("joint1", "joint2", "joint3")
+robot = Robot(config=RobotConfig(session_id="..."))
+await robot.connect(url, token)
 
-# On operator side
-# sub: video, state
-# pub: action
-inference_portal = portal(session="test_session", role=OPERATOR)
-inference_portal.add_video("camera1")
-inference_portal.add_video("camera2")
-inference_portal.add_video("camera3")
-inference_portal.add_state("joint1", "joint2", "joint3")
-inference_portal.add_action("joint1", "joint2", "joint3")
+# data plane (unchanged)
+robot.on_action(handler)
+robot.on_action_chunk(name, handler)
+robot.send_state(state)
+robot.send_video_frame(track, frame)
+
+# control plane (new)
+robot.active_operator()                     # -> Optional[str]
+robot.set_active_operator(identity)         # local set, broadcasts
+robot.operators()                           # -> list[str]
+robot.on_operator_joined(cb)
+robot.on_operator_left(cb)
 ```
 
-Edge cases:
-
-- If a side declares a field or video track that the peer never publishes, the consumer simply never receives it — no error. Extra fields on the peer side are ignored.
-- When a caller sends a partial state/action dict (only some of the declared fields), missing fields **carry forward** their last sent value on the publisher side. Fields never sent start at `0.0`. This keeps the observation coherent when a sensor reports only a subset per tick.
-- Portal is built to be as stateless as possible, so disconnect and reconnect can be gracefully handled.
-
-### Sending
-
-Each frame and state is tagged with the sender's system time at time of sending.
+### Operator
 
 ```python
-# Each frame is tagged with system time
-inference_portal.send_video_frame("camera1", frame1)  # optional: custom timestamp
-inference_portal.send_video_frame("camera2", frame2)
-inference_portal.send_video_frame("camera3", frame3)
+op = Operator(config=OperatorConfig(
+    session_id="...",
+    identity="binh-teleop",                 # optional, defaults to a UUID
+))
+await op.connect(url, token)
 
-# State is tagged with system time
-inference_portal.send_state({"joint1": 0.0, "joint2": 0.0, "joint3": 0.0})  # optional: custom timestamp
+# data plane (unchanged)
+op.send_action(action)
+op.send_action_chunk(name, chunk)
+op.on_state(handler)
+op.on_observation(handler)
+op.on_video_frame(track, handler)
 
-# On operator side. Pass in_reply_to_ts_us to correlate the action back to
-# the observation it was produced from — required for metrics.policy.e2e_us_*.
-inference_portal.send_action(
-    {"joint1": 0.0, "joint2": 0.0, "joint3": 0.0},
-    in_reply_to_ts_us=obs.timestamp_us,
-)
+# control plane (new)
+op.identity()                               # own identity
+op.active_operator()                        # mirrors robot's attribute
+op.set_active_operator(identity)            # RPC under the hood
+op.operators()                              # other operators in the room
+op.on_operator_joined(cb)
+op.on_operator_left(cb)
+op.on_active_operator_changed(cb)
 ```
 
-### Action chunks (VLA inference)
+The operator-side `set_active_operator` is fully general. It can claim
+self, hand to a peer, or clear with `None`. Same method name as on the
+robot, different transport.
 
-Modern VLA policies emit a horizon of future actions per inference step. Portal
-handles these as a first-class wire type instead of forcing a stream of scalar
-sends. Declare the chunk with its horizon and per-field dtypes; the wire format
-ships the whole tensor in one packet.
+### Coexistence with the v0.1 surface
+
+`Portal`, `PortalConfig`, and `Role` stay in `livekit.portal`. Existing code
+keeps working without changes. New code should prefer `Robot` / `Operator`.
+We will mark the unified class as deprecated in a later minor release once
+`Robot` / `Operator` have shipped and the lerobot wrappers have migrated.
+
+The two surfaces do not interoperate inside a single session. A v0.1 robot
+does not publish the new `role` or `active_operator` attributes, and a v0.2
+robot expects every operator to be addressable by free-form identity. Pick
+one surface per room.
+
+## Defaults
+
+- `active_operator` defaults to `None`. Robot drops every action until set.
+- When the active operator disconnects, the pointer stays pinned. Reconnect
+  with the same identity resumes control. Anyone else who wants control
+  must claim explicitly via `set_active_operator`.
+- No first-to-join auto-claim in the core. The lerobot wrappers do auto-claim
+  on connect for single-op convenience.
+- The `set_active_operator` RPC handler always accepts. Apps wrap if they
+  want gating.
+- Portal self-sets the `role` attribute on connect via `setAttributes`. The
+  token must include `canUpdateOwnMetadata`.
+
+## Rust core
+
+Single `Portal` struct stays. The Rust crate is purely additive across
+v0.2 — direct Rust users gain new methods and one new field, no existing
+signature changes.
+
+### Multi-controller surface (v0.2 base)
+
+```rust
+// PortalConfig
+fn set_multi_controller(&mut self, enable: bool);   // default false
+fn multi_controller(&self) -> bool;
+
+// Portal (post-connect)
+fn local_identity(&self) -> Option<String>;
+fn active_operator(&self) -> Option<String>;
+fn set_active_operator(&self, id: Option<String>) -> PortalResult<()>;
+fn operators(&self) -> Vec<String>;
+fn robot_identity(&self) -> Option<String>;
+
+// Callbacks
+fn on_operator_joined(&self, cb: impl Fn(&str) + Send + Sync + 'static);
+fn on_operator_left(&self, cb: impl Fn(&str) + Send + Sync + 'static);
+fn on_active_operator_changed(&self, cb: impl Fn(Option<&str>) + Send + Sync + 'static);
+```
+
+Plus internal wiring:
+
+- Constants: `ROLE_ATTR_KEY`, `ACTIVE_OPERATOR_ATTR_KEY`,
+  `SET_ACTIVE_OPERATOR_RPC` (`portal.set_active_operator`).
+- Action gate at the receive site in `portal.rs::handle_room_event`
+  (`DataReceived ACTION_TOPIC` and `ByteStreamOpened ACTION_CHUNK_TOPIC`)
+  drops when `sender != active_operator`.
+- `set_active_operator` RPC handler registered automatically on
+  `Role::Robot` connect.
+- Self-set of `lk.portal.role` attribute on connect (requires
+  `canUpdateOwnMetadata` in the token).
+- `ParticipantConnected` / `ParticipantDisconnected` /
+  `ParticipantAttributesChanged` events update the controller mirror
+  via `classify_and_update`.
+
+### Operator-side action subscription (v0.2 HITL)
+
+```rust
+// PortalConfig
+fn set_action_subscription(&mut self, enable: bool);   // default false
+fn action_subscription(&self) -> bool;
+
+// Action / ActionChunk records gain `sender`
+pub struct Action {
+    pub values: HashMap<String, TypedValue>,
+    pub raw_values: HashMap<String, f64>,
+    pub timestamp_us: u64,
+    pub in_reply_to_ts_us: Option<u64>,
+    pub sender: Option<String>,           // NEW. set at gate time, None on
+                                          //      paths that bypass the gate.
+}
+
+pub struct ActionChunk {
+    // ...existing fields...
+    pub sender: Option<String>,           // NEW.
+}
+```
+
+Plus internal wiring:
+
+- `data.rs::handle_data_received` adds a `(Role::Operator, ACTION_TOPIC)`
+  arm behind `multi_controller && action_subscription`. Same deserialize
+  path as the robot, plus stamps `sender` from the participant identity
+  the gate validated.
+- `portal.rs::handle_room_event::ByteStreamOpened` adds a
+  `(Role::Operator, ACTION_CHUNK_TOPIC)` arm behind the same two flags.
+- `Portal::send_action` and `Portal::send_action_chunk`: when
+  `action_subscription` is on AND `local_identity == active_operator`,
+  build a record with `sender = local_identity` and call
+  `action.deliver(...)` / the chunk slot's deliver path locally after
+  publishing. Closes the LiveKit "no echo to publisher" gap.
+- Existing `ActionSlot` / `ChunkSlot` structures are reused as-is — they
+  already power the robot-side `on_action` / `on_action_chunk` /
+  `get_action` / `get_action_chunk` API. The operator side just becomes
+  a second writer.
+
+### What stays unchanged
+
+- All non-multi-controller code paths (transport, codec, sync buffer,
+  RPC plumbing, metrics).
+- Robot-side action handling: gate is on whenever `multi_controller` is
+  on, regardless of `action_subscription`. The new flag is operator-side
+  only.
+- Schema fingerprinting, `WrongRole` errors, dtype validation.
+
+The Python class split (`Robot` / `Operator` / `RobotConfig` /
+`OperatorConfig`) lives in the binding layer; nothing in the Rust core
+encodes the role-specific facade.
+
+## Migration (optional)
+
+No mandatory migration. `Portal` / `PortalConfig` / `Role` keep working.
+For projects that want multi-operator or HITL support, the equivalent on
+the new surface:
+
+| v0.1 (still works) | v0.2 (new) |
+|---|---|
+| `from livekit.portal import Portal, PortalConfig, Role` | `from livekit.portal import Robot, RobotConfig` or `Operator, OperatorConfig` |
+| `PortalConfig("session", Role.ROBOT)` | `RobotConfig(session_id="session")` |
+| `PortalConfig("session", Role.OPERATOR)` | `OperatorConfig(session_id="session", identity="...")` |
+| `portal.peer_identity()` (operator) | `op.robot_identity()` |
+| `portal.peer_identity()` (robot) | `robot.operators()` or `robot.active_operator()` |
+
+Token-mint scripts for `Robot` and `Operator` must add
+`canUpdateOwnMetadata` to participant grants. v0.1 token-mint is
+unchanged.
+
+The `livekit-portal` Rust crate is purely additive. Direct Rust users
+gain new methods, no existing ones change.
+
+## lerobot wrappers
+
+`lerobot-robot-livekit` switches its core to `Robot`.
+`lerobot-teleoperator-livekit` switches to `Operator` and exposes an
+`identity` config field. Both wrappers default to auto-claim on connect
+for single-op use cases.
+
+## Operator-side action subscription (HITL recording)
+
+Recording HITL sessions, shadow-evaluating policies, and live-monitoring a
+robot all share the same need: the operator wants to see the actions the
+robot is actually executing. Today only the robot sees those. v0.2 adds
+an opt-in subscription on the operator side, gated by the same
+active-operator filter.
+
+### Behavior
+
+When the flag is on, an operator participates as a **passive observer of
+executed actions** in addition to whatever else it does:
+
+- Receives `(Role::Operator, ACTION_TOPIC)` packets via the LiveKit fanout,
+  applies the same `sender == active_operator` gate the robot applies, and
+  fires `on_action`. Same for `(Role::Operator, ACTION_CHUNK_TOPIC)` byte
+  streams firing `on_action_chunk`.
+- When the operator itself is the active operator, `send_action` and
+  `send_action_chunk` also fire the local callback after publishing
+  ("echo"). LiveKit does not fan out a publisher's own data packets, so
+  without echo the active operator would be the only one in the room who
+  cannot see what the robot is executing.
+- `get_action()` and `get_action_chunk(name)` return the latest received
+  (or echoed) value, mirroring the robot-side pull API.
+
+When the flag is off (default), none of the above happens on the operator
+side. Robot behavior is unchanged regardless of the flag.
+
+### Default
+
+Off. Most operators are pure controllers and do not want the bandwidth or
+the callback noise. Recorders, shadow-eval policies, and monitoring UIs
+opt in.
+
+### Config
 
 ```python
-# Both peers declare the chunk.
-cfg.add_action_chunk(
-    "act",
-    horizon=50,
-    fields=[("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)],
-)
-
-# Operator side — accepts numpy `(horizon, n_fields)` arrays for uniform
-# dtype, or `Dict[str, ndarray]` for mixed dtypes. Pass in_reply_to_ts_us
-# the same way as send_action.
-portal.send_action_chunk("act", policy_output, in_reply_to_ts_us=obs.timestamp_us)
-
-# Robot side — register a per-chunk callback. chunk.data is reconstructed
-# as numpy arrays of the declared dtype; chunk.raw_data keeps the f64 view.
-def on_chunk(chunk: ActionChunk) -> None:
-    for t in range(chunk.horizon):
-        robot.send_action({k: float(v[t]) for k, v in chunk.data.items()})
-
-portal.on_action_chunk("act", on_chunk)
+cfg = OperatorConfig("session", identity="recorder")
+cfg.add_video("front")
+cfg.add_state_typed([...])
+cfg.add_action_typed([...])     # required to deserialize incoming actions
+cfg.set_action_subscription(True)
 ```
 
-Chunks travel as **LiveKit byte streams**, not data packets — so the 15 KB
-data-packet ceiling does not apply. Delivery is reliable and ordered.
+One flag covers both subscription and echo by design. Splitting them
+gives a partial view ("sees others' actions but not own when active") that
+is rarely what users want. Apps that genuinely need only one half ignore
+the half they don't want at the callback site.
 
-### Frame video (lossless or codec-of-your-choice)
+### Sender attribution
 
-WebRTC video is I420 plus a lossy temporal codec. For policies that read
-the pixels — VLA inference, behavior cloning, training-data capture —
-that introduces a silent input-distribution shift. `add_frame_video`
-declares a track that ships each frame independently over a byte stream,
-encoded with `RAW`, `PNG`, or `MJPEG`, and decoded back to RGB on the
-receiver. The user-facing API stays the same as `add_video`.
+`on_action` fires for actions the gate accepted, but the active operator
+may already have changed by the time the callback runs (handoff is an
+attribute write that races with action delivery). Reading
+`active_operator()` inside the callback can label the action incorrectly.
+
+Resolution: every `Action` and `ActionChunk` record carries a `sender`
+field set at gate time, when the sender identity is known and matches
+`active_operator`. The callback labels actions by their actual producer
+without consulting any room state.
+
+```
+Action {
+    values: dict,
+    raw_values: dict,
+    timestamp_us: int,
+    in_reply_to_ts_us: Optional[int],
+    sender: Optional[str],         # NEW. set when delivered via the gate.
+}
+
+ActionChunk {
+    name, horizon, data, raw_data,
+    timestamp_us, in_reply_to_ts_us,
+    sender: Optional[str],         # NEW.
+}
+```
+
+`sender` is `None` for paths that do not flow through the gate (e.g. v0.1
+unified `Portal` callers with `multi_controller` off). Adding the field
+is non-breaking on the Python side (new attribute on the dataclass);
+Rust callers that destructure these records will need a one-line update.
+
+### Recording recipe
+
+The canonical recorder is a separate operator participant:
 
 ```python
-# Both peers declare the track.
-cfg.add_frame_video("front", codec=VideoCodec.MJPEG, quality=90)
+rec = Operator(OperatorConfig("session", identity="recorder"))
+rec.add_video("front")
+rec.add_state_typed([...])
+rec.add_action_typed([...])
+rec.set_action_subscription(True)
 
-# Sender uses the same call as a regular video track.
-portal.send_video_frame("front", rgb_array)
+log = []
+last_obs = None
 
-# Receiver gets RGB the same way too.
-def on_frame(name, frame):
-    arr = frame_bytes_to_numpy_rgb(bytes(frame.data), frame.width, frame.height)
-portal.on_video_frame("front", on_frame)
-```
-
-Track names are unique across `add_video` and `add_frame_video` — a
-declared track lives on exactly one transport. Latency floor on the
-byte-stream path is set by SCTP drain rate inside libwebrtc:
-`latency ≈ 1ms + 2ms × ⌈encoded_size / 15KB⌉`. Pick a codec whose
-output fits in one chunk for low-latency closed-loop work — see
-[docs/frame-video.md](docs/frame-video.md).
-
-### Receiving
-
-State and action format: `Dict[str, float]`. Both a push API (callbacks, fire on every receive) and a pull API (latest-wins peek) are provided. Use the callback if you want every sample (with your own history buffer). Use the pull API if you only care about the most recent value per inference tick.
-
-```python
-# --- Push API (callbacks) ---
-# On robot side
-inference_portal.on_action(callback)
-
-# On operator side
-inference_portal.on_observation(callback)      # synced bundle, fires when a complete sync is formed
-inference_portal.on_state(callback)            # fires on every state received (unsynced)
-inference_portal.on_video_frame("camera1", callback)  # fires on every frame received (unsynced)
-inference_portal.on_drop(callback)             # fires on sync-fail and state-buffer overflow
-
-# --- Pull API (latest-wins) ---
-action = inference_portal.get_action()         # robot: Option[Dict[str, float]]
-obs    = inference_portal.get_observation()    # operator: Option[Observation]
-state  = inference_portal.get_state()          # operator: Option[Dict[str, float]]
-frame  = inference_portal.get_video_frame("camera1")  # operator: Option[VideoFrameData]
-```
-
-An observation is a complete synced bundle: one state matched with one frame from every registered video track. There are no partial observations. If any registered video track is missing a matching frame within the sync window, the observation is not formed and the state is dropped.
-
-The pull API is peek-style: `get_*()` always returns the most recent value (or `None` if nothing has arrived yet), and repeated calls return the same value until a new one arrives. The library does not buffer history for the pull API — if you need every sample, register the callback and buffer on your side.
-
-### Tuning
-
-All tuning is set on the config object before connecting. Portal is built around unified sampling: the robot captures state + frames at the same tick rate, so a single `fps` knob derives the sync search window, and a single `slack` knob sizes all internal buffers.
-
-```python
-config.set_fps(30)               # unified capture rate (video rate if asymmetric); tolerance*fps = search window
-config.set_slack(5)              # ticks of pipeline headroom (video + state sync buffers)
-config.set_tolerance(1.5)        # ticks of match window. 0.5 = tight (drop on loss); 1.5 = ±1 neighbor fallback
-
-config.set_state_reliable(True)  # default: True. reliable = lossless ordered delivery, unreliable = lowest latency
-config.set_action_reliable(True) # default: True. use False for high-frequency inference where latest value matters most
-
-config.set_ping_ms(1000)         # default: 1000. set 0 to disable RTT pinging on this side
-
-config.set_reuse_stale_frames(False)  # default: False. True = freeze video on frame loss instead of dropping the state
-```
-
-**Tolerance tradeoff**: at `tolerance=0.5`, a state only matches a frame within half a tick — a single lost frame drops the observation (precision over recovery). At the default `tolerance=1.5`, a state can fall back to the adjacent frame (T±1) if its own was lost, preserving the observation at the cost of ±1 tick of misalignment. A fair-share check prevents an earlier state from stealing a frame that a later state in the buffer has a closer claim to. Values `>2.0` allow T±2 fallback (rarely worth it). Pick **tight (≤1.0)** for real-time control where misalignment is unsafe; pick **widened (≥1.5)** for data collection or lossy links where dropping is worse than slight misalignment.
-
-**Reuse stale frames**: default off. When on, a state whose video match window has elapsed reuses the most recent already-emitted frame on that track instead of dropping. Video "freezes" on the last good frame during loss while state keeps flowing. Every state becomes an observation once every track has emitted at least once. Before that, the strict drop-on-horizon rule still applies so the state buffer stays bounded if video never starts. Turn on for data collection or logging where losing a state is worse than a transient video freeze. Leave off for real-time control where a stale frame would misalign the perception/action loop.
-
-### Metrics
-
-Portal collects counters and gauges on hot paths with atomic updates, so observation is effectively free. Pull the current snapshot at any cadence:
-
-```python
-m = inference_portal.metrics()
-# inference_portal.reset_metrics()   # zero counters and sample windows
-```
-
-The snapshot is grouped into four sections:
-
-```
-metrics.sync
-  observations_emitted        # cumulative synced observations delivered
-  stale_observations_emitted  # subset of observations_emitted where any track reused its last frame (reuse_stale_frames only)
-  states_dropped              # cumulative: sync-fail drops + state-buffer overflow drops
-  match_delta_us_p50/p95      # worst per-track alignment within each observation, rolling window
-  last_blocker_track          # sticky: most recent track that stalled sync
-
-metrics.transport
-  frames_sent / frames_received   # per video track
-  states_sent / states_received
-  actions_sent / actions_received
-  action_chunks_sent / action_chunks_received
-  frame_jitter_us                 # per video track, RFC 3550 inter-arrival jitter (EWMA, α=1/16)
-  state_jitter_us / action_jitter_us / action_chunk_jitter_us
-
-metrics.buffers                   # fill gauges + overflow counters
-  video_fill                      # gauge, per video track
-  state_fill                      # gauge
-  evictions                       # per video track, cumulative (overflow)
-
-metrics.rtt
-  rtt_us_last / rtt_us_mean / rtt_us_p95
-  pings_sent / pongs_received
-
-metrics.policy
-  e2e_us_p50 / e2e_us_p95     # observation → action latency, derived from
-                              # in_reply_to_ts_us on received actions/chunks
-  correlated_received          # how many actions/chunks carried correlation
-```
-
-`metrics.policy` populates only once correlated traffic arrives. When the
-operator passes `in_reply_to_ts_us=obs.timestamp_us` into `send_action` /
-`send_action_chunk`, the robot derives `now_us - in_reply_to_ts_us` on receive
-and feeds it into a 256-sample rolling window. Both sides observe the *same*
-clock here (the original observation timestamp originated as the robot's state
-send time), so this is a true single-clock measurement — no NTP required.
-
-Use this instead of `metrics.rtt` when the question is "how long does my
-policy take, end to end?" — `rtt_*` is just the network ping; the policy's
-inference time, queueing, and serialization don't show up there.
-
-RTT is measured on a reserved `portal_rtt` data topic. Each side sends an unreliable ping at `ping_ms`; the other side echoes it as a pong carrying the original timestamp. The pinging side computes RTT = `now − ping_ts` when the pong arrives. Unreliable delivery is deliberate: reliable retransmits would inflate the measurement. Echo is always active, so one side can disable pinging and still let the other measure.
-
-Jitter is the RFC 3550 EWMA on inter-arrival deltas: `J += (|D| − J) / 16`, where `D = (recv_i − recv_{i-1}) − (send_i − send_{i-1})`. Drift-robust (only looks at deltas) and unitless of absolute clock offset.
-
-Percentiles are computed from a bounded ring of 256 recent samples — fast, bounded memory, accurate enough for health monitoring rather than SLO reporting.
-
-**Under `reuse_stale_frames`**: `last_blocker_track` only updates while a track is still waiting for its first frame. Once every track has emitted, reuse replaces the wait, so a later freeze leaves `last_blocker_track` pinned to its last startup value — use `stale_observations_emitted` as the freeze signal instead. `match_delta_us_p95` also becomes unbounded (stale deltas can be seconds long), so alerts keyed on that metric need reshaping.
-
-### Drop Policy
-
-Under the default strict policy, when the video frame buffer cannot satisfy sync for a state, all states up to and including that state are dropped. When states are dropped, the drop callback fires.
-
-```python
-inference_portal.on_drop(callback)  # called with the dropped states, fires on both sync failure and buffer overflow
-```
-
-The drop callback is informational — the application decides what to do (e-stop, log degradation, custom recovery). Portal does not impose any safety policy on the robot; the user controls the robot loop and knows best how to react.
-
-With `set_reuse_stale_frames(True)`, sync-fail drops are replaced by stale-frame reuse once a track has emitted at least once. Only two drop sources remain: (1) state-buffer overflow during the pre-first-emission startup window, and (2) a past-horizon frame arriving before any emission has happened for the blocked track.
-
-### Sync Internals
-
-Once a state and video frames are synced into an observation, all video frames up to that point are removed from the buffer.
-
-Under the default strict policy, if the video frame buffer cannot satisfy sync for a state (no frame from every track within the search range), all states up to and including that state are dropped and the drop callback fires. Under the reuse policy, the state falls back to that track's most recently emitted frame and the observation fires normally — the video buffer is left untouched so a later state can still consume the fresh frame.
-
-## Examples
-
-### Robot side — callback action
-
-```python
-from lerobot.robots.myrobot import MyRobot
-
-robot = MyRobot(config=...)
-robot.connect()
-
-inference_portal = portal(session="test_session", role=ROBOT)
-inference_portal.add_video("camera1")
-inference_portal.add_video("camera2")
-inference_portal.add_state("joint1", "joint2", "joint3")
-inference_portal.add_action("joint1", "joint2", "joint3")
+def on_obs(obs):
+    nonlocal last_obs
+    last_obs = obs
+    log.append({"kind": "obs", "ts_us": obs.timestamp_us, "obs": obs})
 
 def on_action(action):
-    robot.send_action(action)
+    log.append({
+        "kind": "action",
+        "ts_us": action.timestamp_us,
+        "in_reply_to": action.in_reply_to_ts_us,
+        "sender": action.sender,
+        "values": action.values,
+    })
 
-def on_drop(dropped_states):
-    print(f"dropped {len(dropped_states)} states")
-
-inference_portal.on_action(on_action)
-inference_portal.on_drop(on_drop)
-
-while True:
-    obs = robot.get_observation()
-    inference_portal.send_video_frame("camera1", obs.image.camera1)
-    inference_portal.send_video_frame("camera2", obs.image.camera2)
-    inference_portal.send_state(obs.state)
-
-    sleep(1 / fps)
+rec.on_observation(on_obs)
+rec.on_action(on_action)
+await rec.connect(URL, recorder_token)
+# never call set_active_operator — pure observer.
 ```
 
-### Robot side — smoothed action
+Same shape works for shadow eval (replace logging with a model.compare
+call) and live monitoring (push to a UI websocket).
+
+### Operator-as-recorder (HITL self-record)
+
+A single operator that wants to log its own session enables the flag and
+relies on echo. `on_action` fires for every executed action, whether
+produced by another operator or by self while active. No separate teeing
+in user code.
 
 ```python
-from lerobot.robots.myrobot import MyRobot
-
-robot = MyRobot(config=...)
-robot.connect()
-
-inference_portal = portal(session="test_session", role=ROBOT)
-inference_portal.add_video("camera1")
-inference_portal.add_video("camera2")
-inference_portal.add_state("joint1", "joint2", "joint3")
-inference_portal.add_action("joint1", "joint2", "joint3")
-
-def on_action(action):
-    smoother.add(action)
-
-inference_portal.on_action(on_action)
-
-while True:
-    obs = robot.get_observation()
-    inference_portal.send_video_frame("camera1", obs.image.camera1)
-    inference_portal.send_video_frame("camera2", obs.image.camera2)
-    inference_portal.send_state(obs.state)
-
-    action = smoother.get()
-    robot.send_action(action)
-
-    sleep(1 / fps)
+op = Operator(OperatorConfig("session", identity="binh-teleop"))
+op.set_action_subscription(True)
+op.on_action(lambda a: log.append(a))
+# both incoming (other operator) and own sends (when active) reach `log`.
 ```
 
-### Operator side — teleop
+### Out-of-scope variations (kept simple)
 
-```python
-from lerobot.robots.myrobot import MyRobot
+- **Per-stream subscription flags.** A single combined flag is the v0.2
+  shape. If a future use case wants subscription without echo or vice
+  versa, add a second flag rather than expanding this one.
+- **Filtering by sender at the callback level.** The gate is fixed at
+  `sender == active_operator`. Apps that want "fire for all senders"
+  (raw shadow capture of every operator's outputs) would need a separate
+  unfiltered-firehose path; not in v0.2.
 
-leader = Leader(config=...)
-leader.connect()
+### Python wiring
 
-inference_portal = portal(session="test_session", role=OPERATOR)
-inference_portal.add_video("camera1")
-inference_portal.add_video("camera2")
-inference_portal.add_state("joint1", "joint2", "joint3")
-inference_portal.add_action("joint1", "joint2", "joint3")
+The Python `Operator` class re-exposes `on_action`, `on_action_chunk`,
+`get_action`, `get_action_chunk` (slots already on the underlying
+Portal; the wrapper just forwards). `OperatorConfig` exposes
+`set_action_subscription(bool)`. Default off — same as the Rust core.
 
-def on_observation(obsv):
-    show(obsv)
+### Migration
 
-inference_portal.on_observation(on_observation)
+Existing `Robot`, `Operator`, and `Portal` callers see no change unless
+they call `set_action_subscription(True)`. The new `sender` field on
+`Action` / `ActionChunk` is `None` on paths that previously delivered
+records, so destructuring keeps working in Python. Rust callers that
+explicitly construct `Action` / `ActionChunk` literals add `sender: None`.
 
-while True:
-    action = leader.get_action()
-    inference_portal.send_action(action)
+## End-to-end testing plan
 
-    sleep(1 / fps)
-```
+Tests below assume a real LiveKit server (Cloud or self-hosted dev). Mocks
+are only used for Rust unit tests of the action gate. Each scenario
+should land as an integration test in
+`python/packages/livekit-portal/tests/`.
+
+### Happy paths
+
+1. **Single operator drives.** Robot starts, operator connects with
+   identity `"op1"`, robot or operator sets active to `"op1"`, operator
+   sends actions, robot's `on_action` fires. Verifies the basic v0.2
+   loop end to end.
+2. **Token-mint pre-seeds active operator.** Robot's token includes
+   `attributes.active_operator = "op1"`. Operator `"op1"` connects and
+   immediately drives without any RPC call.
+3. **Two operators, explicit handoff.** Both connect. Operator A claims,
+   sends, robot processes. Operator B calls `set_active_operator("opB")`.
+   Robot now processes B, drops A. `on_active_operator_changed` fires on
+   both.
+4. **Supervisor pattern.** Three participants: robot, operator A,
+   operator B. A third participant `"super"` connects as operator but
+   never sends actions, only calls `set_active_operator`. Verify it can
+   arbitrate without driving.
+5. **Operator self-claim.** Operator calls
+   `op.set_active_operator(op.identity())`. Robot's attribute updates
+   correctly.
+
+### Handoff edge cases
+
+6. **Active operator disconnects.** Robot sees `participant_disconnected`.
+   `active_operator` stays pinned at the disconnected identity. Other
+   operators' actions still get dropped. No `on_active_operator_changed`
+   fires.
+7. **Disconnected operator reconnects with same identity.** Because the
+   pointer stayed pinned, their actions are accepted again immediately
+   on reconnect with no re-claim needed.
+7b. **Different operator claims after a disconnect.** A is active, A
+   disconnects, A's pointer stays pinned. B calls
+   `set_active_operator("B")`. Pointer moves to B. Subsequent A
+   reconnect does not steal control back, A would have to claim again.
+8. **Set to non-existent identity.** Robot accepts the call,
+   `active_operator` becomes `"ghost"`, all actions from real operators
+   are dropped.
+9. **Set to `None` mid-drive.** Robot stops processing actions
+   immediately. In-flight chunks already delivered by LiveKit's byte
+   stream are received as normal (delivery is reliable). What the
+   robot's app does with a delivered chunk after the gate clears is
+   app-level, not Portal's concern.
+10. **Active operator set before any operator joins.** Robot starts with
+    seeded `active_operator`. Operators all silently dropped until the
+    matching identity connects.
+11. **Concurrent claims.** A and B both call `set_active_operator` at the
+    same time. LiveKit serializes attribute writes through the server.
+    Final state is deterministic. Both clients see the same
+    `on_active_operator_changed` value.
+12. **Rapid thrash.** `A → B → C → A` within 50 ms. Each transition fires
+    one `on_active_operator_changed`. No actions from the wrong operator
+    sneak through during transitions.
+
+### Action chunk interaction
+
+Chunks are LiveKit byte streams. Once a chunk starts being sent by an
+operator, LiveKit reliably delivers it. Portal does not interrupt or
+truncate in-flight chunks based on `active_operator` changes. The gate
+applies at the receive site: if `sender != active_operator` at delivery
+time, the chunk is dropped. Anything past delivery is app-level.
+
+13. **A's chunk is mid-stream during handoff.** Operator A starts sending
+    a 30-step chunk. Mid-stream, B becomes active. A's chunk is fully
+    received by LiveKit (byte stream guarantee). The gate on Portal's
+    receive side checks the sender at the moment of full delivery: if A
+    is no longer active, the chunk is dropped before reaching
+    `on_action_chunk`.
+14. **Multiple senders' chunks during overlap.** Both A and B send chunks
+    around the same handoff window. Robot only fires `on_action_chunk`
+    for chunks from the active operator at delivery time. Others are
+    dropped silently.
+
+### Lifecycle
+
+15. **Robot disconnects.** All operators see `participant_disconnected`
+    for the robot. New `set_active_operator` calls fail cleanly with a
+    "no robot in room" error, not a hang.
+16. **Operator re-connect during ongoing session.** Late joiner reads
+    current `active_operator` from attribute sync, no stale state.
+17. **Same operator identity twice.** LiveKit rejects the second
+    connection. Verify the error surfaces as a clean exception, not a
+    dangling handle.
+
+### Token and permission
+
+Portal sets the `role` attribute on connect via `setAttributes`. We do
+not assume the token-mint script knows about Portal-specific keys. The
+token grant **must** include `canUpdateOwnMetadata`.
+
+18. **Token has `canUpdateOwnMetadata`, role not in token.** Portal calls
+    `setAttributes({role: ...})` after connect. Other participants see
+    the role within one round trip. This is the default path.
+19. **Token has `canUpdateOwnMetadata` and role in token.** Role is
+    available immediately at connect. Portal's `setAttributes` is a
+    no-op for that key.
+20. **Token without `canUpdateOwnMetadata`.** Portal's `setAttributes`
+    fails. Surface a clear error at connect time, do not silently leave
+    the participant unidentified. Same applies if the token also
+    omits the role attribute.
+21. **Operator without identity in config.** UUID is generated. Identity
+    is non-empty and unique across the run.
+
+### RPC
+
+22. **`set_active_operator` RPC before robot is in room.** Operator
+    connects first, robot has not joined yet. Calling the RPC fails with
+    a clean error.
+23. **RPC during high-frequency action stream.** Operator A is sending
+    actions at 100 Hz. B calls `set_active_operator("B")`. No actions
+    are reordered, no actions are lost on the wire (some are dropped at
+    the robot's gate, which is correct).
+24. **Bad arg type to RPC.** Passing a non-string identity returns a
+    validation error. Robot's attribute is unchanged.
+
+### Coexistence
+
+25. **v0.1 `Portal` still works in a v0.2 codebase.** Existing tests for
+    the unified `Portal` continue to pass.
+26. **v0.1 robot + v0.2 operator in same room.** Document expected
+    behavior even if it is "best effort". Likely outcome: operator
+    cannot find the robot via role attribute, falls back to the v0.1
+    identity convention or fails. Test it and pin the behavior.
+27. **v0.2 robot + v0.1 operator in same room.** Likely outcome: v0.1
+    operator's identity is `"operator"`, v0.2 robot's `active_operator`
+    is empty by default, v0.1 operator's actions are dropped. Verify.
+
+### Observation correctness under multi-operator load
+
+28. **Non-active operator's stream does not affect robot's action sync.**
+    With 5 operators streaming and 1 active, robot's `on_action` rate
+    matches the active operator's send rate. CPU and bandwidth on the
+    robot grow linearly with operator count (acceptable for now).
+29. **`on_drop` semantics unchanged.** Multi-operator activity does not
+    change observation drop behavior on the operator side. Each operator
+    still sees its own observation stream from the robot.
+
+### Active operator propagation
+
+These tests measure that the `lk.portal.active_operator` attribute
+reaches every participant within a bounded window after a write, and
+that the action gate engages on the new value as soon as the mirror
+updates.
+
+30. **Robot-side write reaches every operator within 500 ms.** Three
+    operators connected. Robot calls `set_active_operator("X")`. All
+    three operators see `op.active_operator() == "X"` within 500 ms
+    (LAN test); each operator's `on_active_operator_changed` fires
+    exactly once with `"X"`.
+31. **Operator-side write reaches every operator and the robot within
+    500 ms.** Operator A calls `set_active_operator("B")`. The robot's
+    own `active_operator()` returns `"B"`, all other operators' mirrors
+    return `"B"`, all `on_active_operator_changed` callbacks fire
+    exactly once. Pinning the bound at 500 ms covers the extra RPC hop.
+32. **Action acceptance follows the mirror.** Robot calls
+    `set_active_operator("policy")`. Within 500 ms, actions sent by
+    `"policy"` reach the robot's `on_action` and actions sent by other
+    operators do not. After a second `set_active_operator("human")`,
+    `"human"` is accepted and `"policy"` is dropped.
+33. **Idempotent write does not fire the change callback.** Robot calls
+    `set_active_operator("X")` twice with the same value. The second
+    call does not fire `on_active_operator_changed`.
+34. **Late joiner reads the current value at connect.** Operator C
+    connects after Robot already wrote `set_active_operator("policy")`.
+    `c.active_operator()` returns `"policy"` immediately (no
+    `_wait_for` polling).
+35. **Cross-write race converges.** Operator A calls
+    `set_active_operator("A")` and Operator B calls
+    `set_active_operator("B")` within 50 ms of each other. Both writes
+    succeed (both RPCs return `Ok`). Final state is deterministic and
+    visible to everyone (LiveKit serializes attribute writes through
+    the server). All `on_active_operator_changed` callbacks see the
+    same final value.
+
+### Operator-side action subscription
+
+These tests cover the v0.2 HITL recording feature: operators with
+`set_action_subscription(True)` receive the active operator's actions
+via the same gate the robot uses, the active operator gets local echo,
+and `Action.sender` / `ActionChunk.sender` is set at gate time.
+
+36. **Default is off.** Operator without `set_action_subscription(True)`
+    never fires `on_action` even when actions are flowing through the
+    room. Verifies we don't accidentally subscribe everyone.
+37. **Recorder receives the active operator's actions.** Recorder
+    operator (subscription on) plus an active operator. Active sends
+    actions; recorder's `on_action` fires for each, with
+    `action.sender == active_operator_identity`.
+38. **Non-active operators are dropped at the recorder.** Two
+    operators streaming, only one active. Recorder's `on_action` fires
+    only for the active one's actions; the non-active one's are
+    silently dropped at the recorder (matching the robot's gate).
+39. **Self-echo when active.** Active operator with subscription on
+    calls `send_action`. Its own `on_action` fires locally with
+    `action.sender == self.local_identity()`. The mirror in
+    `get_action()` reflects the latest sent action.
+40. **No echo when inactive.** Operator with subscription on but not
+    active calls `send_action` (the gate at the robot will drop it).
+    Local `on_action` does not fire — echo only triggers when self ==
+    active. The action goes nowhere.
+41. **Recorder sees handoff in action stream.** Recorder + two
+    operators A and B. A is active; recorder receives A's actions with
+    `sender == "A"`. Handoff to B; recorder now receives B's actions
+    with `sender == "B"`. The `sender` field flips on the boundary,
+    no race between handoff event and label.
+42. **`sender` is set on every delivered action.** Every record fired
+    on `on_action` has `sender` populated and equal to the operator
+    who produced the action. Verifies the gate-time stamping path.
+43. **Action chunks subscription works.** Recorder subscribes; active
+    operator sends a chunk; recorder's `on_action_chunk` fires with
+    `chunk.sender == active_operator_identity`.
+44. **Pull surface populates on operator side.** Recorder calls
+    `get_action()` after an action arrives; returns the latest action.
+    `get_action_chunk(name)` returns the latest chunk. Both reflect
+    the gate-passed values, not raw firehose.
+45. **Subscription does not affect non-subscribers.** Three operators
+    in the room; only one has `set_action_subscription(True)`. The
+    other two never fire `on_action`. Verifies the flag is per-operator
+    and does not leak.
+46. **Subscription does not affect the robot.** Robot's `on_action`
+    rate is unchanged whether 0, 1, or N operators have subscription
+    on. Recorders are pure observers.
+
+## Out of scope (deferred)
+
+- Action blending across senders during handoff. Today's replace semantics
+  give flush-on-handoff for free.
+- Confidence-based auto-handoff. Policy publishes confidence, robot decides.
+  App-level concern.
+- `on_set_active_operator_request` gate for app-level arbitration. Default
+  accept is fine for v1.
+- Shadow-action callback for capturing dropped streams.
+- Multiple robots per room.

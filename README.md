@@ -33,15 +33,17 @@
 
 ## Features
 
-**Remote robot, same code.** Your robot loop keeps its shape. Portal moves the hardware to another machine. Your policy or teleop code still sees a local-looking `Robot` object.
+**Remote robot, same code.** Your robot loop keeps its shape. Portal moves the hardware to another machine. Your policy or teleop code still sees a local-looking robot object.
 
 **Synced observations out of the box.** Cameras and joint state arrive fused into `Observation(frames, state, timestamp_us)`. That is the shape robotics policies already consume. No matching logic on your side.
+
+**Multiple operators per room (HITL-ready).** Run a policy and a human teleoperator in the same session. The robot exposes which operator it listens to as a single pointer. Anyone in the room can hand off control with one call. Non-active operators stream silently and the robot drops their actions. Built on LiveKit attributes plus one RPC, no new transport.
 
 **Built for VLA inference.** First-class **action chunks** ship a `(horizon, n_fields)` tensor in one packet via byte streams (no 15 KB cap). Tag every action with `in_reply_to_ts_us` and `metrics.policy.e2e_us_p50/p95` derives true observation→action latency — not just ping. See [`examples/python/inference/`](examples/python/inference) for a runnable VLA-style loop.
 
 **Frame video for policies.** WebRTC video is lossy and resamples colorspace. For inference where pixels matter, pass a non-H264 codec to [`add_video`](docs/frame-video.md) (`RAW`, `PNG`, or `MJPEG`) and each frame ships independently over a reliable byte stream. Same `send_video_frame` / `on_video_frame` API, RGB on both ends. MJPEG q=90 sustains 30 fps at 720p.
 
-**Works with any stack.** A direct `Portal` API in Python and Rust. An optional [lerobot](https://github.com/huggingface/lerobot) plugin for a one-line wrap around your existing `Robot` or `Teleoperator`.
+**Works with any stack.** Role-specific `Robot` and `Operator` classes in Python and a unified `Portal` core in Rust. An optional [lerobot](https://github.com/huggingface/lerobot) plugin for a one-line wrap around your existing `Robot` or `Teleoperator`.
 
 **Low-latency transport.** WebRTC video (SIMD RGB→I420). SCTP data channels with reliable or unreliable delivery per stream. Byte streams for arbitrary-size payloads. RPC for one-shots like `home` or `calibrate`. Rust core, Python bindings via UniFFI.
 
@@ -98,33 +100,34 @@ the control loop starts.
 
 ```python
 import asyncio, time
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Robot, RobotConfig
 
 async def main():
-    cfg = PortalConfig("session-1", Role.ROBOT)
+    cfg = RobotConfig("session-1")
     cfg.add_video("front")                       # add more tracks for multi-camera
     cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.set_fps(30)
 
-    portal = Portal(cfg)
+    robot_portal = Robot(cfg)
 
     # One-shot commands. Either side can register. Either side can invoke.
     def on_home(_):
         robot.home()
         return "ok"
-    portal.register_rpc_method("home", on_home)
+    robot_portal.register_rpc_method("home", on_home)
 
-    # Actions arrive here as the operator produces them.
-    portal.on_action(lambda a: robot.send_action(a.values))
+    # Actions arrive here from whichever operator currently holds control.
+    # Other operators in the room are silently dropped at the gate.
+    robot_portal.on_action(lambda a: robot.send_action(a.values))
 
-    await portal.connect(url, token)
+    await robot_portal.connect(url, token)
 
     while running:
         obs = robot.get_observation()
         ts = int(time.time() * 1_000_000)
-        portal.send_video_frame("front", obs.image, 640, 480, timestamp_us=ts)
-        portal.send_state(obs.state, timestamp_us=ts)
+        robot_portal.send_video_frame("front", obs.image, 640, 480, timestamp_us=ts)
+        robot_portal.send_state(obs.state, timestamp_us=ts)
         await asyncio.sleep(1 / 30)
 
 asyncio.run(main())
@@ -134,29 +137,33 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from livekit.portal import DType, Portal, PortalConfig, Role
+from livekit.portal import DType, Operator, OperatorConfig
 
 async def main():
-    cfg = PortalConfig("session-1", Role.OPERATOR)
+    cfg = OperatorConfig("session-1", identity="policy-v1")
     cfg.add_video("front")
     cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
     cfg.set_fps(30)
 
-    portal = Portal(cfg)
+    op = Operator(cfg)
 
     # Cameras, state, and a sender timestamp arrive fused as one tuple.
     def on_observation(obs):
         # obs.frames["front"], obs.state, obs.timestamp_us
         # Pass in_reply_to_ts_us so metrics.policy.e2e_us_* measures
         # true observation→action latency on the robot side.
-        portal.send_action(policy(obs), in_reply_to_ts_us=obs.timestamp_us)
+        op.send_action(policy(obs), in_reply_to_ts_us=obs.timestamp_us)
 
-    portal.on_observation(on_observation)
-    await portal.connect(url, token)
+    op.on_observation(on_observation)
+    await op.connect(url, token)
 
-    await portal.perform_rpc("home")             # imperative commands, not a loop
-    print(portal.metrics())                      # RTT, sync delta, jitter, drops
+    # Robot starts with `active_operator=None` and drops every action.
+    # Claim control to be the one whose actions are accepted.
+    await op.set_active_operator(op.local_identity())
+
+    await op.perform_rpc("home")                 # imperative commands, not a loop
+    print(op.metrics())                          # RTT, sync delta, jitter, drops
 
     while running:
         await asyncio.sleep(1)
@@ -165,10 +172,10 @@ asyncio.run(main())
 ```
 
 That is the whole surface at work in one page. Synced observations, an
-action callback, an RPC for one-shots, and a live metrics snapshot. The
-code above is a sketch. For a runnable version with token minting already
-wired up, see [`examples/python/basic/`](examples/python/basic) or the
-step-by-step [Quickstart doc](docs/quickstart.md).
+action callback, a control-plane claim, an RPC for one-shots, and a live
+metrics snapshot. The code above is a sketch. For a runnable version with
+token minting already wired up, see [`examples/python/basic/`](examples/python/basic)
+or the step-by-step [Quickstart doc](docs/quickstart.md).
 
 ## Behind the project
 
@@ -286,9 +293,9 @@ this. A direct socket is enough.
 
 | Page | What's in it |
 |---|---|
-| [Quickstart](docs/quickstart.md) | Install, tokens, first run with the Portal API |
-| [Portal API](docs/portal-api.md) | The primary surface. `PortalConfig`, callbacks, send methods, role semantics |
-| [Concepts](docs/concepts.md) | Roles, the observation model, frame format |
+| [Quickstart](docs/quickstart.md) | Install, tokens, first run with `Robot` and `Operator` |
+| [Portal API](docs/portal-api.md) | The primary surface. `Robot`, `Operator`, callbacks, send methods |
+| [Concepts](docs/concepts.md) | Roles, the observation model, multi-controller, frame format |
 | [Tuning](docs/tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
 | [RPC](docs/rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
 | [Synchronization deep dive](docs/synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |

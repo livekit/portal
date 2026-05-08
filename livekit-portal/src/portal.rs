@@ -19,15 +19,114 @@ use crate::frame_video::{
     dispatch_frame_payload, FrameVideoPublisher, FrameVideoTrackEntry, FRAME_VIDEO_TOPIC,
 };
 use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
-use crate::rpc::RpcHandler;
+use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
 use crate::rtt::RttService;
 use crate::serialization::{action_fingerprint, schema_fingerprint};
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
 use crate::types::*;
 use crate::video::{VideoPublisher, VideoReceiver, VideoTrackSlots};
 
+/// Participant attribute keys used by Portal for role discovery and the
+/// multi-controller pointer. Namespaced to avoid colliding with any
+/// application-level attributes the user may also be setting.
+pub const ROLE_ATTR_KEY: &str = "lk.portal.role";
+pub const ACTIVE_OPERATOR_ATTR_KEY: &str = "lk.portal.active_operator";
+const ROLE_VALUE_ROBOT: &str = "robot";
+const ROLE_VALUE_OPERATOR: &str = "operator";
+/// RPC method registered by Robot-side Portals so any participant can request
+/// a change to the active operator pointer. Payload is the new identity, or
+/// the empty string to clear. Result is the empty string on success.
+pub const SET_ACTIVE_OPERATOR_RPC: &str = "portal.set_active_operator";
+
+/// App-level RPC error code (outside the SDK's 1001-1999 reserved range)
+/// returned when the robot has not yet finished setting up its
+/// LocalParticipant.
+const RPC_NOT_CONNECTED: u32 = 2001;
+/// App-level RPC error code returned when the SDK's `set_attributes` fails
+/// while the robot is processing a `set_active_operator` request.
+const RPC_SET_ATTRIBUTES_FAILED: u32 = 2002;
+
 type ObservationCb = Box<dyn Fn(&Observation) + Send + Sync>;
 type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
+type IdentityCb = Box<dyn Fn(&str) + Send + Sync>;
+type OptIdentityCb = Box<dyn Fn(Option<&str>) + Send + Sync>;
+
+/// State for the v0.2 multi-controller layer. Lives in an `Arc` so the room
+/// event handler and the `set_active_operator` RPC handler can share it
+/// without copying.
+pub(crate) struct ControllerState {
+    /// On Robot side: source of truth, mirrored as own `lk.portal.active_operator`
+    /// attribute. On Operator side: a mirror of the robot's attribute, updated
+    /// from `ParticipantAttributesChanged` events.
+    pub(crate) active_operator: Mutex<Option<String>>,
+    /// Identities of currently-connected operators (excluding self), populated
+    /// from `ParticipantConnected` plus the initial remote-participants
+    /// snapshot.
+    pub(crate) operators: Mutex<HashSet<String>>,
+    /// The robot's identity, discovered by reading the `lk.portal.role`
+    /// attribute. Operators use this to address `set_active_operator` RPCs.
+    pub(crate) robot_identity: Mutex<Option<String>>,
+
+    on_operator_joined: Mutex<Option<IdentityCb>>,
+    on_operator_left: Mutex<Option<IdentityCb>>,
+    on_active_operator_changed: Mutex<Option<OptIdentityCb>>,
+}
+
+impl ControllerState {
+    fn new() -> Self {
+        Self {
+            active_operator: Mutex::new(None),
+            operators: Mutex::new(HashSet::new()),
+            robot_identity: Mutex::new(None),
+            on_operator_joined: Mutex::new(None),
+            on_operator_left: Mutex::new(None),
+            on_active_operator_changed: Mutex::new(None),
+        }
+    }
+
+    fn fire_op_joined(&self, identity: &str) {
+        if let Some(cb) = self.on_operator_joined.lock().as_ref() {
+            let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
+            if result.is_err() {
+                log::error!("on_operator_joined callback panicked");
+            }
+        }
+    }
+
+    fn fire_op_left(&self, identity: &str) {
+        if let Some(cb) = self.on_operator_left.lock().as_ref() {
+            let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
+            if result.is_err() {
+                log::error!("on_operator_left callback panicked");
+            }
+        }
+    }
+
+    fn fire_active_changed(&self, identity: Option<&str>) {
+        if let Some(cb) = self.on_active_operator_changed.lock().as_ref() {
+            let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
+            if result.is_err() {
+                log::error!("on_active_operator_changed callback panicked");
+            }
+        }
+    }
+
+    fn clear(&self) {
+        *self.active_operator.lock() = None;
+        self.operators.lock().clear();
+        *self.robot_identity.lock() = None;
+    }
+}
+
+/// Classify a participant by their `lk.portal.role` attribute. Returns
+/// `None` if the attribute is absent or has an unknown value.
+fn classify_role(attrs: &HashMap<String, String>) -> Option<Role> {
+    match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
+        Some(ROLE_VALUE_ROBOT) => Some(Role::Robot),
+        Some(ROLE_VALUE_OPERATOR) => Some(Role::Operator),
+        _ => None,
+    }
+}
 
 /// Drains the buffers returned by `SyncBuffer::push_*` and dispatches them to
 /// the user — callback first (by reference, no clone), then into the pull-based
@@ -106,7 +205,6 @@ impl ObservationSink {
 
 struct ConnectionState {
     room: Option<Room>,
-    local_participant: Option<LocalParticipant>,
     event_task: Option<JoinHandle<()>>,
     rtt: Option<Arc<RttService>>,
 }
@@ -173,11 +271,26 @@ pub struct Portal {
     // traffic (data topic or video subscription). Set lazily on the first
     // matching event; cleared on disconnect, reconnect, and when that
     // participant leaves the room.
+    //
+    // **v0.2:** Retained for the legacy `peer_identity()` API and as a
+    // backstop for `perform_rpc(None, ...)` routing. The multi-controller
+    // surface (`active_operator`, `operators`, `robot_identity`) lives on
+    // the `controller` field below.
     peer_identity: Arc<Mutex<Option<ParticipantIdentity>>>,
 
     // RPC methods the caller has registered. Applied to the LocalParticipant
     // on connect(); survives disconnect so reconnects reapply them.
     rpc_handlers: Arc<Mutex<HashMap<String, RpcHandler>>>,
+
+    // Local-participant handle held in its own `Arc<Mutex<...>>` so the
+    // built-in `set_active_operator` RPC handler can clone access to it
+    // without sharing the broader `ConnectionState`.
+    local_participant: Arc<Mutex<Option<LocalParticipant>>>,
+
+    // Multi-controller state (v0.2). Shared with the room event handler so
+    // attribute-change and participant-connect events can update operators,
+    // robot_identity, and active_operator without taking a Portal-level lock.
+    controller: Arc<ControllerState>,
 }
 
 impl Portal {
@@ -238,7 +351,6 @@ impl Portal {
             lifecycle: tokio::sync::Mutex::new(()),
             conn: Mutex::new(ConnectionState {
                 room: None,
-                local_participant: None,
                 event_task: None,
                 rtt: None,
             }),
@@ -260,6 +372,8 @@ impl Portal {
             metrics,
             peer_identity: Arc::new(Mutex::new(None)),
             rpc_handlers: Arc::new(Mutex::new(HashMap::new())),
+            local_participant: Arc::new(Mutex::new(None)),
+            controller: Arc::new(ControllerState::new()),
         }
     }
 
@@ -290,8 +404,76 @@ impl Portal {
         // handler itself. Overlap is idempotent — the SDK's rpc handler map
         // is last-writer-wins.
         let local_participant = room.local_participant();
-        self.conn.lock().local_participant = Some(local_participant.clone());
+        *self.local_participant.lock() = Some(local_participant.clone());
+
+        // Multi-controller layer (v0.2). Opt-in via `set_multi_controller`.
+        // Off by default so v0.1 callers using the unified Portal class keep
+        // working without role attributes, action gates, or the new RPC.
+        if self.config.multi_controller {
+            // Robot-side: register the built-in `set_active_operator` RPC. The
+            // handler clones the LP slot and the controller Arc so the closure
+            // can update both the attribute and the local mirror without
+            // holding any Portal-level lock.
+            if self.config.role == Role::Robot {
+                let lp_slot = self.local_participant.clone();
+                let controller = self.controller.clone();
+                let handler: RpcHandler = Arc::new(move |data: RpcInvocationData| {
+                    let lp_slot = lp_slot.clone();
+                    let controller = controller.clone();
+                    Box::pin(async move {
+                        set_active_operator_rpc_impl(&lp_slot, &controller, data).await
+                    })
+                });
+                self.register_rpc_method(SET_ACTIVE_OPERATOR_RPC, handler);
+            }
+        }
+
         self.apply_rpc_handlers(&local_participant);
+
+        if self.config.multi_controller {
+            // Self-set the role attribute so other participants can discover
+            // us. Token-mint may also have set this key; in that case
+            // `set_attributes` is effectively a no-op for the same value.
+            let role_value = match self.config.role {
+                Role::Robot => ROLE_VALUE_ROBOT,
+                Role::Operator => ROLE_VALUE_OPERATOR,
+            };
+            let mut role_attrs = HashMap::new();
+            role_attrs.insert(ROLE_ATTR_KEY.to_string(), role_value.to_string());
+            if let Err(e) = local_participant.set_attributes(role_attrs).await {
+                // Most common cause: the token grant did not include
+                // `canUpdateOwnMetadata`. Surface a clear error so callers
+                // fix their token-mint script rather than silently leaving
+                // the participant unidentified.
+                return Err(PortalError::Room(format!(
+                    "failed to publish role attribute (token may be missing canUpdateOwnMetadata): {e}"
+                )));
+            }
+
+            // Robot-side: if the token seeded `lk.portal.active_operator`,
+            // mirror it locally so the action gate sees the configured
+            // pointer before anyone calls `set_active_operator`.
+            if self.config.role == Role::Robot {
+                let attrs = local_participant.attributes();
+                if let Some(seed) = attrs.get(ACTIVE_OPERATOR_ATTR_KEY) {
+                    let value = if seed.is_empty() { None } else { Some(seed.clone()) };
+                    *self.controller.active_operator.lock() = value;
+                }
+            }
+
+            // Walk the room snapshot once at connect so any participant that
+            // joined before us is already in `operators` / `robot_identity`.
+            // New joiners get added by the `ParticipantConnected` event
+            // handler.
+            for (_sid, participant) in room.remote_participants() {
+                classify_and_update(
+                    &self.controller,
+                    self.config.role,
+                    &participant.identity(),
+                    &participant.attributes(),
+                );
+            }
+        }
 
         match self.config.role {
             Role::Robot => self.setup_robot(&room).await?,
@@ -316,6 +498,7 @@ impl Portal {
         // plain Vec, not a HashMap.
         let chunk_slots_for_dispatch: Vec<Arc<ChunkSlot>> =
             self.chunk_slots.values().cloned().collect();
+        let local_identity = local_participant.identity().as_str().to_string();
         let ctx = EventContext {
             config: self.config.clone(),
             action_schema_fp,
@@ -332,6 +515,8 @@ impl Portal {
             metrics: self.metrics.clone(),
             rtt: rtt.clone(),
             peer_identity: self.peer_identity.clone(),
+            controller: self.controller.clone(),
+            local_identity,
         };
         let event_handle = tokio::spawn(async move {
             let mut events = events;
@@ -342,11 +527,11 @@ impl Portal {
 
         let mut state = self.conn.lock();
         state.room = Some(room);
-        // local_participant was set earlier (before apply_rpc_handlers).
         state.event_task = Some(event_handle);
         state.rtt = Some(rtt);
         Ok(())
     }
+
 
     pub fn send_video_frame(
         &self,
@@ -474,6 +659,115 @@ impl Portal {
         self.peer_identity.lock().as_ref().map(|p| p.as_str().to_string())
     }
 
+    // --- Multi-controller surface (v0.2) ---
+
+    /// This Portal's own LiveKit identity once connected. Reads from the
+    /// stored `LocalParticipant`. `None` before `connect()` succeeds.
+    pub fn local_identity(&self) -> Option<String> {
+        self.local_participant
+            .lock()
+            .as_ref()
+            .map(|lp| lp.identity().as_str().to_string())
+    }
+
+    /// Identity of the operator the robot is currently listening to, or
+    /// `None` if no operator is selected. On Robot side this is the local
+    /// pointer (also broadcast as the `lk.portal.active_operator` attribute).
+    /// On Operator side it is a mirror of the robot's attribute.
+    pub fn active_operator(&self) -> Option<String> {
+        self.controller.active_operator.lock().clone()
+    }
+
+    /// Set the active operator. On Robot side this updates the local pointer
+    /// and broadcasts via the robot's own attributes. On Operator side this
+    /// dispatches a `portal.set_active_operator` RPC to the robot.
+    ///
+    /// Pass `None` to clear and drop all incoming actions.
+    pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
+        match self.config.role {
+            Role::Robot => {
+                let lp = self
+                    .local_participant
+                    .lock()
+                    .clone()
+                    .ok_or(PortalError::NotConnected)?;
+                let prev = self.controller.active_operator.lock().clone();
+                let mut attrs = HashMap::new();
+                attrs.insert(
+                    ACTIVE_OPERATOR_ATTR_KEY.to_string(),
+                    identity.clone().unwrap_or_default(),
+                );
+                lp.set_attributes(attrs)
+                    .await
+                    .map_err(|e| PortalError::Room(e.to_string()))?;
+                *self.controller.active_operator.lock() = identity.clone();
+                if prev != identity {
+                    self.controller.fire_active_changed(identity.as_deref());
+                }
+                Ok(())
+            }
+            Role::Operator => {
+                // Cached robot identity (populated by attribute events) is
+                // the fast path. The common pattern is:
+                //
+                //   await op.connect(...)
+                //   await op.set_active_operator(op.local_identity())
+                //
+                // immediately after connect, before the SDK has surfaced the
+                // robot's attributes via `ParticipantAttributesChanged`. To
+                // make that work without forcing every caller to manually
+                // wait, we scan `remote_participants()` and, if still empty,
+                // poll briefly. Bounded at ~1.5 s — long enough for the
+                // initial attribute event on a healthy LAN, short enough to
+                // surface NoPeer quickly when there really is no robot.
+                let robot = self.resolve_robot_identity().await?;
+                let payload = identity.unwrap_or_default();
+                self.perform_rpc(Some(&robot), SET_ACTIVE_OPERATOR_RPC, payload, None)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Currently-connected operator identities (excluding self).
+    pub fn operators(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.controller.operators.lock().iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Identity of the robot in the room, or `None` if none has been seen.
+    /// Operator-side helper, derived from the robot's `lk.portal.role`
+    /// attribute.
+    pub fn robot_identity(&self) -> Option<String> {
+        self.controller.robot_identity.lock().clone()
+    }
+
+    /// Fire when an operator joins the room. Identity is the new operator's
+    /// participant identity. Only one callback is stored; subsequent calls
+    /// overwrite.
+    pub fn on_operator_joined(&self, callback: impl Fn(&str) + Send + Sync + 'static) {
+        *self.controller.on_operator_joined.lock() = Some(Box::new(callback));
+    }
+
+    /// Fire when an operator leaves the room. The robot's `active_operator`
+    /// attribute is **not** auto-cleared on disconnect; the pointer stays
+    /// pinned so a reconnect with the same identity resumes control.
+    pub fn on_operator_left(&self, callback: impl Fn(&str) + Send + Sync + 'static) {
+        *self.controller.on_operator_left.lock() = Some(Box::new(callback));
+    }
+
+    /// Fire when the robot's `active_operator` attribute changes (or, on the
+    /// Robot side, when the local pointer is updated via `set_active_operator`
+    /// or the RPC handler). The argument is the new identity, or `None` if
+    /// the pointer was cleared.
+    pub fn on_active_operator_changed(
+        &self,
+        callback: impl Fn(Option<&str>) + Send + Sync + 'static,
+    ) {
+        *self.controller.on_active_operator_changed.lock() = Some(Box::new(callback));
+    }
+
     /// Register an RPC method handler. Handlers can be registered before or
     /// after `connect()`; stored handlers are (re)applied to the
     /// `LocalParticipant` on each connect.
@@ -482,7 +776,7 @@ impl Portal {
             let mut map = self.rpc_handlers.lock();
             map.insert(method.to_string(), handler.clone());
         }
-        if let Some(lp) = self.conn.lock().local_participant.clone() {
+        if let Some(lp) = self.local_participant.lock().clone() {
             register_handler_on(&lp, method.to_string(), handler);
         }
     }
@@ -490,7 +784,7 @@ impl Portal {
     /// Remove a previously registered RPC method handler.
     pub fn unregister_rpc_method(&self, method: &str) {
         self.rpc_handlers.lock().remove(method);
-        if let Some(lp) = self.conn.lock().local_participant.clone() {
+        if let Some(lp) = self.local_participant.lock().clone() {
             lp.unregister_rpc_method(method.to_string());
         }
     }
@@ -512,9 +806,8 @@ impl Portal {
             None => self.resolve_peer()?,
         };
         let lp = self
-            .conn
-            .lock()
             .local_participant
+            .lock()
             .clone()
             .ok_or(PortalError::NotConnected)?;
 
@@ -529,6 +822,51 @@ impl Portal {
         }
 
         lp.perform_rpc(data).await.map_err(|e| PortalError::Rpc(e.into()))
+    }
+
+    /// Walk `room.remote_participants()` looking for one whose attributes
+    /// declare `role=robot`. Synchronous one-shot lookup.
+    fn find_robot_in_room(&self) -> Option<String> {
+        let conn = self.conn.lock();
+        let room = conn.room.as_ref()?;
+        for (_sid, participant) in room.remote_participants() {
+            let attrs = participant.attributes();
+            if classify_role(&attrs) == Some(Role::Robot) {
+                let id = participant.identity().as_str().to_string();
+                // Cache for subsequent calls so the slow path runs at most
+                // once per session.
+                *self.controller.robot_identity.lock() = Some(id.clone());
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Resolve the robot's identity for an operator-side RPC. Tries the
+    /// cached value first (populated by attribute events), then a synchronous
+    /// scan of `room.remote_participants()`, then a short polling loop so
+    /// `set_active_operator` works immediately after `connect()` without
+    /// racing the initial attribute-propagation event. Returns `NoPeer`
+    /// after the timeout if no participant with `role=robot` ever appears.
+    async fn resolve_robot_identity(&self) -> PortalResult<String> {
+        if let Some(id) = self.controller.robot_identity.lock().clone() {
+            return Ok(id);
+        }
+        if let Some(id) = self.find_robot_in_room() {
+            return Ok(id);
+        }
+        // Poll for ~1.5s in 50ms ticks. On a healthy LAN the first
+        // ParticipantAttributesChanged event lands well within this window.
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(id) = self.controller.robot_identity.lock().clone() {
+                return Ok(id);
+            }
+            if let Some(id) = self.find_robot_in_room() {
+                return Ok(id);
+            }
+        }
+        Err(PortalError::NoPeer)
     }
 
     /// Pick a destination identity from `peer_identity` if latched, else fall
@@ -579,9 +917,13 @@ impl Portal {
                 task.abort();
             }
             state.rtt = None;
-            state.local_participant = None;
         }
+        *self.local_participant.lock() = None;
         *self.peer_identity.lock() = None;
+        // Multi-controller state (operators, robot_identity, active_operator
+        // mirror) is per-connection and cleared so a subsequent connect()
+        // starts from a clean slate, same as the legacy `peer_identity` slot.
+        self.controller.clear();
         {
             let mut receivers = self.video_receivers.lock();
             for receiver in receivers.values() {
@@ -890,6 +1232,14 @@ struct EventContext {
     metrics: Arc<MetricsRegistry>,
     rtt: Arc<RttService>,
     peer_identity: Arc<Mutex<Option<ParticipantIdentity>>>,
+    /// Multi-controller state, shared with `Portal` so attribute and
+    /// participant lifecycle events can update it directly without going
+    /// through the Portal struct.
+    controller: Arc<ControllerState>,
+    /// Cached at connect time. Used to skip self when classifying participants
+    /// observed via `ParticipantConnected` / `ParticipantAttributesChanged` —
+    /// our own attribute updates also fire these events on the local participant.
+    local_identity: String,
 }
 
 /// Latch `identity` as the peer if we haven't identified one yet. Logged once
@@ -904,6 +1254,95 @@ fn latch_peer(
         log::info!("[{session}] identified peer '{}'", identity.as_str());
         *slot = Some(identity);
     }
+}
+
+/// Classify a remote participant by their `lk.portal.role` attribute and
+/// reconcile controller state. Idempotent: re-observing the same participant
+/// does not re-fire `on_operator_joined`. Used by the connect-time snapshot
+/// and the ongoing `ParticipantConnected` / `ParticipantAttributesChanged`
+/// handlers.
+fn classify_and_update(
+    controller: &ControllerState,
+    self_role: Role,
+    identity: &ParticipantIdentity,
+    attrs: &HashMap<String, String>,
+) {
+    let id = identity.as_str().to_string();
+    match classify_role(attrs) {
+        Some(Role::Robot) => {
+            {
+                let mut slot = controller.robot_identity.lock();
+                if slot.as_deref() != Some(id.as_str()) {
+                    *slot = Some(id.clone());
+                }
+            }
+            // Operator-side: mirror the robot's `active_operator` attribute.
+            if self_role == Role::Operator {
+                let new_value = attrs
+                    .get(ACTIVE_OPERATOR_ATTR_KEY)
+                    .and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
+                let mut slot = controller.active_operator.lock();
+                if *slot != new_value {
+                    *slot = new_value.clone();
+                    drop(slot);
+                    controller.fire_active_changed(new_value.as_deref());
+                }
+            }
+        }
+        Some(Role::Operator) => {
+            let inserted = controller.operators.lock().insert(id.clone());
+            if inserted {
+                controller.fire_op_joined(&id);
+            }
+        }
+        None => {
+            // Role attribute not yet visible; wait for a follow-up
+            // ParticipantAttributesChanged event.
+        }
+    }
+}
+
+/// Implementation of the `portal.set_active_operator` RPC, registered on the
+/// Robot side at connect. Anyone in the room may call this; payload is the
+/// new identity (or empty string to clear). The handler updates the local
+/// pointer and the broadcast attribute, then fires
+/// `on_active_operator_changed` if the value actually moved.
+async fn set_active_operator_rpc_impl(
+    lp_slot: &Mutex<Option<LocalParticipant>>,
+    controller: &ControllerState,
+    data: RpcInvocationData,
+) -> Result<String, RpcError> {
+    let identity = if data.payload.is_empty() {
+        None
+    } else {
+        Some(data.payload.clone())
+    };
+    let lp = lp_slot.lock().clone();
+    let Some(lp) = lp else {
+        return Err(RpcError::new(
+            RPC_NOT_CONNECTED,
+            "robot not connected",
+            None,
+        ));
+    };
+    let prev = controller.active_operator.lock().clone();
+    let mut attrs = HashMap::new();
+    attrs.insert(
+        ACTIVE_OPERATOR_ATTR_KEY.to_string(),
+        identity.clone().unwrap_or_default(),
+    );
+    if let Err(e) = lp.set_attributes(attrs).await {
+        return Err(RpcError::new(
+            RPC_SET_ATTRIBUTES_FAILED,
+            format!("set_attributes failed: {e}"),
+            None,
+        ));
+    }
+    *controller.active_operator.lock() = identity.clone();
+    if prev != identity {
+        controller.fire_active_changed(identity.as_deref());
+    }
+    Ok(String::new())
 }
 
 fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
@@ -957,6 +1396,29 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     latch_peer(&ctx.peer_identity, &ctx.config.session, p.identity());
                 }
             }
+            // Multi-controller gate: when running as Robot with multi_controller
+            // enabled, drop incoming actions whose sender identity does not
+            // match `active_operator`. Other topics (state for the operator,
+            // RTT for both) are unaffected. The drop is silent so non-active
+            // operators can keep streaming (e.g. shadow policies) without
+            // affecting the robot. v0.1 callers don't enable the gate so all
+            // actions pass through, preserving the original behavior.
+            if ctx.config.multi_controller
+                && ctx.config.role == Role::Robot
+                && topic.as_str() == ACTION_TOPIC
+            {
+                if let Some(p) = &participant {
+                    let sender = p.identity();
+                    let active = ctx.controller.active_operator.lock().clone();
+                    let pass = match active {
+                        Some(active_id) => active_id == sender.as_str(),
+                        None => false,
+                    };
+                    if !pass {
+                        return;
+                    }
+                }
+            }
             let output = handle_data_received(
                 &payload,
                 &topic,
@@ -994,20 +1456,43 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     latch_peer(
                         &ctx.peer_identity,
                         &ctx.config.session,
-                        participant_identity,
+                        participant_identity.clone(),
                     );
                     let chunk_slots = ctx.chunk_slots.clone();
                     let unknown_fp_warns = ctx.unknown_chunk_fp_warns.clone();
                     let metrics = ctx.metrics.clone();
+                    let controller = ctx.controller.clone();
+                    let multi_controller = ctx.config.multi_controller;
+                    let sender_id = participant_identity.as_str().to_string();
                     tokio::spawn(async move {
                         use livekit::StreamReader;
                         match reader.read_all().await {
-                            Ok(payload) => dispatch_chunk_payload(
-                                &payload,
-                                &chunk_slots,
-                                &unknown_fp_warns,
-                                &metrics,
-                            ),
+                            Ok(payload) => {
+                                // Apply the active-operator gate at delivery
+                                // time when multi-controller is enabled.
+                                // Sender at delivery wins; a chunk started
+                                // under one operator and finishing under
+                                // another is dropped if the new active is
+                                // different. v0.1 callers (multi_controller
+                                // off) bypass the check entirely.
+                                if multi_controller {
+                                    let active =
+                                        controller.active_operator.lock().clone();
+                                    let pass = match active {
+                                        Some(active_id) => active_id == sender_id,
+                                        None => false,
+                                    };
+                                    if !pass {
+                                        return;
+                                    }
+                                }
+                                dispatch_chunk_payload(
+                                    &payload,
+                                    &chunk_slots,
+                                    &unknown_fp_warns,
+                                    &metrics,
+                                )
+                            }
                             Err(e) => {
                                 log::warn!("failed to read chunk byte stream: {e}")
                             }
@@ -1061,15 +1546,59 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 _ => {}
             }
         }
+        RoomEvent::ParticipantConnected(participant) => {
+            if !ctx.config.multi_controller {
+                return;
+            }
+            // Snapshot the peer's attributes once they are visible. We may
+            // observe an empty attribute map if the new participant has not
+            // yet completed their `set_attributes` call; the
+            // `ParticipantAttributesChanged` event will reclassify them when
+            // the role attribute lands.
+            let identity = participant.identity();
+            let attrs = participant.attributes();
+            classify_and_update(&ctx.controller, ctx.config.role, &identity, &attrs);
+        }
+        RoomEvent::ParticipantAttributesChanged { participant, .. } => {
+            if !ctx.config.multi_controller {
+                return;
+            }
+            let identity = participant.identity();
+            // Skip our own attribute updates: when we self-set `role` /
+            // `active_operator`, the SDK echoes the change back through this
+            // event for the local participant.
+            if identity.as_str() == ctx.local_identity {
+                return;
+            }
+            let attrs = participant.attributes();
+            classify_and_update(&ctx.controller, ctx.config.role, &identity, &attrs);
+        }
         RoomEvent::ParticipantDisconnected(participant) => {
-            let mut slot = ctx.peer_identity.lock();
-            if slot.as_ref() == Some(&participant.identity()) {
-                log::info!(
-                    "[{}] peer '{}' disconnected",
-                    ctx.config.session,
-                    participant.identity().as_str()
-                );
-                *slot = None;
+            let identity = participant.identity();
+            {
+                let mut slot = ctx.peer_identity.lock();
+                if slot.as_ref() == Some(&identity) {
+                    log::info!(
+                        "[{}] peer '{}' disconnected",
+                        ctx.config.session,
+                        identity.as_str()
+                    );
+                    *slot = None;
+                }
+            }
+            // Multi-controller bookkeeping. The `active_operator` pointer
+            // stays pinned by design (see spec.md §Defaults: "stays pinned");
+            // a same-identity reconnect resumes control, a different operator
+            // claims explicitly via `set_active_operator`.
+            if ctx.config.multi_controller {
+                let id_str = identity.as_str().to_string();
+                if ctx.controller.operators.lock().remove(&id_str) {
+                    ctx.controller.fire_op_left(&id_str);
+                }
+                let mut robot_slot = ctx.controller.robot_identity.lock();
+                if robot_slot.as_deref() == Some(id_str.as_str()) {
+                    *robot_slot = None;
+                }
             }
         }
         RoomEvent::Reconnected => {
@@ -1093,6 +1622,11 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 slots.clear();
             }
             *ctx.peer_identity.lock() = None;
+            // Multi-controller mirror is per-connection; clear and let the
+            // post-reconnect ParticipantConnected / AttributesChanged events
+            // repopulate. The robot's `active_operator` server-side attribute
+            // is preserved, so the mirror lands on the right value soon after.
+            ctx.controller.clear();
         }
         _ => {}
     }

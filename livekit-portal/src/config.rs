@@ -108,6 +108,14 @@ pub struct PortalConfig {
     pub(crate) ping_ms: u64,
     pub(crate) reuse_stale_frames: bool,
     pub(crate) shared_key: Option<Vec<u8>>,
+    /// Opt-in v0.2 multi-controller behavior. Off by default so v0.1 callers
+    /// using the unified `Portal` class keep working unchanged. The v0.2
+    /// `Robot` / `Operator` Python classes flip this on. When enabled, Portal:
+    ///   * self-sets the `lk.portal.role` attribute on connect
+    ///   * tracks operators and `active_operator` via attribute events
+    ///   * gates inbound actions on the Robot side by sender identity
+    ///   * registers the `portal.set_active_operator` RPC (Robot side)
+    pub(crate) multi_controller: bool,
 }
 
 impl PortalConfig {
@@ -128,7 +136,23 @@ impl PortalConfig {
             ping_ms: 1000,
             reuse_stale_frames: false,
             shared_key: None,
+            multi_controller: false,
         }
+    }
+
+    /// Opt into the v0.2 multi-controller layer. Off by default. When
+    /// enabled, Portal self-sets the `lk.portal.role` attribute on connect,
+    /// tracks operators via participant attribute events, gates inbound
+    /// actions on the Robot side, and registers the
+    /// `portal.set_active_operator` RPC. The Python `Robot` and `Operator`
+    /// classes call this automatically.
+    pub fn set_multi_controller(&mut self, enable: bool) {
+        self.multi_controller = enable;
+    }
+
+    /// Whether the multi-controller layer is enabled for this config.
+    pub fn multi_controller(&self) -> bool {
+        self.multi_controller
     }
 
     /// Set a shared E2EE key. Both peers must call this with the same key

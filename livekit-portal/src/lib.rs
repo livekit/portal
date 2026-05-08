@@ -21,7 +21,9 @@ pub use error::{PortalError, PortalResult};
 pub use metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TransportMetrics,
 };
-pub use portal::Portal;
+pub use portal::{
+    Portal, ACTIVE_OPERATOR_ATTR_KEY, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC,
+};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
     Action, ActionChunk, Observation, Role, State, SyncConfig, TypedValue, VideoFrameData,

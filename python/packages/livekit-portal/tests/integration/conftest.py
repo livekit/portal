@@ -36,25 +36,44 @@ API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 collect_ignore = (
     []
     if URL
-    else ["test_chunks.py", "test_frame_video.py", "test_frame_video_stress.py", "test_e2ee.py"]
+    else [
+        "test_chunks.py",
+        "test_frame_video.py",
+        "test_frame_video_stress.py",
+        "test_e2ee.py",
+        "test_multi_operator.py",
+    ]
 )
 
 
-def _make_token(identity: str, room: str) -> str:
+def _make_token(
+    identity: str,
+    room: str,
+    *,
+    attributes: Optional[dict] = None,
+) -> str:
     # Imported lazily so the regular test suite doesn't need livekit-api
     # installed when integration tests are skipped.
     from livekit import api
 
     grants = api.VideoGrants(
-        room_join=True, room=room, can_publish=True, can_subscribe=True
+        room_join=True,
+        room=room,
+        can_publish=True,
+        can_subscribe=True,
+        # v0.2 multi-controller relies on Portal self-setting the `role`
+        # attribute on connect; the grant must permit it.
+        can_update_own_metadata=True,
     )
-    return (
+    builder = (
         api.AccessToken(API_KEY, API_SECRET)
         .with_identity(identity)
         .with_grants(grants)
         .with_ttl(datetime.timedelta(hours=1))
-        .to_jwt()
     )
+    if attributes:
+        builder = builder.with_attributes(attributes)
+    return builder.to_jwt()
 
 
 class Pair:

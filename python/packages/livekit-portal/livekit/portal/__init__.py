@@ -408,6 +408,11 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._video_cbs: Dict[str, Callable[[str, VideoFrameData], Any]] = {}
         # Per-chunk callback: chunk_name → callable(chunk).
         self._chunk_cbs: Dict[str, Callable[[ActionChunk], Any]] = {}
+        # Multi-controller callbacks (v0.2). All three are optional; nothing
+        # fires when unset.
+        self._operator_joined_cb: Optional[Callable[[str], Any]] = None
+        self._operator_left_cb: Optional[Callable[[str], Any]] = None
+        self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
         # Schemas are frozen at Portal construction and read by the wrap
         # helpers below on every delivery.
         self._action_schema = action_schema
@@ -463,6 +468,21 @@ class _Dispatcher(_ffi.PortalCallbacks):
         if cb is not None:
             self._schedule(cb, _wrap_action_chunk(chunk, self._chunk_schemas))
 
+    def on_operator_joined(self, identity: str) -> None:
+        cb = self._operator_joined_cb
+        if cb is not None:
+            self._schedule(cb, identity)
+
+    def on_operator_left(self, identity: str) -> None:
+        cb = self._operator_left_cb
+        if cb is not None:
+            self._schedule(cb, identity)
+
+    def on_active_operator_changed(self, identity: Optional[str]) -> None:
+        cb = self._active_operator_changed_cb
+        if cb is not None:
+            self._schedule(cb, identity)
+
     # --- Registration (from Python user thread) -----------------------------
 
     def set_action(self, cb: Callable[[Action], Any]) -> None:
@@ -484,6 +504,15 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self, chunk_name: str, cb: Callable[[ActionChunk], Any]
     ) -> None:
         self._chunk_cbs[chunk_name] = cb
+
+    def set_operator_joined(self, cb: Callable[[str], Any]) -> None:
+        self._operator_joined_cb = cb
+
+    def set_operator_left(self, cb: Callable[[str], Any]) -> None:
+        self._operator_left_cb = cb
+
+    def set_active_operator_changed(self, cb: Callable[[Optional[str]], Any]) -> None:
+        self._active_operator_changed_cb = cb
 
 
 _uniffi_bound_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -760,6 +789,18 @@ class PortalConfig:
         """
         self._inner.set_reuse_stale_frames(enable)
 
+    def set_multi_controller(self, enable: bool) -> None:
+        """Opt into the v0.2 multi-controller layer.
+
+        Off by default so v0.1 callers using `Portal` directly keep working
+        unchanged. When on, Portal self-sets the `lk.portal.role` attribute
+        on connect, tracks operators via attribute events, gates inbound
+        actions on the Robot side, and registers the
+        `portal.set_active_operator` RPC. The `Robot` / `Operator` classes
+        call this automatically.
+        """
+        self._inner.set_multi_controller(enable)
+
     def close(self) -> None:
         """No-op: UniFFI releases the Rust-side handle when Python GC drops
         the last reference. Kept for backwards compatibility with callers
@@ -976,6 +1017,64 @@ class Portal:
         """
         return self._inner.peer_identity()
 
+    # -- multi-controller (v0.2) --------------------------------------------
+
+    def local_identity(self) -> Optional[str]:
+        """Own LiveKit identity once connected. `None` before `connect()`."""
+        return self._inner.local_identity()
+
+    def active_operator(self) -> Optional[str]:
+        """Identity of the operator the robot is currently listening to,
+        or `None` if no operator is selected.
+
+        On Robot side this is the local pointer (also broadcast as the
+        `lk.portal.active_operator` attribute). On Operator side this is a
+        mirror of the robot's attribute, kept in sync via attribute change
+        events.
+        """
+        return self._inner.active_operator()
+
+    async def set_active_operator(self, identity: Optional[str]) -> None:
+        """Set the active operator.
+
+        On Robot side this updates the local pointer and broadcasts via
+        the robot's own attributes. On Operator side this dispatches a
+        `portal.set_active_operator` RPC to the robot. Pass `None` to
+        clear and drop all incoming actions.
+        """
+        await self._inner.set_active_operator(identity)
+
+    def operators(self) -> List[str]:
+        """Identities of currently-connected operators (excluding self)."""
+        return list(self._inner.operators())
+
+    def robot_identity(self) -> Optional[str]:
+        """Identity of the robot in the room, or `None`. Operator-side
+        helper, derived from the robot's `lk.portal.role` attribute.
+        """
+        return self._inner.robot_identity()
+
+    def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
+        """Fire when an operator joins the room."""
+        self._dispatcher.set_operator_joined(callback)
+
+    def on_operator_left(self, callback: Callable[[str], Any]) -> None:
+        """Fire when an operator leaves the room. Note: the robot's
+        `active_operator` pointer is **not** auto-cleared on disconnect
+        — it stays pinned so a same-identity reconnect resumes control.
+        """
+        self._dispatcher.set_operator_left(callback)
+
+    def on_active_operator_changed(
+        self,
+        callback: Callable[[Optional[str]], Any],
+    ) -> None:
+        """Fire when the robot's `active_operator` attribute changes (or,
+        on Robot side, when the local pointer is updated). Argument is
+        the new identity, or `None` if cleared.
+        """
+        self._dispatcher.set_active_operator_changed(callback)
+
     def register_rpc_method(
         self,
         method: str,
@@ -1030,6 +1129,404 @@ class Portal:
         self._inner = None  # type: ignore[assignment]
 
 
+# ---------------------------------------------------------------------------
+# v0.2 role-specific config + classes.
+#
+# These are thin wrappers around the unified `Portal` / `PortalConfig` that
+# hide the wrong-role methods and split the config types. The Rust core stays
+# unified; both `Robot` and `Operator` instantiate the same `Portal` class
+# under the hood. `Portal` / `PortalConfig` / `Role` remain exported for v0.1
+# compatibility.
+# ---------------------------------------------------------------------------
+
+
+class _RoleConfigBase:
+    """Shared declaration surface for `RobotConfig` and `OperatorConfig`.
+
+    Holds an internal `PortalConfig` keyed to the appropriate `Role`. All
+    declarative methods (schemas, video tracks, action chunks, tuning knobs)
+    forward straight through. Subclasses don't extend this surface; they
+    only differ in which role they construct.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, session: str, role: Role) -> None:
+        self._inner = PortalConfig(session, role)
+        # `Robot` / `Operator` opt into the v0.2 multi-controller layer
+        # unconditionally. Users who want the v0.1 single-peer behavior keep
+        # using the unified `Portal` / `PortalConfig` classes.
+        self._inner.set_multi_controller(True)
+
+    @property
+    def session(self) -> str:
+        return self._inner.session
+
+    @property
+    def role(self) -> Role:
+        return self._inner.role
+
+    @property
+    def video_tracks(self) -> List[str]:
+        return self._inner.video_tracks
+
+    @property
+    def frame_video_tracks(self) -> List[FrameVideoSpec]:
+        return self._inner.frame_video_tracks
+
+    @property
+    def state_schema(self) -> List[FieldSpec]:
+        return self._inner.state_schema
+
+    @property
+    def action_schema(self) -> List[FieldSpec]:
+        return self._inner.action_schema
+
+    @property
+    def action_chunks(self) -> List[ChunkSpec]:
+        return self._inner.action_chunks
+
+    def add_video(
+        self,
+        name: str,
+        codec: VideoCodec = VideoCodec.H264,
+        quality: int = DEFAULT_MJPEG_QUALITY,
+    ) -> None:
+        self._inner.add_video(name, codec, quality)
+
+    def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
+        self._inner.add_state_typed(schema)
+
+    def add_action_typed(self, schema: Iterable[SchemaEntry]) -> None:
+        self._inner.add_action_typed(schema)
+
+    def add_action_chunk(
+        self,
+        name: str,
+        horizon: int,
+        fields: Iterable[SchemaEntry],
+    ) -> None:
+        self._inner.add_action_chunk(name, horizon, fields)
+
+    def set_fps(self, fps: int) -> None:
+        self._inner.set_fps(fps)
+
+    def set_slack(self, ticks: int) -> None:
+        self._inner.set_slack(ticks)
+
+    def set_tolerance(self, ticks: float) -> None:
+        self._inner.set_tolerance(ticks)
+
+    def set_state_reliable(self, reliable: bool) -> None:
+        self._inner.set_state_reliable(reliable)
+
+    def set_action_reliable(self, reliable: bool) -> None:
+        self._inner.set_action_reliable(reliable)
+
+    def set_ping_ms(self, ms: int) -> None:
+        self._inner.set_ping_ms(ms)
+
+    def set_e2ee_key(self, key: bytes) -> None:
+        self._inner.set_e2ee_key(key)
+
+    def set_reuse_stale_frames(self, enable: bool) -> None:
+        self._inner.set_reuse_stale_frames(enable)
+
+
+class RobotConfig(_RoleConfigBase):
+    """Robot-side session config. Same declarative surface as
+    `OperatorConfig`; the Role is pinned to `Role.ROBOT` internally.
+    """
+
+    def __init__(self, session: str) -> None:
+        super().__init__(session, Role.ROBOT)
+
+
+class OperatorConfig(_RoleConfigBase):
+    """Operator-side session config. Same declarative surface as
+    `RobotConfig`; the Role is pinned to `Role.OPERATOR`.
+
+    `identity` is informational. The actual LiveKit participant identity
+    comes from the access token. Setting it here lets your own code know
+    which identity it is supposed to claim, but does not validate against
+    the token. Defaults to `None`; callers that want a stable identity
+    should generate one and use it for both `OperatorConfig.identity` and
+    the token mint.
+    """
+
+    __slots__ = ("identity",)
+
+    def __init__(self, session: str, identity: Optional[str] = None) -> None:
+        super().__init__(session, Role.OPERATOR)
+        self.identity = identity
+
+
+class Robot:
+    """Robot-side Portal facade.
+
+    Wraps a `Portal` instance constructed with `Role.ROBOT` and exposes only
+    the methods that make sense on the robot side (publish state and video,
+    receive actions and chunks, control plane). Callers who want the
+    unified surface can keep using `Portal` directly.
+    """
+
+    __slots__ = ("_portal",)
+
+    def __init__(self, config: RobotConfig) -> None:
+        self._portal = Portal(config._inner)
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def connect(self, url: str, token: str) -> None:
+        await self._portal.connect(url, token)
+
+    async def disconnect(self) -> None:
+        await self._portal.disconnect()
+
+    def close(self) -> None:
+        self._portal.close()
+
+    # -- publish (robot-side) ------------------------------------------------
+
+    def send_video_frame(
+        self,
+        track_name: str,
+        frame: Any,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_video_frame(track_name, frame, width, height, timestamp_us)
+
+    def send_state(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_state(values, timestamp_us)
+
+    # -- receive (robot-side) ------------------------------------------------
+
+    def on_action(self, callback: Callable[[Action], Any]) -> None:
+        self._portal.on_action(callback)
+
+    def on_action_chunk(
+        self,
+        chunk_name: str,
+        callback: Callable[[ActionChunk], Any],
+    ) -> None:
+        self._portal.on_action_chunk(chunk_name, callback)
+
+    def get_action(self) -> Optional[Action]:
+        return self._portal.get_action()
+
+    def get_action_chunk(self, chunk_name: str) -> Optional[ActionChunk]:
+        return self._portal.get_action_chunk(chunk_name)
+
+    # -- multi-controller ----------------------------------------------------
+
+    def local_identity(self) -> Optional[str]:
+        return self._portal.local_identity()
+
+    def active_operator(self) -> Optional[str]:
+        return self._portal.active_operator()
+
+    async def set_active_operator(self, identity: Optional[str]) -> None:
+        await self._portal.set_active_operator(identity)
+
+    def operators(self) -> List[str]:
+        return self._portal.operators()
+
+    def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
+        self._portal.on_operator_joined(callback)
+
+    def on_operator_left(self, callback: Callable[[str], Any]) -> None:
+        self._portal.on_operator_left(callback)
+
+    def on_active_operator_changed(
+        self,
+        callback: Callable[[Optional[str]], Any],
+    ) -> None:
+        self._portal.on_active_operator_changed(callback)
+
+    # -- rpc -----------------------------------------------------------------
+
+    def register_rpc_method(
+        self,
+        method: str,
+        handler: Callable[[RpcInvocationData], Any],
+    ) -> None:
+        self._portal.register_rpc_method(method, handler)
+
+    def unregister_rpc_method(self, method: str) -> None:
+        self._portal.unregister_rpc_method(method)
+
+    async def perform_rpc(
+        self,
+        method: str,
+        payload: str = "",
+        destination: Optional[str] = None,
+        response_timeout_ms: Optional[int] = None,
+    ) -> str:
+        return await self._portal.perform_rpc(
+            method, payload, destination, response_timeout_ms
+        )
+
+    # -- metrics -------------------------------------------------------------
+
+    def metrics(self) -> PortalMetrics:
+        return self._portal.metrics()
+
+    def reset_metrics(self) -> None:
+        self._portal.reset_metrics()
+
+
+class Operator:
+    """Operator-side Portal facade.
+
+    Wraps a `Portal` instance constructed with `Role.OPERATOR` and exposes
+    only the methods that make sense on the operator side (publish actions
+    and chunks, receive observations and video, control plane). Callers who
+    want the unified surface can keep using `Portal` directly.
+    """
+
+    __slots__ = ("_portal", "_identity_hint")
+
+    def __init__(self, config: OperatorConfig) -> None:
+        self._portal = Portal(config._inner)
+        self._identity_hint = config.identity
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def connect(self, url: str, token: str) -> None:
+        await self._portal.connect(url, token)
+
+    async def disconnect(self) -> None:
+        await self._portal.disconnect()
+
+    def close(self) -> None:
+        self._portal.close()
+
+    # -- publish (operator-side) ---------------------------------------------
+
+    def send_action(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+        in_reply_to_ts_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_action(values, timestamp_us, in_reply_to_ts_us)
+
+    def send_action_chunk(
+        self,
+        chunk_name: str,
+        data: Any,
+        timestamp_us: Optional[int] = None,
+        in_reply_to_ts_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_action_chunk(
+            chunk_name, data, timestamp_us, in_reply_to_ts_us
+        )
+
+    # -- receive (operator-side) ---------------------------------------------
+
+    def on_state(self, callback: Callable[[State], Any]) -> None:
+        self._portal.on_state(callback)
+
+    def on_observation(self, callback: Callable[[Observation], Any]) -> None:
+        self._portal.on_observation(callback)
+
+    def on_video_frame(
+        self,
+        track_name: str,
+        callback: Callable[[str, VideoFrameData], Any],
+    ) -> None:
+        self._portal.on_video_frame(track_name, callback)
+
+    def on_drop(
+        self,
+        callback: Callable[[List[Dict[str, Any]]], Any],
+    ) -> None:
+        self._portal.on_drop(callback)
+
+    def get_state(self) -> Optional[State]:
+        return self._portal.get_state()
+
+    def get_observation(self) -> Optional[Observation]:
+        return self._portal.get_observation()
+
+    def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
+        return self._portal.get_video_frame(track_name)
+
+    # -- multi-controller ----------------------------------------------------
+
+    def local_identity(self) -> Optional[str]:
+        return self._portal.local_identity()
+
+    @property
+    def identity_hint(self) -> Optional[str]:
+        """Identity supplied to `OperatorConfig`, if any. Informational —
+        the LiveKit participant identity comes from the token, not this
+        field. Use `local_identity()` for the actual connected identity.
+        """
+        return self._identity_hint
+
+    def active_operator(self) -> Optional[str]:
+        return self._portal.active_operator()
+
+    async def set_active_operator(self, identity: Optional[str]) -> None:
+        await self._portal.set_active_operator(identity)
+
+    def operators(self) -> List[str]:
+        return self._portal.operators()
+
+    def robot_identity(self) -> Optional[str]:
+        return self._portal.robot_identity()
+
+    def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
+        self._portal.on_operator_joined(callback)
+
+    def on_operator_left(self, callback: Callable[[str], Any]) -> None:
+        self._portal.on_operator_left(callback)
+
+    def on_active_operator_changed(
+        self,
+        callback: Callable[[Optional[str]], Any],
+    ) -> None:
+        self._portal.on_active_operator_changed(callback)
+
+    # -- rpc -----------------------------------------------------------------
+
+    def register_rpc_method(
+        self,
+        method: str,
+        handler: Callable[[RpcInvocationData], Any],
+    ) -> None:
+        self._portal.register_rpc_method(method, handler)
+
+    def unregister_rpc_method(self, method: str) -> None:
+        self._portal.unregister_rpc_method(method)
+
+    async def perform_rpc(
+        self,
+        method: str,
+        payload: str = "",
+        destination: Optional[str] = None,
+        response_timeout_ms: Optional[int] = None,
+    ) -> str:
+        return await self._portal.perform_rpc(
+            method, payload, destination, response_timeout_ms
+        )
+
+    # -- metrics -------------------------------------------------------------
+
+    def metrics(self) -> PortalMetrics:
+        return self._portal.metrics()
+
+    def reset_metrics(self) -> None:
+        self._portal.reset_metrics()
+
+
 __all__ = [
     "Role",
     "DType",
@@ -1041,6 +1538,10 @@ __all__ = [
     "DEFAULT_MJPEG_QUALITY",
     "PortalConfig",
     "Portal",
+    "RobotConfig",
+    "OperatorConfig",
+    "Robot",
+    "Operator",
     "Observation",
     "Action",
     "ActionChunk",

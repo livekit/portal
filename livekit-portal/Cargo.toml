@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+# YAML config file loader. Pulls in serde + serde-saphyr. Off by default so
+# users who only build configs programmatically don't pay the dep cost.
+config-file = ["dep:serde", "dep:serde-saphyr"]
+
 [dependencies]
 # `rustls-tls-native-roots`: livekit's default feature set doesn't enable any
 # TLS backend (its comment: "By default ws TLS is not enabled"). Without this
@@ -21,3 +27,8 @@ log = "0.4"
 # every supported format and would bloat link time and binary size; we only
 # need PNG and JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# `serde-saphyr` is pinned exactly: pre-1.0 and may break across patch
+# releases. Bump deliberately. `serde` follows semver and floats so the
+# workspace's transitive deps don't conflict.
+serde = { version = "1", features = ["derive"], optional = true }
+serde-saphyr = { version = "=0.0.26", optional = true }

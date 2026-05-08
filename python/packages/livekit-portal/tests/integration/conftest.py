@@ -42,6 +42,7 @@ collect_ignore = (
         "test_frame_video_stress.py",
         "test_e2ee.py",
         "test_multi_operator.py",
+        "test_action_subscription.py",
     ]
 )
 

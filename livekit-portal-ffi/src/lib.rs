@@ -15,6 +15,8 @@
 //!   * `connect`/`disconnect` are native `async` — no more request/async_id
 //!     correlation.
 
+#![recursion_limit = "256"]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -23,6 +25,16 @@ use parking_lot::Mutex;
 use livekit_portal as core;
 
 uniffi::setup_scaffolding!();
+
+/// Initialize `env_logger` when the cdylib is loaded to allow outputting logs via `RUST_LOG`.
+#[ctor::ctor(unsafe)]
+fn init_logging() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .try_init();
+}
 
 // ---------------------------------------------------------------------------
 // Enums & records

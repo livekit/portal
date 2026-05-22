@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,12 +11,12 @@ use tokio::task::JoinHandle;
 
 use crate::config::{ChunkSpec, FieldSpec, PortalConfig};
 use crate::data::{
-    dispatch_chunk_payload, handle_data_received, ActionSlot, ChunkPublisher, ChunkSlot,
-    DataPublisher, StateSlot, ACTION_CHUNK_TOPIC, ACTION_TOPIC, STATE_TOPIC,
+    ACTION_CHUNK_TOPIC, ACTION_TOPIC, ActionSlot, ChunkPublisher, ChunkSlot, DataPublisher,
+    STATE_TOPIC, StateSlot, dispatch_chunk_payload, handle_data_received,
 };
 use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{
-    dispatch_frame_payload, FrameVideoPublisher, FrameVideoTrackEntry, FRAME_VIDEO_TOPIC,
+    FRAME_VIDEO_TOPIC, FrameVideoPublisher, FrameVideoTrackEntry, dispatch_frame_payload,
 };
 use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
@@ -360,11 +360,7 @@ impl Portal {
         Self {
             config,
             lifecycle: tokio::sync::Mutex::new(()),
-            conn: Mutex::new(ConnectionState {
-                room: None,
-                event_task: None,
-                rtt: None,
-            }),
+            conn: Mutex::new(ConnectionState { room: None, event_task: None, rtt: None }),
             video_receivers: Arc::new(Mutex::new(HashMap::new())),
             video_publishers: Mutex::new(HashMap::new()),
             frame_video_publishers: Mutex::new(HashMap::new()),
@@ -396,10 +392,15 @@ impl Portal {
         let mut options = RoomOptions::default();
         options.auto_subscribe = true;
         if let Some(key) = &self.config.shared_key {
-            use livekit::e2ee::{key_provider::{KeyProvider, KeyProviderOptions}, EncryptionType};
             use livekit::E2eeOptions;
-            let key_provider = KeyProvider::with_shared_key(KeyProviderOptions::default(), key.clone());
-            options.encryption = Some(E2eeOptions { key_provider, encryption_type: EncryptionType::Gcm });
+            use livekit::e2ee::{
+                EncryptionType,
+                key_provider::{KeyProvider, KeyProviderOptions},
+            };
+            let key_provider =
+                KeyProvider::with_shared_key(KeyProviderOptions::default(), key.clone());
+            options.encryption =
+                Some(E2eeOptions { key_provider, encryption_type: EncryptionType::Gcm });
         }
 
         log::info!("[{}] connecting as {:?} to {}", self.config.session, self.config.role, url);
@@ -426,9 +427,9 @@ impl Portal {
             let handler: RpcHandler = Arc::new(move |data: RpcInvocationData| {
                 let lp_slot = lp_slot.clone();
                 let controller = controller.clone();
-                Box::pin(async move {
-                    set_active_operator_rpc_impl(&lp_slot, &controller, data).await
-                })
+                Box::pin(
+                    async move { set_active_operator_rpc_impl(&lp_slot, &controller, data).await },
+                )
             });
             self.register_rpc_method(SET_ACTIVE_OPERATOR_RPC, handler);
         }
@@ -549,7 +550,6 @@ impl Portal {
         Ok(())
     }
 
-
     pub fn send_video_frame(
         &self,
         track_name: &str,
@@ -576,11 +576,7 @@ impl Portal {
         // `send_action_chunk`.
         if self.config.role != Role::Robot
             && (self.config.video_tracks.iter().any(|s| s.name == track_name)
-                || self
-                    .config
-                    .frame_video_tracks
-                    .iter()
-                    .any(|s| s.name == track_name))
+                || self.config.frame_video_tracks.iter().any(|s| s.name == track_name))
         {
             return Err(PortalError::WrongRole(self.config.role));
         }
@@ -596,11 +592,8 @@ impl Portal {
         values: &HashMap<String, TypedValue>,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
-        let publisher = self
-            .state_publisher
-            .lock()
-            .clone()
-            .ok_or(PortalError::WrongRole(Role::Operator))?;
+        let publisher =
+            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Operator))?;
         // State has no echo path; drop the wire-values vector that
         // `send_map` returns for action callers.
         publisher.send_map(values, timestamp_us, None).map(|_| ())
@@ -642,9 +635,8 @@ impl Portal {
         if self.config.action_subscription && self.is_self_active() {
             // We only echo when self is the active operator, which means
             // we are connected and have a local identity. Unwrap is safe.
-            let local_id = self
-                .local_identity()
-                .expect("local_identity is Some when self == active_operator");
+            let local_id =
+                self.local_identity().expect("local_identity is Some when self == active_operator");
             let action = crate::data::build_action(
                 send_ts,
                 in_reply_to_ts_us,
@@ -746,10 +738,7 @@ impl Portal {
     /// This Portal's own LiveKit identity once connected. Reads from the
     /// stored `LocalParticipant`. `None` before `connect()` succeeds.
     pub fn local_identity(&self) -> Option<String> {
-        self.local_participant
-            .lock()
-            .as_ref()
-            .map(|lp| lp.identity().as_str().to_string())
+        self.local_participant.lock().as_ref().map(|lp| lp.identity().as_str().to_string())
     }
 
     /// Identity of the operator the robot is currently listening to, or
@@ -780,20 +769,14 @@ impl Portal {
     pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
         match self.config.role {
             Role::Robot => {
-                let lp = self
-                    .local_participant
-                    .lock()
-                    .clone()
-                    .ok_or(PortalError::NotConnected)?;
+                let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
                 let prev = self.controller.active_operator.lock().clone();
                 let mut attrs = HashMap::new();
                 attrs.insert(
                     ACTIVE_OPERATOR_ATTR_KEY.to_string(),
                     identity.clone().unwrap_or_default(),
                 );
-                lp.set_attributes(attrs)
-                    .await
-                    .map_err(|e| PortalError::Room(e.to_string()))?;
+                lp.set_attributes(attrs).await.map_err(|e| PortalError::Room(e.to_string()))?;
                 *self.controller.active_operator.lock() = identity.clone();
                 if prev != identity {
                     self.controller.fire_active_changed(identity.as_deref());
@@ -816,8 +799,7 @@ impl Portal {
                 // surface NoPeer quickly when there really is no robot.
                 let robot = self.resolve_robot_identity().await?;
                 let payload = identity.unwrap_or_default();
-                self.perform_rpc(Some(&robot), SET_ACTIVE_OPERATOR_RPC, payload, None)
-                    .await?;
+                self.perform_rpc(Some(&robot), SET_ACTIVE_OPERATOR_RPC, payload, None).await?;
                 Ok(())
             }
         }
@@ -900,11 +882,7 @@ impl Portal {
             Some(id) => id.to_string(),
             None => self.resolve_peer()?,
         };
-        let lp = self
-            .local_participant
-            .lock()
-            .clone()
-            .ok_or(PortalError::NotConnected)?;
+        let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
 
         let mut data = PerformRpcData {
             destination_identity: destination,
@@ -1199,10 +1177,8 @@ impl Portal {
 
         for spec in &self.config.video_tracks {
             let track_name = &spec.name;
-            let track_metrics = self
-                .metrics
-                .track(track_name)
-                .expect("track metrics registered at construction");
+            let track_metrics =
+                self.metrics.track(track_name).expect("track metrics registered at construction");
             let publisher = VideoPublisher::new(
                 track_name,
                 track_metrics,
@@ -1224,12 +1200,9 @@ impl Portal {
         // — they emit one byte stream per frame instead. So no async setup
         // here, just spawn the per-track drainer task.
         for spec in &self.config.frame_video_tracks {
-            let track_metrics = self
-                .metrics
-                .track(&spec.name)
-                .expect("track metrics registered at construction");
-            let publisher =
-                FrameVideoPublisher::new(spec.clone(), lp.clone(), track_metrics);
+            let track_metrics =
+                self.metrics.track(&spec.name).expect("track metrics registered at construction");
+            let publisher = FrameVideoPublisher::new(spec.clone(), lp.clone(), track_metrics);
             log::info!(
                 "[{}] ready to publish frame-video track '{}' via byte stream (codec={:?}, quality={})",
                 self.config.session,
@@ -1237,9 +1210,7 @@ impl Portal {
                 spec.codec,
                 spec.quality
             );
-            self.frame_video_publishers
-                .lock()
-                .insert(spec.name.clone(), Arc::new(publisher));
+            self.frame_video_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
         }
 
         if !self.config.state_schema.is_empty() {
@@ -1305,14 +1276,8 @@ impl Portal {
                     spec.horizon,
                     spec.fields.len()
                 );
-                let publisher = ChunkPublisher::new(
-                    spec.clone(),
-                    lp.clone(),
-                    self.metrics.clone(),
-                );
-                self.chunk_publishers
-                    .lock()
-                    .insert(spec.name.clone(), Arc::new(publisher));
+                let publisher = ChunkPublisher::new(spec.clone(), lp.clone(), self.metrics.clone());
+                self.chunk_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
             }
         }
     }
@@ -1342,8 +1307,7 @@ impl Portal {
 /// when registering metrics and sync-buffer slots, since the consumer-facing
 /// API doesn't distinguish WebRTC and frame-video tracks.
 fn combined_track_names(config: &PortalConfig) -> Vec<String> {
-    let mut names: Vec<String> =
-        config.video_tracks.iter().map(|s| s.name.clone()).collect();
+    let mut names: Vec<String> = config.video_tracks.iter().map(|s| s.name.clone()).collect();
     names.extend(config.frame_video_tracks.iter().map(|s| s.name.clone()));
     names
 }
@@ -1447,25 +1411,14 @@ async fn set_active_operator_rpc_impl(
     controller: &ControllerState,
     data: RpcInvocationData,
 ) -> Result<String, RpcError> {
-    let identity = if data.payload.is_empty() {
-        None
-    } else {
-        Some(data.payload.clone())
-    };
+    let identity = if data.payload.is_empty() { None } else { Some(data.payload.clone()) };
     let lp = lp_slot.lock().clone();
     let Some(lp) = lp else {
-        return Err(RpcError::new(
-            RPC_NOT_CONNECTED,
-            "robot not connected",
-            None,
-        ));
+        return Err(RpcError::new(RPC_NOT_CONNECTED, "robot not connected", None));
     };
     let prev = controller.active_operator.lock().clone();
     let mut attrs = HashMap::new();
-    attrs.insert(
-        ACTIVE_OPERATOR_ATTR_KEY.to_string(),
-        identity.clone().unwrap_or_default(),
-    );
+    attrs.insert(ACTIVE_OPERATOR_ATTR_KEY.to_string(), identity.clone().unwrap_or_default());
     if let Err(e) = lp.set_attributes(attrs).await {
         return Err(RpcError::new(
             RPC_SET_ATTRIBUTES_FAILED,
@@ -1489,10 +1442,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             if let RemoteTrack::Video(video_track) = track {
                 let track_name = publication.name();
                 if ctx.config.video_tracks.iter().any(|s| s.name == track_name) {
-                    log::info!(
-                        "[{}] subscribed to video track '{track_name}'",
-                        ctx.config.session
-                    );
+                    log::info!("[{}] subscribed to video track '{track_name}'", ctx.config.session);
                     if let Some(sync_buffer) = &ctx.sync_buffer {
                         let slots = ctx
                             .video_tracks
@@ -1529,7 +1479,9 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // an empty sender — those records don't carry a sender field.
             let gate_sender: String = match (ctx.config.role, topic.as_str()) {
                 (Role::Robot, ACTION_TOPIC) => {
-                    let Some(p) = &participant else { return; };
+                    let Some(p) = &participant else {
+                        return;
+                    };
                     let sender_id = p.identity().as_str().to_string();
                     let active = ctx.controller.active_operator.lock().clone();
                     if active.as_deref() != Some(sender_id.as_str()) {
@@ -1541,7 +1493,9 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     if !ctx.config.action_subscription {
                         return;
                     }
-                    let Some(p) = &participant else { return; };
+                    let Some(p) = &participant else {
+                        return;
+                    };
                     let sender_id = p.identity().as_str().to_string();
                     let active = ctx.controller.active_operator.lock().clone();
                     if active.as_deref() != Some(sender_id.as_str()) {
@@ -1580,19 +1534,16 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // it owns; other applications using byte streams on unrelated
             // topics are left untouched.
             match (ctx.config.role, topic.as_str()) {
-                (Role::Robot, ACTION_CHUNK_TOPIC)
-                | (Role::Operator, ACTION_CHUNK_TOPIC) => {
+                (Role::Robot, ACTION_CHUNK_TOPIC) | (Role::Operator, ACTION_CHUNK_TOPIC) => {
                     // Robot always consumes chunks. Operators only consume
                     // when subscription is on (HITL recording, shadow eval).
                     // Bail out early on operators with subscription off so
                     // we never spawn the read task.
-                    if matches!(ctx.config.role, Role::Operator)
-                        && !ctx.config.action_subscription
+                    if matches!(ctx.config.role, Role::Operator) && !ctx.config.action_subscription
                     {
                         return;
                     }
-                    let Some(reader) =
-                        reader.take_if(|info| info.topic == ACTION_CHUNK_TOPIC)
+                    let Some(reader) = reader.take_if(|info| info.topic == ACTION_CHUNK_TOPIC)
                     else {
                         return;
                     };
@@ -1636,8 +1587,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     if ctx.frame_video_entries.is_empty() {
                         return;
                     }
-                    let Some(reader) =
-                        reader.take_if(|info| info.topic == FRAME_VIDEO_TOPIC)
+                    let Some(reader) = reader.take_if(|info| info.topic == FRAME_VIDEO_TOPIC)
                     else {
                         return;
                     };
@@ -1699,11 +1649,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // claims explicitly via `set_active_operator`.
             let identity = participant.identity();
             let id_str = identity.as_str().to_string();
-            log::info!(
-                "[{}] participant '{}' disconnected",
-                ctx.config.session,
-                id_str
-            );
+            log::info!("[{}] participant '{}' disconnected", ctx.config.session, id_str);
             if ctx.controller.operators.lock().remove(&id_str) {
                 ctx.controller.fire_op_left(&id_str);
             }

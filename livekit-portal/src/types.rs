@@ -101,7 +101,13 @@ impl TypedValue {
             TypedValue::U32(v) => v as f64,
             TypedValue::U16(v) => v as f64,
             TypedValue::U8(v) => v as f64,
-            TypedValue::Bool(v) => if v { 1.0 } else { 0.0 },
+            TypedValue::Bool(v) => {
+                if v {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         }
     }
 }
@@ -256,29 +262,47 @@ pub(crate) fn to_value_maps(
 //     m.insert("shoulder".into(), 0.5f32.into());
 
 impl From<f64> for TypedValue {
-    fn from(v: f64) -> Self { TypedValue::F64(v) }
+    fn from(v: f64) -> Self {
+        TypedValue::F64(v)
+    }
 }
 impl From<f32> for TypedValue {
-    fn from(v: f32) -> Self { TypedValue::F32(v) }
+    fn from(v: f32) -> Self {
+        TypedValue::F32(v)
+    }
 }
 impl From<i32> for TypedValue {
-    fn from(v: i32) -> Self { TypedValue::I32(v) }
+    fn from(v: i32) -> Self {
+        TypedValue::I32(v)
+    }
 }
 impl From<i16> for TypedValue {
-    fn from(v: i16) -> Self { TypedValue::I16(v) }
+    fn from(v: i16) -> Self {
+        TypedValue::I16(v)
+    }
 }
 impl From<i8> for TypedValue {
-    fn from(v: i8) -> Self { TypedValue::I8(v) }
+    fn from(v: i8) -> Self {
+        TypedValue::I8(v)
+    }
 }
 impl From<u32> for TypedValue {
-    fn from(v: u32) -> Self { TypedValue::U32(v) }
+    fn from(v: u32) -> Self {
+        TypedValue::U32(v)
+    }
 }
 impl From<u16> for TypedValue {
-    fn from(v: u16) -> Self { TypedValue::U16(v) }
+    fn from(v: u16) -> Self {
+        TypedValue::U16(v)
+    }
 }
 impl From<u8> for TypedValue {
-    fn from(v: u8) -> Self { TypedValue::U8(v) }
+    fn from(v: u8) -> Self {
+        TypedValue::U8(v)
+    }
 }
 impl From<bool> for TypedValue {
-    fn from(v: bool) -> Self { TypedValue::Bool(v) }
+    fn from(v: bool) -> Self {
+        TypedValue::Bool(v)
+    }
 }

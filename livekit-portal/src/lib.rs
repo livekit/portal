@@ -20,15 +20,13 @@ pub use config::{
     VideoTrackSpec,
 };
 pub use config_file::ConfigFileError;
-pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
+pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TransportMetrics,
 };
-pub use portal::{
-    Portal, ACTIVE_OPERATOR_ATTR_KEY, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC,
-};
+pub use portal::{ACTIVE_OPERATOR_ATTR_KEY, Portal, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
     Action, ActionChunk, Observation, Role, State, SyncConfig, TypedValue, VideoFrameData,

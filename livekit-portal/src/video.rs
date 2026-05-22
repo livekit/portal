@@ -1,4 +1,4 @@
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -88,8 +88,7 @@ impl VideoPublisher {
         //     just don't want a tight cap forcing frame drops on high-motion
         //     bursts. Configurable per track via `add_video`'s
         //     `max_bitrate_kbps`.
-        let max_bitrate_kbps =
-            self.max_bitrate_kbps.unwrap_or(DEFAULT_H264_MAX_BITRATE_KBPS);
+        let max_bitrate_kbps = self.max_bitrate_kbps.unwrap_or(DEFAULT_H264_MAX_BITRATE_KBPS);
         let options = TrackPublishOptions {
             video_codec: webrtc_video_codec(self.codec),
             simulcast: false,
@@ -179,13 +178,10 @@ impl VideoReceiver {
                 // Portal-published tracks set this automatically; subscribed
                 // tracks from other publishers must do the same. See the
                 // "Sender requirement" note in README.md.
-                let timestamp_us = frame
-                    .frame_metadata
-                    .and_then(|m| m.user_timestamp)
-                    .expect(
-                        "video frame missing user_timestamp — \
+                let timestamp_us = frame.frame_metadata.and_then(|m| m.user_timestamp).expect(
+                    "video frame missing user_timestamp — \
                          sender must enable PacketTrailerFeatures.user_timestamp",
-                    );
+                );
                 let frame_data = convert_frame(&frame, timestamp_us);
                 let frame_arc = Arc::new(frame_data);
 

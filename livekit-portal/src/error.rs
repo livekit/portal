@@ -19,7 +19,9 @@ pub enum PortalError {
     #[error("no peer in the room")]
     NoPeer,
 
-    #[error("room has multiple remote participants and no peer has been identified yet; pass destination explicitly")]
+    #[error(
+        "room has multiple remote participants and no peer has been identified yet; pass destination explicitly"
+    )]
     AmbiguousPeer,
 
     #[error("unknown video track: {name}")]
@@ -43,7 +45,9 @@ pub enum PortalError {
     #[error("operation not available for role {0:?}")]
     WrongRole(Role),
 
-    #[error("field '{field}' declared as {expected:?} but sent as {got}; use the matching TypedValue variant or redeclare the dtype")]
+    #[error(
+        "field '{field}' declared as {expected:?} but sent as {got}; use the matching TypedValue variant or redeclare the dtype"
+    )]
     DtypeMismatch { field: String, expected: DType, got: &'static str },
 
     #[error("{0}")]

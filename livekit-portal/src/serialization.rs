@@ -356,12 +356,8 @@ mod tests {
 
     #[test]
     fn mixed_dtype_roundtrip() {
-        let s = schema(&[
-            ("f", DType::F32),
-            ("i", DType::I8),
-            ("b", DType::Bool),
-            ("u", DType::U16),
-        ]);
+        let s =
+            schema(&[("f", DType::F32), ("i", DType::I8), ("b", DType::Bool), ("u", DType::U16)]);
         let fp = schema_fingerprint(&s);
         let values = vec![1.5, 127.0, 1.0, 65535.0];
         let out = serialize_values(fp, 42, &values, &s);
@@ -430,20 +426,11 @@ mod tests {
         // Two peers build their schemas separately; if the field names,
         // order, and dtypes agree, the u32 fingerprint must match —
         // otherwise the receive path drops every packet.
-        let peer_robot = schema(&[
-            ("j1", DType::F32),
-            ("gripper", DType::Bool),
-            ("mode", DType::I8),
-        ]);
-        let peer_operator = schema(&[
-            ("j1", DType::F32),
-            ("gripper", DType::Bool),
-            ("mode", DType::I8),
-        ]);
-        assert_eq!(
-            schema_fingerprint(&peer_robot),
-            schema_fingerprint(&peer_operator),
-        );
+        let peer_robot =
+            schema(&[("j1", DType::F32), ("gripper", DType::Bool), ("mode", DType::I8)]);
+        let peer_operator =
+            schema(&[("j1", DType::F32), ("gripper", DType::Bool), ("mode", DType::I8)]);
+        assert_eq!(schema_fingerprint(&peer_robot), schema_fingerprint(&peer_operator),);
     }
 
     #[test]
@@ -516,11 +503,7 @@ mod tests {
     // --- Chunk wire ------------------------------------------------------
 
     fn chunk_spec(name: &str, horizon: u32, fields: &[(&str, DType)]) -> ChunkSpec {
-        ChunkSpec::new(
-            name,
-            horizon,
-            fields.iter().map(|(n, d)| FieldSpec::new(*n, *d)),
-        )
+        ChunkSpec::new(name, horizon, fields.iter().map(|(n, d)| FieldSpec::new(*n, *d)))
     }
 
     #[test]

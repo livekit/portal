@@ -158,8 +158,8 @@ impl PortalConfig {
         session: impl Into<String>,
         role: Role,
     ) -> Result<Self, ConfigFileError> {
-        let parsed: ConfigFileV1 = serde_saphyr::from_str(yaml)
-            .map_err(|e| ConfigFileError::Parse(e.to_string()))?;
+        let parsed: ConfigFileV1 =
+            serde_saphyr::from_str(yaml).map_err(|e| ConfigFileError::Parse(e.to_string()))?;
 
         if parsed.version != SUPPORTED_VERSION {
             return Err(ConfigFileError::UnsupportedVersion {
@@ -241,10 +241,7 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
     let mut seen_video = std::collections::HashSet::new();
     for v in &p.videos {
         if !seen_video.insert(v.name.as_str()) {
-            return Err(ConfigFileError::Invalid(format!(
-                "duplicate video track '{}'",
-                v.name
-            )));
+            return Err(ConfigFileError::Invalid(format!("duplicate video track '{}'", v.name)));
         }
         if v.codec == Codec::Mjpeg {
             let q = v.quality.unwrap_or(DEFAULT_MJPEG_QUALITY);
@@ -293,10 +290,7 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
     let mut seen_chunk = std::collections::HashSet::new();
     for c in &p.action_chunks {
         if !seen_chunk.insert(c.name.as_str()) {
-            return Err(ConfigFileError::Invalid(format!(
-                "duplicate action chunk '{}'",
-                c.name
-            )));
+            return Err(ConfigFileError::Invalid(format!("duplicate action chunk '{}'", c.name)));
         }
         if c.horizon == 0 {
             return Err(ConfigFileError::Invalid(format!(
@@ -411,10 +405,7 @@ videos:
   - { name: d, codec: h265 }
 "#;
         let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
-        assert_eq!(
-            cfg.video_track_names().collect::<Vec<_>>(),
-            ["a", "b", "c", "d"]
-        );
+        assert_eq!(cfg.video_track_names().collect::<Vec<_>>(), ["a", "b", "c", "d"]);
         // No byte-stream tracks: every codec here rides the WebRTC path.
         assert_eq!(cfg.frame_video_tracks().len(), 0);
         assert_eq!(cfg.video_tracks()[1].codec, Codec::Vp9);

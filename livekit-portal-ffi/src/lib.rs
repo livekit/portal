@@ -29,11 +29,9 @@ uniffi::setup_scaffolding!();
 /// Initialize `env_logger` when the cdylib is loaded to allow outputting logs via `RUST_LOG`.
 #[ctor::ctor(unsafe)]
 fn init_logging() {
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .format_timestamp_millis()
-    .try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .try_init();
 }
 
 // ---------------------------------------------------------------------------
@@ -576,15 +574,11 @@ impl PortalConfig {
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
-        self.inner
-            .lock()
-            .add_state_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
+        self.inner.lock().add_state_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
     }
 
     pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
-        self.inner
-            .lock()
-            .add_action_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
+        self.inner.lock().add_action_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
     }
 
     /// Declare a named action chunk: a fixed-horizon batch of typed
@@ -724,11 +718,8 @@ impl Portal {
                 quality: s.quality,
             })
             .collect();
-        let action_chunks: Vec<ChunkSpec> = cfg
-            .action_chunks()
-            .iter()
-            .map(chunkspec_from_core)
-            .collect();
+        let action_chunks: Vec<ChunkSpec> =
+            cfg.action_chunks().iter().map(chunkspec_from_core).collect();
 
         let inner = core::Portal::new(cfg);
 
@@ -760,9 +751,7 @@ impl Portal {
             // Cross with raw f64 maps. Python wraps to typed on receipt.
             let raw: Vec<HashMap<String, f64>> = dropped
                 .into_iter()
-                .map(|m| {
-                    m.into_iter().map(|(k, v)| (k, v.as_f64())).collect()
-                })
+                .map(|m| m.into_iter().map(|(k, v)| (k, v.as_f64())).collect())
                 .collect();
             cb.on_drop(raw);
         });
@@ -850,9 +839,7 @@ impl Portal {
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
         let typed = f64_to_typed(&values, self.inner.action_schema());
-        self.inner
-            .send_action(&typed, timestamp_us, in_reply_to_ts_us)
-            .map_err(Into::into)
+        self.inner.send_action(&typed, timestamp_us, in_reply_to_ts_us).map_err(Into::into)
     }
 
     /// Publish an action chunk on the named declaration. `data` is
@@ -887,10 +874,7 @@ impl Portal {
     }
 
     pub fn get_state(&self) -> Option<State> {
-        self.inner.get_state().map(|s| State {
-            values: s.raw_values,
-            timestamp_us: s.timestamp_us,
-        })
+        self.inner.get_state().map(|s| State { values: s.raw_values, timestamp_us: s.timestamp_us })
     }
 
     pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {

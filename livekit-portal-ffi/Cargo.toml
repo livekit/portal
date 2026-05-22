@@ -28,10 +28,10 @@ livekit-portal = { path = "../livekit-portal" }
 #     `HashMap<String, f64>` (which is our state/action wire format).
 # Drop this back to a version req once a release ships with both.
 uniffi = { git = "https://github.com/mozilla/uniffi-rs", rev = "bd74c376547cff78e1364dd678ddb277927c14a8", features = ["cli", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
-thiserror = "2"
-parking_lot = "0.12"
-log = "0.4"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+log = { workspace = true }
 env_logger = "0.11"
 ctor = "1"
 async-trait = "0.1"

@@ -43,6 +43,7 @@ collect_ignore = (
         "test_e2ee.py",
         "test_multi_operator.py",
         "test_action_subscription.py",
+        "test_webrtc_codecs.py",
     ]
 )
 

@@ -66,18 +66,28 @@ impl From<core::Role> for Role {
 
 /// Video codec. Selected per-track at config time via
 /// `PortalConfig::add_video`. Codec choice picks both the encoding and the
-/// wire transport: `H264` rides the WebRTC media path; the rest ride a
-/// reliable per-frame byte-stream channel. Mirrors `livekit_portal::Codec`.
+/// wire transport: the WebRTC codecs (`H264` / `Vp8` / `Vp9` / `Av1` /
+/// `H265`) ride the WebRTC media path; the rest ride a reliable per-frame
+/// byte-stream channel. Mirrors `livekit_portal::Codec`.
 ///
 /// **Foreign binding casing**: UniFFI emits enum variants in the host
 /// language's idiomatic case. Python code uses `VideoCodec.H264` /
-/// `VideoCodec.RAW` / `VideoCodec.PNG` / `VideoCodec.MJPEG` (UPPER), not
+/// `VideoCodec.VP8` / `VideoCodec.RAW` / `VideoCodec.MJPEG` (UPPER), not
 /// the Rust spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum VideoCodec {
     /// WebRTC H.264. Real-time RTP/SRTP transport, lossy, best-effort.
     /// `quality` is ignored — libwebrtc picks the operating bitrate.
     H264,
+    /// WebRTC VP8. Same media path and trade-offs as `H264`.
+    Vp8,
+    /// WebRTC VP9. Same media path as `H264`, better compression, higher CPU.
+    Vp9,
+    /// WebRTC AV1. Same media path as `H264`, best compression, highest CPU.
+    Av1,
+    /// WebRTC H.265 / HEVC. Same media path as `H264`. Support is platform-
+    /// and build-dependent in libwebrtc.
+    H265,
     /// Uncompressed RGB24. Largest payload, zero encode cost. Byte-stream
     /// transport.
     Raw,
@@ -94,6 +104,10 @@ impl From<VideoCodec> for core::Codec {
     fn from(c: VideoCodec) -> Self {
         match c {
             VideoCodec::H264 => core::Codec::H264,
+            VideoCodec::Vp8 => core::Codec::Vp8,
+            VideoCodec::Vp9 => core::Codec::Vp9,
+            VideoCodec::Av1 => core::Codec::Av1,
+            VideoCodec::H265 => core::Codec::H265,
             VideoCodec::Raw => core::Codec::Raw,
             VideoCodec::Png => core::Codec::Png,
             VideoCodec::Mjpeg => core::Codec::Mjpeg,
@@ -105,6 +119,10 @@ impl From<core::Codec> for VideoCodec {
     fn from(c: core::Codec) -> Self {
         match c {
             core::Codec::H264 => VideoCodec::H264,
+            core::Codec::Vp8 => VideoCodec::Vp8,
+            core::Codec::Vp9 => VideoCodec::Vp9,
+            core::Codec::Av1 => VideoCodec::Av1,
+            core::Codec::H265 => VideoCodec::H265,
             core::Codec::Raw => VideoCodec::Raw,
             core::Codec::Png => VideoCodec::Png,
             core::Codec::Mjpeg => VideoCodec::Mjpeg,
@@ -544,9 +562,17 @@ impl PortalConfig {
     /// `Raw` ride a reliable per-frame byte-stream channel and the
     /// receiver decodes back to RGB so the user-facing frame API is
     /// identical. `quality` is `1..=100` for `Mjpeg` and ignored for
-    /// `H264` / `Raw` / `Png`.
-    pub fn add_video(&self, name: String, codec: VideoCodec, quality: u8) {
-        self.inner.lock().add_video(name, codec.into(), quality);
+    /// `H264` / `Raw` / `Png`. `max_bitrate_kbps` caps the H264 encoder's
+    /// peak rate (a ceiling, not a target); `None` uses the default 10 Mbps.
+    /// It is ignored for the byte-stream codecs.
+    pub fn add_video(
+        &self,
+        name: String,
+        codec: VideoCodec,
+        quality: u8,
+        max_bitrate_kbps: Option<u32>,
+    ) {
+        self.inner.lock().add_video(name, codec.into(), quality, max_bitrate_kbps);
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -615,7 +641,7 @@ impl PortalConfig {
 
     /// Declared WebRTC video track names (H264).
     pub fn video_tracks(&self) -> Vec<String> {
-        self.inner.lock().video_tracks().to_vec()
+        self.inner.lock().video_track_names().map(String::from).collect()
     }
 
     /// Declared byte-stream video tracks (Raw / Png / Mjpeg) with codec
@@ -688,7 +714,7 @@ impl Portal {
         let cfg = config.inner.lock().clone();
         let state_fields: Vec<String> = cfg.state_fields().map(String::from).collect();
         let action_fields: Vec<String> = cfg.action_fields().map(String::from).collect();
-        let video_tracks = cfg.video_tracks().to_vec();
+        let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
         let frame_video_tracks: Vec<FrameVideoSpec> = cfg
             .frame_video_tracks()
             .iter()

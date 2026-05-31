@@ -323,12 +323,30 @@ type.
 uint8. Width and height must both be even. Full details in
 [concepts.md](concepts.md#video-frame-format).
 
+## WebRTC video options
+
+`add_video(name)` defaults to `VideoCodec.H264` on the WebRTC media path.
+The other WebRTC codecs are available on the same call — `VideoCodec.VP8`,
+`VideoCodec.VP9`, `VideoCodec.AV1`, `VideoCodec.H265`. VP9 and AV1 compress
+better than H264 at higher CPU cost; AV1 and H265 support is platform- and
+peer-dependent, so confirm both ends negotiate the codec.
+
+`max_bitrate_kbps` caps the encoder's peak rate for any WebRTC codec. It's a
+ceiling, not a target — libwebrtc still picks a lower operating bitrate from
+content. Omit it for the default 10 Mbps ceiling.
+
+```python
+from livekit.portal import VideoCodec
+
+cfg.add_video("front", max_bitrate_kbps=8000)              # H264, capped at 8 Mbps
+cfg.add_video("wide", codec=VideoCodec.VP9, max_bitrate_kbps=4000)
+```
+
 ## Frame video (lossless or codec-of-your-choice)
 
-`add_video(name)` defaults to `VideoCodec.H264`, the WebRTC media path
-(lossy). For policies that read the pixels — VLA inference, behavior
-cloning, any case where colorspace shift breaks the policy distribution
-— pass a non-H264 codec on the same call:
+For policies that read the pixels — VLA inference, behavior cloning, any
+case where colorspace shift breaks the policy distribution — pass a
+byte-stream codec on the same call:
 
 ```python
 from livekit.portal import VideoCodec

@@ -5,9 +5,11 @@ codec. Use this when the frames feeding your policy must arrive as the
 same RGB bytes the camera produced — no I420 conversion, no temporal
 codec, no quality drift.
 
-Selected by passing a non-`H264` codec to `add_video`. The default
-codec is `VideoCodec.H264` (WebRTC); the byte-stream codecs are `RAW`,
-`PNG`, and `MJPEG`.
+Selected by passing a byte-stream codec to `add_video`. The byte-stream
+codecs are `RAW`, `PNG`, and `MJPEG`; everything else (`H264`, `VP8`,
+`VP9`, `AV1`, `H265`) rides the WebRTC media path instead — see
+[portal-api.md](portal-api.md#webrtc-video-options) for the WebRTC codec
+and `max_bitrate_kbps` options.
 
 ## When to use it
 
@@ -134,9 +136,11 @@ It is the wrong call when:
 - Frame rate must be deterministic. WebRTC's encoder will drop frames
   silently to fit a bitrate target.
 
-Picking a non-H264 codec on the same `add_video` call routes the track
+Picking a byte-stream codec on the same `add_video` call routes the track
 through the byte-stream transport, trading adaptive bitrate for
-deterministic per-frame delivery and bit-exact RGB.
+deterministic per-frame delivery and bit-exact RGB. The other WebRTC
+codecs (`VP8`/`VP9`/`AV1`/`H265`) and the `max_bitrate_kbps` cap are
+documented in [portal-api.md](portal-api.md#webrtc-video-options).
 
 ## Configuration
 
@@ -145,11 +149,14 @@ PortalConfig.add_video(
     name: str,
     codec: VideoCodec = VideoCodec.H264,
     quality: int = 90,
+    max_bitrate_kbps: int | None = None,
 )
 ```
 
-- `codec` is one of `VideoCodec.H264` (WebRTC), `VideoCodec.RAW`,
-  `VideoCodec.PNG`, `VideoCodec.MJPEG` (byte-stream).
+- `codec` is one of the WebRTC codecs `VideoCodec.H264` / `VP8` / `VP9` /
+  `AV1` / `H265`, or a byte-stream codec `VideoCodec.RAW` / `PNG` / `MJPEG`.
+- `max_bitrate_kbps` caps the WebRTC encoder's peak rate (a ceiling, not a
+  target). Defaults to 10 Mbps. Rejected on the byte-stream codecs.
 - `quality` is `1..=100` for MJPEG, ignored for every other codec.
   Quality 90 is visually near-lossless on natural images and produces
   10-20× compression. Quality 70 trades visible artifacts for ~2× more

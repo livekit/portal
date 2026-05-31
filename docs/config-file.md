@@ -150,7 +150,8 @@ than being silently ignored.
 
 ```yaml
 videos:
-  - { name: front,    codec: h264 }                   # WebRTC media path
+  - { name: front,    codec: h264, max_bitrate_kbps: 8000 }  # WebRTC media path, capped at 8 Mbps
+  - { name: wide,     codec: vp9 }                    # WebRTC media path, default ceiling
   - { name: wrist,    codec: mjpeg, quality: 90 }     # byte-stream, lossy
   - { name: depth,    codec: png }                    # byte-stream, lossless
   - { name: raw_cam,  codec: raw }                    # byte-stream, uncompressed RGB
@@ -159,14 +160,17 @@ videos:
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Track name. Unique across all `videos` entries. |
-| `codec` | string | One of `h264`, `mjpeg`, `png`, `raw`. Case-insensitive (`H264` works too). |
-| `quality` | int (optional) | `1..=100` for `mjpeg`. Defaults to `90`. Ignored for `raw`, `png`, `h264`. |
+| `codec` | string | One of `h264`, `vp8`, `vp9`, `av1`, `h265`, `mjpeg`, `png`, `raw`. Case-insensitive (`H264` works too; `hevc` is an alias for `h265`). |
+| `quality` | int (optional) | `1..=100` for `mjpeg`. Defaults to `90`. Ignored for every other codec. |
+| `max_bitrate_kbps` | int (optional) | Encoder bitrate ceiling (kbps) for the WebRTC codecs. A cap, not a target. Defaults to `10000` (10 Mbps). Rejected on the byte-stream codecs. |
 
 Codec choice picks both the encoding and the wire transport:
 
-- **`h264`** — WebRTC media path. Real-time RTP/SRTP, lossy, best-effort
-  delivery. libwebrtc picks the operating bitrate. Lowest end-to-end
-  latency at scale.
+- **`h264` / `vp8` / `vp9` / `av1` / `h265`** — WebRTC media path. Real-time
+  RTP/SRTP, lossy, best-effort delivery. libwebrtc picks the operating
+  bitrate up to `max_bitrate_kbps`. Lowest end-to-end latency at scale. VP9
+  and AV1 compress better than H264 at higher CPU cost; AV1 and H265 support
+  is platform- and peer-dependent, so confirm both ends negotiate the codec.
 - **`mjpeg`** — per-frame byte-stream, lossy. ~10-20x compression at
   q=90. Sub-millisecond decode. Each frame is independent.
 - **`png`** — per-frame byte-stream, lossless. ~2-3x compression on
@@ -281,7 +285,7 @@ ends up making.
 | `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` |
 | `ping_ms` | `cfg.set_ping_ms(...)` |
 | `action_subscription` | `cfg.set_action_subscription(...)` |
-| `videos[]` | `cfg.add_video(name, codec, quality)` |
+| `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps)` |
 | `state[]` | `cfg.add_state_typed([...])` |
 | `action[]` | `cfg.add_action_typed([...])` |
 | `action_chunks[]` | `cfg.add_action_chunk(name, horizon, fields)` |
@@ -302,7 +306,8 @@ tracks, same sync config.
    `version` the build doesn't know how to read.
 3. **`Invalid`** — pre-flight validation failures. Duplicate track
    names, duplicate chunk names, `horizon: 0`, MJPEG quality outside
-   `1..=100`, `fps` / `slack` / `tolerance` set to zero or negative.
+   `1..=100`, `max_bitrate_kbps` on a byte-stream codec or set to zero,
+   `fps` / `slack` / `tolerance` set to zero or negative.
 4. **`Io`** — `from_yaml_file` only. The file couldn't be opened.
 
 ```python
@@ -360,11 +365,21 @@ codec.
 ```yaml
 version: 1
 videos:
-  - { name: cam, codec: vp8 }
+  - { name: cam, codec: theora }
 ```
 
-→ `ConfigFileError.Parse(...)`: unknown codec `vp8`. The codec set
-is closed: `h264`, `raw`, `png`, `mjpeg`.
+→ `ConfigFileError.Parse(...)`: unknown codec `theora`. The codec set
+is closed: `h264`, `vp8`, `vp9`, `av1`, `h265`, `raw`, `png`, `mjpeg`.
+
+```yaml
+version: 1
+videos:
+  - { name: cam, codec: mjpeg, quality: 80, max_bitrate_kbps: 4000 }
+```
+
+→ `ConfigFileError.Invalid("video 'cam': max_bitrate_kbps applies to
+the WebRTC codecs only, not Mjpeg")`. The bitrate ceiling is a WebRTC
+encoder knob; the byte-stream codecs reject it.
 
 ```yaml
 version: 1

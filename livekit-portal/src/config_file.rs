@@ -83,6 +83,11 @@ struct VideoEntry {
     codec: Codec,
     #[serde(default)]
     quality: Option<u8>,
+    /// WebRTC encoder bitrate ceiling in kilobits per second. Honored for the
+    /// WebRTC codecs (h264, vp8, vp9, av1, h265); rejected for the byte-stream
+    /// codecs. Omit to use the default ceiling.
+    #[serde(default)]
+    max_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,11 +113,16 @@ where
     let s = String::deserialize(d)?;
     match s.to_ascii_lowercase().as_str() {
         "h264" => Ok(Codec::H264),
+        "vp8" => Ok(Codec::Vp8),
+        "vp9" => Ok(Codec::Vp9),
+        "av1" => Ok(Codec::Av1),
+        "h265" | "hevc" => Ok(Codec::H265),
         "raw" => Ok(Codec::Raw),
         "png" => Ok(Codec::Png),
         "mjpeg" => Ok(Codec::Mjpeg),
         other => Err(serde::de::Error::custom(format!(
-            "unknown codec '{other}' (expected one of h264, raw, png, mjpeg)"
+            "unknown codec '{other}' \
+             (expected one of h264, vp8, vp9, av1, h265, raw, png, mjpeg)"
         ))),
     }
 }
@@ -167,7 +177,7 @@ impl PortalConfig {
                 Codec::Mjpeg => DEFAULT_MJPEG_QUALITY,
                 _ => 0,
             });
-            cfg.add_video(&v.name, v.codec, quality);
+            cfg.add_video(&v.name, v.codec, quality, v.max_bitrate_kbps);
         }
 
         if !parsed.state.is_empty() {
@@ -245,6 +255,20 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
                 )));
             }
         }
+        if let Some(kbps) = v.max_bitrate_kbps {
+            if !v.codec.is_webrtc() {
+                return Err(ConfigFileError::Invalid(format!(
+                    "video '{}': max_bitrate_kbps applies to the WebRTC codecs only, not {:?}",
+                    v.name, v.codec
+                )));
+            }
+            if kbps == 0 {
+                return Err(ConfigFileError::Invalid(format!(
+                    "video '{}': max_bitrate_kbps must be > 0",
+                    v.name
+                )));
+            }
+        }
     }
 
     if let Some(fps) = p.fps {
@@ -301,7 +325,7 @@ reuse_stale_frames: true
 ping_ms: 500
 action_subscription: true
 videos:
-  - { name: front, codec: h264 }
+  - { name: front, codec: h264, max_bitrate_kbps: 4000 }
   - { name: wrist, codec: mjpeg, quality: 80 }
   - { name: depth, codec: png }
 state:
@@ -320,7 +344,8 @@ action_chunks:
     #[test]
     fn full_config_round_trip() {
         let cfg = PortalConfig::from_yaml_str(yaml_full(), "demo", Role::Robot).unwrap();
-        assert_eq!(cfg.video_tracks(), &["front".to_string()]);
+        assert_eq!(cfg.video_track_names().collect::<Vec<_>>(), ["front"]);
+        assert_eq!(cfg.video_tracks()[0].max_bitrate_kbps, Some(4000));
         assert_eq!(cfg.frame_video_tracks().len(), 2);
         assert_eq!(cfg.frame_video_tracks()[0].name, "wrist");
         assert_eq!(cfg.frame_video_tracks()[0].codec, Codec::Mjpeg);
@@ -362,6 +387,63 @@ videos:
 "#;
         let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
         assert_eq!(cfg.frame_video_tracks()[0].quality, DEFAULT_MJPEG_QUALITY);
+    }
+
+    #[test]
+    fn h264_bitrate_defaults_to_none() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: h264 }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        assert_eq!(cfg.video_tracks()[0].max_bitrate_kbps, None);
+    }
+
+    #[test]
+    fn webrtc_codecs_route_to_video_tracks_with_bitrate() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: a, codec: vp8 }
+  - { name: b, codec: vp9, max_bitrate_kbps: 3000 }
+  - { name: c, codec: av1 }
+  - { name: d, codec: h265 }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        assert_eq!(
+            cfg.video_track_names().collect::<Vec<_>>(),
+            ["a", "b", "c", "d"]
+        );
+        // No byte-stream tracks: every codec here rides the WebRTC path.
+        assert_eq!(cfg.frame_video_tracks().len(), 0);
+        assert_eq!(cfg.video_tracks()[1].codec, Codec::Vp9);
+        assert_eq!(cfg.video_tracks()[1].max_bitrate_kbps, Some(3000));
+    }
+
+    #[test]
+    fn bitrate_on_byte_stream_codec_rejected() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: mjpeg, quality: 80, max_bitrate_kbps: 4000 }
+"#;
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        match err {
+            ConfigFileError::Invalid(msg) => assert!(msg.contains("max_bitrate_kbps")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_bitrate_rejected() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: h264, max_bitrate_kbps: 0 }
+"#;
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        assert!(matches!(err, ConfigFileError::Invalid(_)));
     }
 
     #[test]
@@ -439,7 +521,7 @@ state:
         let yaml = r#"
 version: 1
 videos:
-  - { name: cam, codec: vp8 }
+  - { name: cam, codec: theora }
 "#;
         let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
         assert!(matches!(err, ConfigFileError::Parse(_)));
@@ -466,7 +548,7 @@ state:
   - { name: x, dtype: F32 }
 "#;
         let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
-        assert_eq!(cfg.video_tracks(), &["cam".to_string()]);
+        assert_eq!(cfg.video_track_names().collect::<Vec<_>>(), ["cam"]);
         assert_eq!(cfg.state_schema()[0].dtype, DType::F32);
     }
 

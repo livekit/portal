@@ -18,17 +18,31 @@ use image::{ExtendedColorType, ImageEncoder};
 /// Codec used by a video track.
 ///
 /// Selected per-track at config time via `PortalConfig::add_video`. The codec
-/// also picks the wire transport: `H264` rides the WebRTC media path, every
-/// other variant rides a reliable byte-stream channel and is encoded by this
-/// module. The user-facing payload is RGB in every case.
+/// also picks the wire transport: the WebRTC codecs (`H264` / `Vp8` / `Vp9` /
+/// `Av1`) ride the WebRTC media path and are encoded by libwebrtc, every other
+/// variant rides a reliable byte-stream channel and is encoded by this module.
+/// The user-facing payload is RGB in every case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     /// WebRTC H.264, lossy. Real-time RTP/SRTP transport with libwebrtc's
     /// adaptive bitrate. Best-effort delivery — frames may drop or arrive
     /// late. Lowest end-to-end latency at scale. Encoded by libwebrtc,
     /// not this module — the byte-stream encode/decode helpers below panic
-    /// for `H264`.
+    /// for the WebRTC codecs.
     H264,
+    /// WebRTC VP8, lossy. Same media path and trade-offs as `H264`. Widely
+    /// supported software codec.
+    Vp8,
+    /// WebRTC VP9, lossy. Same media path as `H264`. Better compression than
+    /// VP8/H264 at equal quality, higher CPU cost.
+    Vp9,
+    /// WebRTC AV1, lossy. Same media path as `H264`. Best compression of the
+    /// set, highest CPU cost. Newest codec — confirm both peers support it.
+    Av1,
+    /// WebRTC H.265 / HEVC, lossy. Same media path as `H264`. Support is
+    /// platform- and build-dependent in libwebrtc — confirm both peers
+    /// negotiate it before relying on it.
+    H265,
     /// Uncompressed RGB24. Largest payload, zero encode cost. Use when CPU is
     /// scarce or you want bit-exact frames with no codec dependency.
     Raw,
@@ -45,7 +59,7 @@ impl Codec {
     /// Whether this codec rides the WebRTC media path. The remaining codecs
     /// ride the per-frame byte-stream path.
     pub fn is_webrtc(self) -> bool {
-        matches!(self, Codec::H264)
+        matches!(self, Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265)
     }
 }
 
@@ -123,8 +137,8 @@ pub fn estimated_encoded_size(width: u32, height: u32, codec: Codec) -> usize {
         Codec::Raw => raw,
         Codec::Png => raw,
         Codec::Mjpeg => (raw / 8).max(1024),
-        Codec::H264 => unreachable!(
-            "Codec::H264 rides the WebRTC media path, not the byte-stream encode path"
+        Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
+            "WebRTC codecs ride the WebRTC media path, not the byte-stream encode path"
         ),
     }
 }
@@ -194,8 +208,8 @@ pub fn encode_frame_into(
                 .map_err(|e| CodecError::EncodeFailed(e.to_string()))?;
             Ok(())
         }
-        Codec::H264 => unreachable!(
-            "Codec::H264 rides the WebRTC media path, not the byte-stream encode path"
+        Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
+            "WebRTC codecs ride the WebRTC media path, not the byte-stream encode path"
         ),
     }
 }
@@ -234,8 +248,8 @@ pub fn decode_frame(
             declared_width,
             declared_height,
         ),
-        Codec::H264 => unreachable!(
-            "Codec::H264 rides the WebRTC media path, not the byte-stream decode path"
+        Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
+            "WebRTC codecs ride the WebRTC media path, not the byte-stream decode path"
         ),
     }
 }

@@ -15,6 +15,8 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::codec::Codec;
+use crate::config::DEFAULT_H264_MAX_BITRATE_KBPS;
 use crate::error::{PortalError, PortalResult};
 use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
@@ -31,15 +33,40 @@ pub(crate) struct VideoPublisher {
     track: LocalVideoTrack,
     metrics: Arc<TrackMetrics>,
     fps: u32,
+    codec: Codec,
+    max_bitrate_kbps: Option<u32>,
+}
+
+/// Map a Portal WebRTC codec to the libwebrtc codec the publish path sets.
+/// Only ever called for WebRTC codecs — `add_video` routes byte-stream codecs
+/// to the frame-video path, so they never reach a `VideoPublisher`.
+fn webrtc_video_codec(codec: Codec) -> VideoCodec {
+    match codec {
+        Codec::H264 => VideoCodec::H264,
+        Codec::Vp8 => VideoCodec::VP8,
+        Codec::Vp9 => VideoCodec::VP9,
+        Codec::Av1 => VideoCodec::AV1,
+        Codec::H265 => VideoCodec::H265,
+        Codec::Raw | Codec::Png | Codec::Mjpeg => unreachable!(
+            "byte-stream codecs never reach a VideoPublisher (add_video routes them \
+             to the frame-video path)"
+        ),
+    }
 }
 
 impl VideoPublisher {
-    pub fn new(name: &str, metrics: Arc<TrackMetrics>, fps: u32) -> Self {
+    pub fn new(
+        name: &str,
+        metrics: Arc<TrackMetrics>,
+        fps: u32,
+        codec: Codec,
+        max_bitrate_kbps: Option<u32>,
+    ) -> Self {
         let resolution = VideoResolution { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
         let source = NativeVideoSource::new(resolution, false);
         let rtc_source = RtcVideoSource::Native(source.clone());
         let track = LocalVideoTrack::create_video_track(name, rtc_source);
-        Self { source, track, metrics, fps }
+        Self { source, track, metrics, fps, codec, max_bitrate_kbps }
     }
 
     pub async fn publish(&self, local_participant: &LocalParticipant) -> PortalResult<()> {
@@ -56,16 +83,20 @@ impl VideoPublisher {
         //
         //   max_framerate = fps * 2 — 2x headroom over the capture rate so the
         //     adaptive-framerate logic never throttles below our cadence.
-        //   max_bitrate   = 10 Mbps — generous ceiling; the encoder still picks
-        //     a much lower operating bitrate based on content. We just don't
-        //     want a tight cap forcing frame drops on high-motion bursts.
+        //   max_bitrate   = per-track ceiling (default 10 Mbps); the encoder
+        //     still picks a much lower operating bitrate based on content. We
+        //     just don't want a tight cap forcing frame drops on high-motion
+        //     bursts. Configurable per track via `add_video`'s
+        //     `max_bitrate_kbps`.
+        let max_bitrate_kbps =
+            self.max_bitrate_kbps.unwrap_or(DEFAULT_H264_MAX_BITRATE_KBPS);
         let options = TrackPublishOptions {
-            video_codec: VideoCodec::H264,
+            video_codec: webrtc_video_codec(self.codec),
             simulcast: false,
             packet_trailer_features: features,
             video_encoding: Some(VideoEncoding {
                 max_framerate: (self.fps as f64) * 2.0,
-                max_bitrate: 10_000_000,
+                max_bitrate: (max_bitrate_kbps as u64) * 1_000,
             }),
             ..Default::default()
         };

@@ -7,6 +7,14 @@ use crate::types::{Role, SyncConfig};
 /// natural images, ~10-20x compression versus raw RGB.
 pub const DEFAULT_MJPEG_QUALITY: u8 = 90;
 
+/// Default H264 encoder bitrate ceiling (kbps) for `add_video` when no
+/// explicit `max_bitrate_kbps` is given. 10 Mbps is a generous cap: the
+/// encoder still picks a much lower operating bitrate from content. The cap
+/// only exists so high-motion bursts don't force frame drops. Lower it to
+/// hold a hard bandwidth budget; raise it to let the encoder spend more on
+/// motion.
+pub const DEFAULT_H264_MAX_BITRATE_KBPS: u32 = 10_000;
+
 /// A single schema entry: field name plus declared on-wire dtype.
 ///
 /// Named for parity with the UniFFI-facing `FieldSpec` record the
@@ -62,6 +70,30 @@ impl FrameVideoSpec {
     }
 }
 
+/// One WebRTC video track declaration: name, WebRTC codec, and an optional
+/// encoder bitrate ceiling.
+///
+/// The WebRTC counterpart to `FrameVideoSpec`. These tracks ride the WebRTC
+/// media path (RTP/SRTP). `codec` is always a WebRTC codec (`H264` / `Vp8` /
+/// `Vp9` / `Av1` / `H265`) — `add_video` routes byte-stream codecs to
+/// `FrameVideoSpec` instead. `max_bitrate_kbps` caps the encoder's peak rate
+/// in kilobits per second; `None` means use `DEFAULT_H264_MAX_BITRATE_KBPS`.
+/// The cap is a ceiling, not a target — libwebrtc still picks a lower
+/// operating bitrate from content. Selected at config time by passing a
+/// WebRTC codec to `PortalConfig::add_video`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoTrackSpec {
+    pub name: String,
+    pub codec: Codec,
+    pub max_bitrate_kbps: Option<u32>,
+}
+
+impl VideoTrackSpec {
+    pub fn new(name: impl Into<String>, codec: Codec, max_bitrate_kbps: Option<u32>) -> Self {
+        Self { name: name.into(), codec, max_bitrate_kbps }
+    }
+}
+
 /// Schema for one named action chunk: a fixed-horizon batch of per-field
 /// values that the operator publishes as a single packet.
 ///
@@ -95,7 +127,7 @@ impl ChunkSpec {
 pub struct PortalConfig {
     pub(crate) session: String,
     pub(crate) role: Role,
-    pub(crate) video_tracks: Vec<String>,
+    pub(crate) video_tracks: Vec<VideoTrackSpec>,
     pub(crate) frame_video_tracks: Vec<FrameVideoSpec>,
     pub(crate) state_schema: Vec<FieldSpec>,
     pub(crate) action_schema: Vec<FieldSpec>,
@@ -170,15 +202,22 @@ impl PortalConfig {
     ///
     /// `codec` picks both the encoding and the wire transport:
     ///
-    /// - `Codec::H264` rides the WebRTC media path (RTP/SRTP, lossy,
+    /// - The WebRTC codecs (`Codec::H264`, `Codec::Vp8`, `Codec::Vp9`,
+    ///   `Codec::Av1`, `Codec::H265`) ride the WebRTC media path (RTP/SRTP, lossy,
     ///   best-effort delivery, lowest latency at scale). `quality` is
-    ///   ignored — libwebrtc picks the operating bitrate.
+    ///   ignored — libwebrtc picks the operating bitrate. `max_bitrate_kbps`
+    ///   caps the encoder's peak rate (a ceiling, not a target); `None` uses
+    ///   `DEFAULT_H264_MAX_BITRATE_KBPS` (10 Mbps).
     /// - `Codec::Mjpeg`, `Codec::Png`, `Codec::Raw` ride a reliable
     ///   per-frame byte-stream channel. The receiver decodes back to RGB so
     ///   the user-facing `on_video_frame` / `get_video_frame` API is
     ///   identical to H264. `quality` is in `1..=100` for `Mjpeg` and
     ///   ignored for `Raw` / `Png`. Use `DEFAULT_MJPEG_QUALITY` (90) when
-    ///   in doubt.
+    ///   in doubt. `max_bitrate_kbps` is ignored for these codecs.
+    ///
+    /// `quality` and `max_bitrate_kbps` are independent per-codec knobs: H264
+    /// honors bitrate and ignores quality, the byte-stream codecs honor
+    /// quality and ignore bitrate.
     ///
     /// Track names must be unique across all `add_video` calls regardless
     /// of codec; a duplicate panics.
@@ -189,7 +228,13 @@ impl PortalConfig {
     /// codec whose encoded size fits in one chunk for low-latency
     /// closed-loop work. MJPEG at 224×224 to 480p typically does. Raw at
     /// anything above ~70×70 spills into multiple chunks.
-    pub fn add_video(&mut self, name: impl Into<String>, codec: Codec, quality: u8) {
+    pub fn add_video(
+        &mut self,
+        name: impl Into<String>,
+        codec: Codec,
+        quality: u8,
+        max_bitrate_kbps: Option<u32>,
+    ) {
         let name = name.into();
         assert!(
             !self.has_track(&name),
@@ -202,15 +247,18 @@ impl PortalConfig {
                 "MJPEG quality must be in 1..=100, got {quality}"
             );
         }
+        if let Some(kbps) = max_bitrate_kbps {
+            assert!(kbps > 0, "max_bitrate_kbps must be > 0, got {kbps}");
+        }
         if codec.is_webrtc() {
-            self.video_tracks.push(name);
+            self.video_tracks.push(VideoTrackSpec::new(name, codec, max_bitrate_kbps));
         } else {
             self.frame_video_tracks.push(FrameVideoSpec::new(name, codec, quality));
         }
     }
 
     fn has_track(&self, name: &str) -> bool {
-        self.video_tracks.iter().any(|n| n == name)
+        self.video_tracks.iter().any(|s| s.name == name)
             || self.frame_video_tracks.iter().any(|s| s.name == name)
     }
 
@@ -342,8 +390,15 @@ impl PortalConfig {
         self.reuse_stale_frames = enable;
     }
 
-    pub fn video_tracks(&self) -> &[String] {
+    /// Declared WebRTC (H264) video tracks (name + optional bitrate cap), in
+    /// declaration order.
+    pub fn video_tracks(&self) -> &[VideoTrackSpec] {
         &self.video_tracks
+    }
+
+    /// WebRTC (H264) video track names, derived from `video_tracks`.
+    pub fn video_track_names(&self) -> impl Iterator<Item = &str> {
+        self.video_tracks.iter().map(|s| s.name.as_str())
     }
 
     /// Declared frame-video tracks (name + codec + quality), in declaration

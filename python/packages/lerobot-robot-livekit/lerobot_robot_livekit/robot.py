@@ -59,11 +59,13 @@ class LiveKitRobotConfig(RobotConfig):
     # Video transport. `H264` rides the WebRTC media path (default).
     # `MJPEG` / `PNG` / `RAW` ride a reliable per-frame byte stream — pick
     # one of those for policy-grade pixels. `video_quality` is honored only
-    # for `MJPEG`. Both peers must agree, so set the same values on the
-    # operator's `LiveKitRobotConfig` and the robot's
-    # `LiveKitTeleoperatorConfig`.
+    # for `MJPEG`. `video_max_bitrate_kbps` caps the H264 encoder's peak rate
+    # (a ceiling, not a target); `None` uses the default 10 Mbps. Both peers
+    # must agree, so set the same values on the operator's `LiveKitRobotConfig`
+    # and the robot's `LiveKitTeleoperatorConfig`.
     video_codec: VideoCodec = VideoCodec.H264
     video_quality: int = DEFAULT_MJPEG_QUALITY
+    video_max_bitrate_kbps: int | None = None
 
     # Portal tuning.
     slack: int | None = None
@@ -179,6 +181,7 @@ class LiveKitRobot(Robot):
                 cam,
                 codec=self.config.video_codec,
                 quality=self.config.video_quality,
+                max_bitrate_kbps=self.config.video_max_bitrate_kbps,
             )
         if self._state_motors:
             self._portal_cfg.add_state_typed(

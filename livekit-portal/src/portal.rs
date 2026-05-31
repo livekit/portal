@@ -575,7 +575,7 @@ impl Portal {
         // no publisher means "wrong role" — same shape as `send_state` /
         // `send_action_chunk`.
         if self.config.role != Role::Robot
-            && (self.config.video_tracks.iter().any(|n| n == track_name)
+            && (self.config.video_tracks.iter().any(|s| s.name == track_name)
                 || self
                     .config
                     .frame_video_tracks
@@ -1197,12 +1197,19 @@ impl Portal {
     async fn setup_robot(&self, room: &Room) -> PortalResult<()> {
         let lp = room.local_participant();
 
-        for track_name in &self.config.video_tracks {
+        for spec in &self.config.video_tracks {
+            let track_name = &spec.name;
             let track_metrics = self
                 .metrics
                 .track(track_name)
                 .expect("track metrics registered at construction");
-            let publisher = VideoPublisher::new(track_name, track_metrics, self.config.fps);
+            let publisher = VideoPublisher::new(
+                track_name,
+                track_metrics,
+                self.config.fps,
+                spec.codec,
+                spec.max_bitrate_kbps,
+            );
             if let Err(e) = publisher.publish(&lp).await {
                 // Roll back any earlier publishers so their send tasks stop
                 // and connect() leaves Portal in a clean state.
@@ -1335,7 +1342,8 @@ impl Portal {
 /// when registering metrics and sync-buffer slots, since the consumer-facing
 /// API doesn't distinguish WebRTC and frame-video tracks.
 fn combined_track_names(config: &PortalConfig) -> Vec<String> {
-    let mut names: Vec<String> = config.video_tracks.clone();
+    let mut names: Vec<String> =
+        config.video_tracks.iter().map(|s| s.name.clone()).collect();
     names.extend(config.frame_video_tracks.iter().map(|s| s.name.clone()));
     names
 }
@@ -1480,7 +1488,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             }
             if let RemoteTrack::Video(video_track) = track {
                 let track_name = publication.name();
-                if ctx.config.video_tracks.contains(&track_name.to_string()) {
+                if ctx.config.video_tracks.iter().any(|s| s.name == track_name) {
                     log::info!(
                         "[{}] subscribed to video track '{track_name}'",
                         ctx.config.session

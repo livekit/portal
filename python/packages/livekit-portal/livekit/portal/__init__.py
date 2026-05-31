@@ -63,6 +63,19 @@ RpcError = _ffi.RpcError
 # explicit value is given. Mirrors the Rust core's `DEFAULT_MJPEG_QUALITY`.
 DEFAULT_MJPEG_QUALITY: int = 90
 
+# Codecs that ride the WebRTC media path. The rest ride the per-frame
+# byte-stream channel. Mirrors the Rust core's `Codec::is_webrtc`; used to
+# route `add_video` declarations into the right Python-side mirror list.
+_WEBRTC_CODECS = frozenset(
+    {
+        VideoCodec.H264,
+        VideoCodec.VP8,
+        VideoCodec.VP9,
+        VideoCodec.AV1,
+        VideoCodec.H265,
+    }
+)
+
 # A schema entry accepted by add_state_typed/add_action_typed. Either a
 # FieldSpec (record passthrough) or a (name, dtype) tuple — the latter is
 # the natural Python shape.
@@ -737,6 +750,7 @@ class PortalConfig:
         name: str,
         codec: VideoCodec = VideoCodec.H264,
         quality: int = DEFAULT_MJPEG_QUALITY,
+        max_bitrate_kbps: Optional[int] = None,
     ) -> None:
         """Declare a video track.
 
@@ -745,9 +759,13 @@ class PortalConfig:
         `send_video_frame` accepts RGB and `on_video_frame` /
         `get_video_frame` deliver RGB.
 
-          * `VideoCodec.H264` (default) — WebRTC media path. Real-time
-            RTP/SRTP, lossy, best-effort. Lowest end-to-end latency at
-            scale. `quality` is ignored.
+          * `VideoCodec.H264` (default), `VideoCodec.VP8`, `VideoCodec.VP9`,
+            `VideoCodec.AV1`, `VideoCodec.H265` — WebRTC media path.
+            Real-time RTP/SRTP, lossy, best-effort. Lowest end-to-end latency
+            at scale. `quality` is ignored. `max_bitrate_kbps` caps the
+            encoder's peak rate (a ceiling, not a target); `None` uses the
+            default 10 Mbps. AV1/H265 support is platform- and peer-dependent;
+            confirm both ends negotiate the codec before relying on it.
           * `VideoCodec.RAW` — byte-stream, uncompressed RGB24. Largest
             payload, zero encode cost. `quality` is ignored.
           * `VideoCodec.PNG` — byte-stream, lossless. ~2-3x compression on
@@ -758,8 +776,9 @@ class PortalConfig:
             doesn't.
 
         `quality` is in 1..=100 and is honored for `VideoCodec.MJPEG`. It is
-        ignored for every other codec. Track names must be unique across
-        all `add_video` calls; a duplicate raises.
+        ignored for every other codec. `max_bitrate_kbps` is honored for the
+        WebRTC codecs (H264/VP8/VP9/AV1/H265) and ignored otherwise. Track
+        names must be unique across all `add_video` calls; a duplicate raises.
 
         **Byte-stream latency** (non-H264 codecs): each frame's payload is
         fragmented at the LiveKit chunk size (15 KB) and shipped over a
@@ -770,8 +789,8 @@ class PortalConfig:
         typical inference resolutions (224×224 to 480p) MJPEG q=80–95
         usually does.
         """
-        self._inner.add_video(name, codec, quality)
-        if codec == VideoCodec.H264:
+        self._inner.add_video(name, codec, quality, max_bitrate_kbps)
+        if codec in _WEBRTC_CODECS:
             self._video_tracks.append(name)
         else:
             self._frame_video_tracks.append(
@@ -1255,8 +1274,9 @@ class _RoleConfigBase:
         name: str,
         codec: VideoCodec = VideoCodec.H264,
         quality: int = DEFAULT_MJPEG_QUALITY,
+        max_bitrate_kbps: Optional[int] = None,
     ) -> None:
-        self._inner.add_video(name, codec, quality)
+        self._inner.add_video(name, codec, quality, max_bitrate_kbps)
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
         self._inner.add_state_typed(schema)

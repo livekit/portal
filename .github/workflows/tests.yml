@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install system dependencies
         run: |
@@ -44,14 +44,16 @@ jobs:
           sudo apt-get install -y $LINUX_SYSTEM_DEPS
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "25.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Separate cache key from the python job so a failure on one
           # side doesn't poison the other's incremental artifacts.
@@ -66,7 +68,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install system dependencies
         run: |
@@ -74,7 +76,7 @@ jobs:
           sudo apt-get install -y $LINUX_SYSTEM_DEPS
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "25.2"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -82,16 +84,18 @@ jobs:
       # Rust is needed to build the livekit-portal-ffi cdylib and regenerate
       # the UniFFI-generated Python module (both live next to the package
       # source; the wheel ships them together).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # uniffi is pinned to a git rev, so cache by the ffi crate's
           # Cargo.toml + the lockfile rather than the default workspace-wide
           # key. Avoids a full rebuild when unrelated Rust files change.
           key: ffi-${{ hashFiles('Cargo.lock', 'livekit-portal-ffi/Cargo.toml') }}
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 

@@ -1,0 +1,6 @@
+# CODEOWNERS for rust-sdks
+# These owners will be requested for review on all PRs
+* @pham-tuan-binh
+
+livekit-portal/ @ladvoc
+livekit-portal-ffi/ @ladvoc

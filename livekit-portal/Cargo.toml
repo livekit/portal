@@ -1,8 +1,8 @@
 [package]
 name = "livekit-portal"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
 
 [dependencies]
 # `rustls-tls-native-roots`: livekit's default feature set doesn't enable any
@@ -11,12 +11,12 @@ license = "Apache-2.0"
 # against LiveKit Cloud. Matches livekit-ffi's default.
 livekit = { git = "https://github.com/livekit/rust-sdks.git", features = ["rustls-tls-native-roots"] }
 yuv-sys = { git = "https://github.com/livekit/rust-sdks.git" }
-thiserror = "2"
-parking_lot = "0.12"
-tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
 futures-util = "0.3"
 bytes = "1"
-log = "0.4"
+log = { workspace = true }
 # Frame-video codec encode/decode (PNG, MJPEG). Default features pull in
 # every supported format and would bloat link time and binary size; we only
 # need PNG and JPEG.

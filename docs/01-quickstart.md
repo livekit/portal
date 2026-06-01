@@ -8,39 +8,50 @@ this page that wraps the same code.
 
 ## What you need
 
-- A [Rust toolchain](https://rustup.rs/) (stable `cargo`)
-- Python 3.10+ and [`uv`](https://docs.astral.sh/uv/)
+- Python 3.12 and [`uv`](https://docs.astral.sh/uv/) (or `pip`)
 - A LiveKit server: [LiveKit Cloud](https://cloud.livekit.io) (free tier
   works) or a local `livekit-server --dev`
 - Your `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
+- A [Rust toolchain](https://rustup.rs/) only if you build from source (see
+  below)
 
 You do **not** need a physical robot to try this. The first example publishes
 a synthetic test pattern.
 
 ## 1. Install
 
-Portal is not on PyPI yet, and there are no prebuilt native binaries. You
-build from source.
+```bash
+pip install livekit-portal      # or: uv add livekit-portal
+```
+
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc ≥ 2.35), Linux
+aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. That is everything the
+examples below need.
+
+### Build from source
+
+Build from source when there is no wheel for your platform (Windows, Intel
+macOS, Python 3.10/3.11) or when you are changing the Rust core. The library
+supports Python 3.10+ this way.
 
 ```bash
-git clone https://github.com/livekit/livekit-portal.git
-cd livekit-portal
+git clone https://github.com/livekit/portal.git
+cd portal
 
 bash scripts/build_ffi_python.sh release   # compile cdylib + generate UniFFI bindings
-cd python/packages/livekit-portal && uv sync   # install Python deps into .venv
+cd python && uv sync                        # install the workspace into .venv
 ```
 
 `build_ffi_python.sh` runs `cargo build -p livekit-portal-ffi`, drops the
-platform cdylib (`liblivekit_portal_ffi.{dylib,so,dll}`) next to the
-Python package, and emits the matching UniFFI Python module. First build
-takes a couple of minutes. Subsequent builds are incremental.
+platform cdylib (`liblivekit_portal_ffi.{dylib,so}`) next to the Python
+package, and emits the matching UniFFI Python module. First build takes a
+couple of minutes. Subsequent builds are incremental. Rerun it whenever the
+Rust code changes.
 
-### Use from another project
+### Use a source build from another project
 
-After the native build, depend on the package by path. The
-[shipped examples](../examples/python/basic/pyproject.toml) do this with
-relative paths because they sit inside the repo. From another project,
-use an absolute path:
+To depend on a source build elsewhere, install the package by path. The
+editable install picks up a fresh cdylib on next import.
 
 ```bash
 # uv
@@ -49,20 +60,6 @@ uv add --editable /absolute/path/to/livekit-portal/python/packages/livekit-porta
 # pip
 pip install -e /absolute/path/to/livekit-portal/python/packages/livekit-portal
 ```
-
-Or wire it directly into your `pyproject.toml`:
-
-```toml
-[project]
-dependencies = ["livekit-portal"]
-
-[tool.uv.sources]
-livekit-portal = { path = "/absolute/path/to/livekit-portal/python/packages/livekit-portal", editable = true }
-```
-
-Rerun `bash scripts/build_ffi_python.sh release` (in the Portal repo)
-whenever the Rust code changes. The editable install picks up the new
-cdylib on next import. Prebuilt wheels are on the roadmap.
 
 ## 2. Mint tokens
 
@@ -238,14 +235,14 @@ robot.connect()
 ```
 
 The plugins are syntactic sugar over the Portal API above. Full reference
-and CLI mode: [lerobot integration](lerobot.md).
+and CLI mode: [lerobot integration](10-lerobot.md).
 
 ## Next steps
 
-- [Portal API](portal-api.md). The full surface. All callbacks, send
+- [Portal API](03-portal-api.md). The full surface. All callbacks, send
   methods, role semantics.
-- [Concepts](concepts.md). Roles, the observation model, frame format.
-- [Config from YAML](config-file.md). Build the same configs from a
+- [Concepts](02-concepts.md). Roles, the observation model, frame format.
+- [Config from YAML](04-config-file.md). Build the same configs from a
   shareable file so the wire contract lives in one place.
-- [Tuning](tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates,
+- [Tuning](06-tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates,
   reliability.

@@ -7,7 +7,7 @@
 <h1 align="center">livekit-portal</h1>
 
 <p align="center">
-  <a href="https://github.com/livekit/livekit-portal/actions/workflows/tests.yml"><img src="https://github.com/livekit/livekit-portal/actions/workflows/tests.yml/badge.svg?branch=main" alt="tests"></a>
+  <a href="https://github.com/livekit/portal/actions/workflows/tests.yml"><img src="https://github.com/livekit/portal/actions/workflows/tests.yml/badge.svg?branch=main" alt="tests"></a>
   <a href="https://pypi.org/project/livekit-portal/"><img src="https://img.shields.io/pypi/v/livekit-portal" alt="PyPI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"></a>
@@ -24,9 +24,9 @@
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
   <a href="#examples">Examples</a> ·
-  <a href="docs/portal-api.md">Portal API</a> ·
-  <a href="docs/concepts.md">Concepts</a> ·
-  <a href="docs/synchronization.md">Deep dive</a>
+  <a href="docs/03-portal-api.md">Portal API</a> ·
+  <a href="docs/02-concepts.md">Concepts</a> ·
+  <a href="docs/09-synchronization.md">Deep dive</a>
 </p>
 
 ---
@@ -46,7 +46,7 @@
 
 **Built for VLA inference.** First-class **action chunks** ship a `(horizon, n_fields)` tensor in one packet via byte streams (no 15 KB cap). Tag every action with `in_reply_to_ts_us` and `metrics.policy.e2e_us_p50/p95` derives true observation→action latency, not just ping. See [`examples/python/inference/`](examples/python/inference) for a runnable VLA-style loop.
 
-**Frame video for policies.** WebRTC video is lossy and resamples colorspace. For inference where pixels matter, pass a non-H264 codec to [`add_video`](docs/frame-video.md) (`RAW`, `PNG`, or `MJPEG`) and each frame ships independently over a reliable byte stream. Same `send_video_frame` / `on_video_frame` API, RGB on both ends. MJPEG q=90 sustains 30 fps at 720p.
+**Frame video for policies.** WebRTC video is lossy and resamples colorspace. For inference where pixels matter, pass a non-H264 codec to [`add_video`](docs/05-frame-video.md) (`RAW`, `PNG`, or `MJPEG`) and each frame ships independently over a reliable byte stream. Same `send_video_frame` / `on_video_frame` API, RGB on both ends. MJPEG q=90 sustains 30 fps at 720p.
 
 **Works with any stack.** Role-specific `Robot` and `Operator` classes in Python and a unified `Portal` core in Rust. An optional [lerobot](https://github.com/huggingface/lerobot) plugin for a one-line wrap around your existing `Robot` or `Teleoperator`.
 
@@ -68,7 +68,7 @@ Or with uv:
 uv add livekit-portal
 ```
 
-Prebuilt wheels are available for Linux (x86\_64, aarch64), macOS (Intel and Apple Silicon), and Windows (x86\_64). Python 3.10+ is required.
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc ≥ 2.35), Linux aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. On any other platform or Python version (Windows, Intel macOS, Python 3.10/3.11), build from source instead. The library itself supports Python 3.10+.
 
 **lerobot plugin.** If your stack uses [lerobot](https://github.com/huggingface/lerobot), install the matching plugin instead:
 
@@ -83,8 +83,8 @@ pip install lerobot-teleoperator-livekit   # operator side
 You need a [Rust toolchain](https://rustup.rs/) (stable `cargo`) and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/livekit/livekit-portal.git
-cd livekit-portal
+git clone https://github.com/livekit/portal.git
+cd portal
 
 bash scripts/build_ffi_python.sh release
 cd python && uv sync
@@ -180,7 +180,7 @@ That is the whole surface at work in one page. Synced observations, an
 action callback, a control-plane claim, an RPC for one-shots, and a live
 metrics snapshot. The code above is a sketch. For a runnable version with
 token minting already wired up, see [`examples/python/basic/`](examples/python/basic)
-or the step-by-step [Quickstart doc](docs/quickstart.md).
+or the step-by-step [Quickstart doc](docs/01-quickstart.md).
 
 ## Behind the project
 
@@ -218,9 +218,9 @@ if every track matched:
 The real implementation is amortized `O(N + M)` through two-pointer
 cursors and blocker-gated short-circuiting, with `O(1)` unmatchability
 detection. Full walkthrough in
-[docs/synchronization.md](docs/synchronization.md). The
-[Concepts](docs/concepts.md) page covers roles and the observation model.
-[Tuning](docs/tuning.md) covers `fps`, `slack`, and `tolerance`.
+[docs/09-synchronization.md](docs/09-synchronization.md). The
+[Concepts](docs/02-concepts.md) page covers roles and the observation model.
+[Tuning](docs/06-tuning.md) covers `fps`, `slack`, and `tolerance`.
 
 ## Multi-operator and HITL
 
@@ -279,7 +279,7 @@ uv run teleoperator.py          # terminal 2
 
 The same directory ships `robot_yaml.py` / `teleoperator_yaml.py`, which
 load the wire contract from a shared [`portal.yaml`](examples/python/basic/portal.yaml)
-instead of declaring it in code. See [Config from YAML](docs/config-file.md)
+instead of declaring it in code. See [Config from YAML](docs/04-config-file.md)
 for the schema reference.
 
 **[`examples/python/inference/`](examples/python/inference)**
@@ -312,7 +312,7 @@ If your stack is already on [lerobot](https://github.com/huggingface/lerobot),
 two optional plugin packages wrap the Portal code above. You pass in your
 existing `Robot` or `Teleoperator` and the remote arm shows up as a local
 lerobot device to any workflow (teleop, dataset recording, policy eval). See
-[lerobot integration](docs/lerobot.md) for the full reference.
+[lerobot integration](docs/10-lerobot.md) for the full reference.
 
 ## Why LiveKit
 
@@ -336,16 +336,22 @@ this. A direct socket is enough.
 
 ## Documentation
 
+Start with the [documentation overview](docs/00-overview.md) for a guided
+reading order. The pages, in sequence:
+
 | Page | What's in it |
 |---|---|
-| [Quickstart](docs/quickstart.md) | Install, tokens, first run with `Robot` and `Operator` |
-| [Portal API](docs/portal-api.md) | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
-| [Concepts](docs/concepts.md) | Roles, the observation model, multi-controller, frame format |
-| [Config from YAML](docs/config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file |
-| [Tuning](docs/tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
-| [RPC](docs/rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
-| [Synchronization deep dive](docs/synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |
-| [lerobot integration](docs/lerobot.md) | The optional convenience plugins |
+| [0. Overview](docs/00-overview.md) | Map of the docs and how to navigate them |
+| [1. Quickstart](docs/01-quickstart.md) | Install, tokens, first run with `Robot` and `Operator` |
+| [2. Concepts](docs/02-concepts.md) | Roles, the observation model, multi-controller, frame format |
+| [3. Portal API](docs/03-portal-api.md) | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
+| [4. Config from YAML](docs/04-config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file |
+| [5. Frame video](docs/05-frame-video.md) | Per-frame RGB over byte streams (RAW / PNG / MJPEG) for pixel-exact policies |
+| [6. Tuning](docs/06-tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
+| [7. RPC](docs/07-rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
+| [8. E2EE](docs/08-e2ee.md) | Shared-key end-to-end encryption for media and data |
+| [9. Synchronization deep dive](docs/09-synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |
+| [10. lerobot integration](docs/10-lerobot.md) | The optional convenience plugins |
 
 ## License
 

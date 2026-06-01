@@ -131,10 +131,10 @@ action_chunks:
 | `version` | int | required | Major version of the file format. Currently `1`. Unknown majors are rejected. |
 | `fps` | int | `30` | Observation rate. Drives `search_range = tolerance / fps`. |
 | `slack` | int | `5` | Pipeline headroom in tick intervals. |
-| `tolerance` | float | `1.5` | State/frame match window in tick intervals. See [tuning](tuning.md). |
+| `tolerance` | float | `1.5` | State/frame match window in tick intervals. See [tuning](06-tuning.md). |
 | `state_reliable` | bool | `true` | Reliable transport for state packets. |
 | `action_reliable` | bool | `true` | Reliable transport for action packets. |
-| `reuse_stale_frames` | bool | `false` | Reuse the most recent frame on a track when the current state has no in-range match. See [tuning](tuning.md). |
+| `reuse_stale_frames` | bool | `false` | Reuse the most recent frame on a track when the current state has no in-range match. See [tuning](06-tuning.md). |
 | `ping_ms` | int | `1000` | RTT ping cadence in ms. `0` disables active pinging on this side; the pong path stays active so the peer can still measure. |
 | `action_subscription` | bool | `false` | Operator-side opt-in for receiving executed actions (HITL recording). No-op on the robot side. |
 | `videos` | list | `[]` | Declared video tracks. See below. |
@@ -179,7 +179,7 @@ Codec choice picks both the encoding and the wire transport:
   payload, zero encode cost. Caller passes dimensions in the framing
   header.
 
-See [frame video](frame-video.md) for codec selection guidance and
+See [frame video](05-frame-video.md) for codec selection guidance and
 latency math.
 
 ### `state` and `action`

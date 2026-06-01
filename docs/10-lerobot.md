@@ -9,21 +9,21 @@ Both plugins do Portal sync for you: timestamp-matched observations, reliable st
 
 ## Install
 
-The packages live in this repo's `python/` uv workspace. For a consumer repo, depend on them directly; for local development:
+Both plugins are on PyPI. They pull in `livekit-portal` automatically and require Python 3.12+.
 
 ```bash
-bash scripts/build_ffi_python.sh release                 # build the cdylib
-cd python && uv sync                                     # resolves everything
+pip install lerobot-teleoperator-livekit   # robot-side
+pip install lerobot-robot-livekit          # operator-side
+```
+
+To develop against the source tree instead, the packages live in this repo's `python/` uv workspace:
+
+```bash
+bash scripts/build_ffi_python.sh release   # build the cdylib
+cd python && uv sync                       # resolves the whole workspace
 ```
 
 `build_ffi_python.sh` compiles the Rust FFI crate and drops the cdylib into `python/packages/livekit-portal/livekit/portal/`, where `ctypes` loads it at import time. Skip it only if you've set `LIVEKIT_PORTAL_FFI_LIB` to a prebuilt binary.
-
-Standalone install (once published):
-
-```bash
-uv pip install lerobot-teleoperator-livekit   # robot-side
-uv pip install lerobot-robot-livekit          # operator-side
-```
 
 ## LiveKit setup
 
@@ -205,7 +205,7 @@ Operator-only (`LiveKitRobotConfig`):
 | `camera_width` | `640` | See above. |
 | `observation_features` | `None` | Full state schema when the robot reports state beyond the action keys (e.g. `{"shoulder.pos": float, "slider.pos": float}`). When set, replaces the default "state mirrors action" assumption. Follows lerobot's `observation_features` convention: scalar types for motors, shape tuples for cameras. |
 
-See [tuning.md](tuning.md) for the math behind `fps`, `slack`, and `tolerance`.
+See [tuning.md](06-tuning.md) for the math behind `fps`, `slack`, and `tolerance`.
 
 ## Frame formats
 

@@ -1,7 +1,7 @@
 # Concepts
 
 The minimum mental model you need to use Portal. For the match algorithm in
-full detail, see [synchronization.md](synchronization.md).
+full detail, see [synchronization.md](09-synchronization.md).
 
 ## Roles
 
@@ -75,7 +75,7 @@ reconnect with the same identity resumes control. To reassign, anyone in
 the room can call `set_active_operator("...")` with a new identity.
 
 Mechanics, edge cases, and the full set of methods live in
-[Portal API: Multi-controller](portal-api.md#multi-controller-and-active_operator).
+[Portal API: Multi-controller](03-portal-api.md#multi-controller-and-active_operator).
 
 ## End-to-end picture
 
@@ -152,11 +152,11 @@ For a head state with timestamp `S`, a frame at timestamp `F` on track `k` is a
   monotonic), so the state is fired on `on_drop`.
 
 The search range and buffer sizes derive from a single `fps` knob plus a
-`slack` and `tolerance`. See [tuning.md](tuning.md).
+`slack` and `tolerance`. See [tuning.md](06-tuning.md).
 
 For the full algorithm (cursor rewind, blocker-gated sync, O(1) drop
 detection, eager cross-track drop), see
-[synchronization.md](synchronization.md).
+[synchronization.md](09-synchronization.md).
 
 ### Sender requirement
 

@@ -9,16 +9,14 @@ is built on top of this API.
 
 ## Installation
 
-Portal is not on PyPI yet. You build from source. See the
-[Quickstart](quickstart.md#1-install) for the full flow. Summary:
-
 ```bash
-git clone https://github.com/livekit/livekit-portal.git
-cd livekit-portal
-
-bash scripts/build_ffi_python.sh release   # or `debug` for faster iteration
-cd python/packages/livekit-portal && uv sync
+pip install livekit-portal      # or: uv add livekit-portal
 ```
+
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc ≥ 2.35), Linux
+aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. On any other platform or
+Python version, build from source. See the
+[Quickstart](01-quickstart.md#build-from-source) for that flow.
 
 If the cdylib lives elsewhere (e.g. during Rust-side dev), point
 `LIVEKIT_PORTAL_FFI_LIB` at it and skip the copy step.
@@ -321,7 +319,7 @@ type.
 
 `send_video_frame` expects packed RGB24 NumPy arrays of shape `(H, W, 3)`
 uint8. Width and height must both be even. Full details in
-[concepts.md](concepts.md#video-frame-format).
+[concepts.md](02-concepts.md#video-frame-format).
 
 ## WebRTC video options
 
@@ -366,7 +364,7 @@ roughly `1 ms + 2 ms × ⌈encoded_size / 15 KB⌉` per frame on localhost.
 Pick a codec whose output fits in one chunk for low-latency inference.
 At typical inference resolutions (224×224 to 480p) MJPEG q=80–95 fits.
 
-See [frame-video.md](frame-video.md) for the codec/fps tables, wire
+See [frame-video.md](05-frame-video.md) for the codec/fps tables, wire
 format, and metrics surface.
 
 ## Surface summary
@@ -434,7 +432,7 @@ from livekit.portal import RobotConfig
 cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
 ```
 
-See [Config from YAML](config-file.md) for the schema reference.
+See [Config from YAML](04-config-file.md) for the schema reference.
 
 ## End-to-end encryption
 
@@ -448,7 +446,7 @@ import os
 cfg.set_e2ee_key(os.environ["PORTAL_E2EE_KEY"].encode())
 ```
 
-See [e2ee.md](e2ee.md) for key generation, distribution patterns, and coverage
+See [e2ee.md](08-e2ee.md) for key generation, distribution patterns, and coverage
 details.
 
 ## Direct `Portal` usage
@@ -470,16 +468,16 @@ exposes; runtime behavior is identical. New code should usually pick
 
 ## Reference
 
-- [Concepts](concepts.md). Roles, observation model, frame format.
-- [Config from YAML](config-file.md). Build configs from a shareable
+- [Concepts](02-concepts.md). Roles, observation model, frame format.
+- [Config from YAML](04-config-file.md). Build configs from a shareable
   file instead of declaring them in code.
-- [Frame video](frame-video.md). Codec choice, latency math, wire format
+- [Frame video](05-frame-video.md). Codec choice, latency math, wire format
   for byte-stream-based per-frame video.
-- [Tuning](tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates.
-- [Synchronization deep dive](synchronization.md). The match algorithm.
-- [RPC](rpc.md). Imperative commands on top of LiveKit RPC.
-- [E2EE](e2ee.md). Shared-key end-to-end encryption.
+- [Tuning](06-tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates.
+- [Synchronization deep dive](09-synchronization.md). The match algorithm.
+- [RPC](07-rpc.md). Imperative commands on top of LiveKit RPC.
+- [E2EE](08-e2ee.md). Shared-key end-to-end encryption.
 - [`examples/python/basic/`](../examples/python/basic). The smallest
   end-to-end script using this API, with synthetic video.
-- [lerobot integration](lerobot.md). The optional convenience plugins that
+- [lerobot integration](10-lerobot.md). The optional convenience plugins that
   wrap this API for lerobot users.

@@ -339,19 +339,20 @@ this. A direct socket is enough.
 Start with the [documentation overview](docs/00-overview.md) for a guided
 reading order. The pages, in sequence:
 
-| Page                                                       | What's in it                                                                        |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| [0. Overview](docs/00-overview.md)                         | Map of the docs and how to navigate them                                            |
-| [1. Quickstart](docs/01-quickstart.md)                     | Install, tokens, first run with `Robot` and `Operator`                              |
-| [2. Concepts](docs/02-concepts.md)                         | Roles, the observation model, multi-controller, frame format                        |
-| [3. Portal API](docs/03-portal-api.md)                     | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
-| [4. Config from YAML](docs/04-config-file.md)              | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file                   |
-| [5. Frame video](docs/05-frame-video.md)                   | Per-frame RGB over byte streams (RAW / PNG / MJPEG) for pixel-exact policies        |
-| [6. Tuning](docs/06-tuning.md)                             | `fps`, `slack`, `tolerance`, asymmetric rates, reliability                          |
-| [7. RPC](docs/07-rpc.md)                                   | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC                |
-| [8. E2EE](docs/08-e2ee.md)                                 | Shared-key end-to-end encryption for media and data                                 |
-| [9. Synchronization deep dive](docs/09-synchronization.md) | The full match algorithm, cursor bookkeeping, complexity                            |
-| [10. lerobot integration](docs/10-lerobot.md)              | The optional convenience plugins                                                    |
+| Page | What's in it |
+|---|---|
+| [0. Overview](docs/00-overview.md) | Map of the docs and how to navigate them |
+| [1. Quickstart](docs/01-quickstart.md) | Install, tokens, first run with `Robot` and `Operator` |
+| [2. Concepts](docs/02-concepts.md) | Roles, the observation model, multi-controller, frame format |
+| [3. Portal API](docs/03-portal-api.md) | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
+| [4. Config from YAML](docs/04-config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file |
+| [5. Frame video](docs/05-frame-video.md) | Per-frame RGB over byte streams (RAW / PNG / MJPEG) for pixel-exact policies |
+| [6. Tuning](docs/06-tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
+| [7. RPC](docs/07-rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
+| [8. E2EE](docs/08-e2ee.md) | Shared-key end-to-end encryption for media and data |
+| [9. Synchronization deep dive](docs/09-synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |
+| [10. lerobot integration](docs/10-lerobot.md) | The optional convenience plugins |
+| [11. Logging](docs/11-logging.md) | `RUST_LOG`, and what the tagged warnings mean and how to fix them |
 
 ## License
 

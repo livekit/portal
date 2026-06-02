@@ -88,7 +88,7 @@ impl ControllerState {
         if let Some(cb) = self.on_operator_joined.lock().as_ref() {
             let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
             if result.is_err() {
-                log::error!("on_operator_joined callback panicked");
+                log::error!("[callback-panic] on_operator_joined callback panicked");
             }
         }
     }
@@ -97,7 +97,7 @@ impl ControllerState {
         if let Some(cb) = self.on_operator_left.lock().as_ref() {
             let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
             if result.is_err() {
-                log::error!("on_operator_left callback panicked");
+                log::error!("[callback-panic] on_operator_left callback panicked");
             }
         }
     }
@@ -106,7 +106,7 @@ impl ControllerState {
         if let Some(cb) = self.on_active_operator_changed.lock().as_ref() {
             let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
             if result.is_err() {
-                log::error!("on_active_operator_changed callback panicked");
+                log::error!("[callback-panic] on_active_operator_changed callback panicked");
             }
         }
     }
@@ -185,7 +185,7 @@ impl ObservationSink {
                         let result = catch_unwind(AssertUnwindSafe(|| cb(obs)));
                         if result.is_err() {
                             log::error!(
-                                "observation callback panicked; event loop continues"
+                                "[callback-panic] observation callback panicked, event loop continues"
                             );
                         }
                     }
@@ -202,7 +202,7 @@ impl ObservationSink {
             if let Some(cb) = self.drop_cb.lock().as_ref() {
                 let result = catch_unwind(AssertUnwindSafe(|| cb(drops)));
                 if result.is_err() {
-                    log::error!("drop callback panicked; event loop continues");
+                    log::error!("[callback-panic] drop callback panicked, event loop continues");
                 }
             }
         }
@@ -1155,7 +1155,7 @@ impl Portal {
         match self.chunk_slots.get(chunk_name) {
             Some(slot) => slot.set_callback(Box::new(callback)),
             None => log::warn!(
-                "on_action_chunk: chunk '{chunk_name}' is not declared — callback ignored"
+                "[unknown-chunk] on_action_chunk: chunk '{chunk_name}' not declared, callback ignored"
             ),
         }
     }
@@ -1177,7 +1177,7 @@ impl Portal {
         match self.video_tracks.get(track_name) {
             Some(slots) => *slots.cb.lock() = Some(Box::new(callback)),
             None => log::warn!(
-                "on_video_frame: track '{track_name}' is not registered — callback ignored"
+                "[unknown-track] on_video_frame: track '{track_name}' not registered, callback ignored"
             ),
         }
     }
@@ -1623,7 +1623,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                                 )
                             }
                             Err(e) => {
-                                log::warn!("failed to read chunk byte stream: {e}")
+                                log::warn!("[bad-payload] failed to read chunk byte stream: {e}")
                             }
                         }
                     });
@@ -1663,7 +1663,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                                 &obs_sink,
                             ),
                             Err(e) => log::warn!(
-                                "failed to read frame_video byte stream: {e}"
+                                "[bad-payload] failed to read frame_video byte stream: {e}"
                             ),
                         }
                     });

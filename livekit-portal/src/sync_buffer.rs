@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::FieldSpec;
 use crate::metrics::MetricsRegistry;
@@ -7,6 +8,28 @@ use crate::types::*;
 
 #[cfg(test)]
 use crate::dtype::DType;
+
+/// Minimum gap between sync-drop warnings during a sustained burst. The
+/// first drop in a burst logs immediately; further drops fold into a single
+/// summary emitted at most this often. Every drop is still counted in the
+/// `states_dropped` metric regardless of logging.
+const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Rate-limiter state for the unsyncable-state drop warning. Wall-clock is
+/// used **only** to throttle the log line so a stalled video track doesn't
+/// spam at the state-publish rate. It never influences a sync decision —
+/// match/wait/drop is still computed purely from sender timestamps (see the
+/// module docs and `docs/synchronization.md`).
+#[derive(Default)]
+struct DropWarn {
+    // Drops counted since the last emitted warning.
+    count: u64,
+    // Largest "video is ahead of the dropped state" gap since the last
+    // warning, in microseconds. `newest_frame_ts - state_ts` at drop time.
+    worst_ahead_us: u64,
+    // When the last warning was emitted. `None` until the first drop.
+    last_log: Option<Instant>,
+}
 
 /// Result of a `push_frame` / `push_state` call. Callers dispatch these
 /// (invoke callbacks, enqueue into the pull-based buffer) *after* releasing
@@ -87,6 +110,10 @@ pub(crate) struct SyncBuffer {
     // count every drop.
     in_overflow_burst: bool,
 
+    // Rate-limiter for the unsyncable-state drop warning. Logging only —
+    // see `DropWarn`.
+    drop_warn: DropWarn,
+
     metrics: Arc<MetricsRegistry>,
 }
 
@@ -117,8 +144,51 @@ impl SyncBuffer {
             matched_scratch,
             last_emitted_frames,
             in_overflow_burst: false,
+            drop_warn: DropWarn::default(),
             metrics,
         }
+    }
+
+    /// Count one unsyncable-state drop and emit a throttled, self-explanatory
+    /// warning. `ahead_us` is how far the video stream had moved past the
+    /// dropped state (`newest_frame_ts - state_ts`), which is why no match
+    /// was possible. The first drop in a burst logs immediately; subsequent
+    /// drops fold into a summary emitted at most once per `DROP_WARN_INTERVAL`.
+    fn note_unsyncable_drop(&mut self, ahead_us: u64) {
+        self.drop_warn.count += 1;
+        self.drop_warn.worst_ahead_us = self.drop_warn.worst_ahead_us.max(ahead_us);
+
+        let now = Instant::now();
+        let elapsed = self.drop_warn.last_log.map(|t| now.duration_since(t));
+        let should_log = match elapsed {
+            None => true,
+            Some(d) => d >= DROP_WARN_INTERVAL,
+        };
+        if !should_log {
+            return;
+        }
+
+        let range_ms = self.config.search_range_us as f64 / 1_000.0;
+        let ahead_ms = self.drop_warn.worst_ahead_us as f64 / 1_000.0;
+        match elapsed {
+            // First drop in a burst. Cause and fix live at docs/logging.md#sync-drop.
+            None => log::warn!(
+                "[sync-drop] dropping states: no frame within ±{range_ms:.0}ms of \
+                 the state timestamp (video {ahead_ms:.0}ms ahead). Throttling \
+                 further [sync-drop] warnings to once per {}s.",
+                DROP_WARN_INTERVAL.as_secs(),
+            ),
+            // Sustained burst: one rolled-up summary per interval.
+            Some(d) => log::warn!(
+                "[sync-drop] dropped {} more states in {:.0}s: no frame within \
+                 ±{range_ms:.0}ms (video up to {ahead_ms:.0}ms ahead).",
+                self.drop_warn.count,
+                d.as_secs_f64(),
+            ),
+        }
+        self.drop_warn.last_log = Some(now);
+        self.drop_warn.count = 0;
+        self.drop_warn.worst_ahead_us = 0;
     }
 
     /// Build the typed state map once per emission. Separate so the two
@@ -150,7 +220,7 @@ impl SyncBuffer {
             if let Some(tm) = self.metrics.track(track_name) {
                 tm.record_evictions(evicted as u64);
             }
-            log::warn!("video buffer overflow on '{track_name}': evicted {evicted} frame(s)");
+            log::warn!("[video-overflow] '{track_name}' buffer full, evicted {evicted} frame(s)");
         }
 
         // Skip try_sync when this push cannot have changed head-state matchability:
@@ -186,9 +256,10 @@ impl SyncBuffer {
             // reflects every drop.
             if !self.in_overflow_burst {
                 log::warn!(
-                    "state buffer overflow: dropped {} state(s); further \
-                     drops in this burst will not be re-logged",
-                    overflow_drops.len()
+                    "[state-overflow] state buffer full ({}), dropped {} oldest. \
+                     Further drops in this burst won't be re-logged.",
+                    self.config.state_buffer_size,
+                    overflow_drops.len(),
                 );
                 self.in_overflow_burst = true;
             }
@@ -224,6 +295,7 @@ impl SyncBuffer {
         }
         self.blocker = None;
         self.in_overflow_burst = false;
+        self.drop_warn = DropWarn::default();
     }
 
     fn try_sync(&mut self) -> SyncOutput {
@@ -259,6 +331,10 @@ impl SyncBuffer {
             // plus state-buffer overflow (handled in `push_state`) as the
             // hard safety net against a fully halted video stream.
             let mut should_drop = false;
+            // How far the video stream had moved past `state_ts` when the drop
+            // fired (`newest_frame_ts - state_ts`). Captured for the warning so
+            // it can report why no match was possible.
+            let mut drop_ahead_us = 0u64;
             let mut iter_blocker: Option<usize> = None;
 
             for track_i in 0..self.video_buffers.len() {
@@ -380,6 +456,7 @@ impl SyncBuffer {
                 let newest_ts = frame_buf.back().unwrap().timestamp_us;
                 if newest_ts >= state_ts.saturating_add(range) {
                     should_drop = true;
+                    drop_ahead_us = newest_ts.saturating_sub(state_ts);
                     break;
                 } else if iter_blocker.is_none() {
                     iter_blocker = Some(track_i);
@@ -387,7 +464,7 @@ impl SyncBuffer {
             }
 
             if should_drop {
-                log::warn!("dropping unsyncable state (no matching video frames within range)");
+                self.note_unsyncable_drop(drop_ahead_us);
                 let (_, values) = self.state_buffer.pop_front().unwrap();
                 output.drops.push(self.build_typed_state_map(&values));
                 self.metrics.record_state_dropped(1);

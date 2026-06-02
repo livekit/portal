@@ -23,6 +23,7 @@ questions come up.
 | 8 | [E2EE](08-e2ee.md) | Shared-key end-to-end encryption for media and data. |
 | 9 | [Synchronization](09-synchronization.md) | Deep dive on the match algorithm, cursors, and complexity. |
 | 10 | [lerobot integration](10-lerobot.md) | Optional plugins that wrap the Portal API for lerobot users. |
+| 11 | [Logging](11-logging.md) | `RUST_LOG`, the reference tags on every warning, and the cause and fix for each. |
 
 ## How to navigate
 
@@ -40,6 +41,8 @@ questions come up.
   builds on, so read [Concepts](02-concepts.md) first. The
   [lerobot plugins](10-lerobot.md) are a thin convenience wrapper over that
   API.
+- **Seeing warnings in the logs?** Every warning carries a reference tag.
+  [Logging](11-logging.md) maps each tag to its cause and fix.
 
 ## Conventions
 

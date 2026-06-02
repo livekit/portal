@@ -198,7 +198,7 @@ impl VideoReceiver {
                     let result = catch_unwind(AssertUnwindSafe(|| cb(&name, &frame_arc)));
                     if result.is_err() {
                         log::error!(
-                            "video frame callback panicked on track '{name}'; receive loop continues"
+                            "[callback-panic] video frame callback panicked on track '{name}', receive loop continues"
                         );
                     }
                 }

@@ -54,9 +54,9 @@ moves past a state's window, drop the state).
 Each operator session holds a `SyncBuffer` with:
 
 - One `VecDeque<Arc<VideoFrameData>>` per registered video track,
-  bounded by `video_buffer_size` (default 30 frames ≈ 1 second at 30 fps).
+  bounded by `video_buffer_size` (default 5 frames ≈ 167 ms at 30 fps).
 - One `VecDeque<(u64, Vec<f64>)>` for incoming state packets, bounded
-  by `state_buffer_size` (default 30).
+  by `state_buffer_size` (default 5).
 - Per-track `cursors: Vec<usize>` — see [Two-pointer cursors](#1-two-pointer-cursors).
 - A `blocker: Option<usize>` hint — see [Blocker-gated sync](#2-blocker-gated-sync).
 
@@ -67,7 +67,7 @@ clock) and we lean on that fact throughout.
 
 For a given state with timestamp `S`, a frame at timestamp `F` on track
 *k* is a **candidate match** iff `|S − F| < search_range_us` (default
-30 000 µs = 30 ms). Among candidates, we pick the **nearest**.
+50 000 µs = 50 ms). Among candidates, we pick the **nearest**.
 
 A state produces an `Observation` only when **every** registered track
 has a candidate. If any track has no candidate in range, one of three
@@ -347,14 +347,16 @@ enqueues into a pull-based ring. This matters because:
 
 ## Tuning
 
-The defaults in `SyncConfig` target 30 fps video + ≤100 Hz state at
+The sync parameters derive from `fps`, `slack`, and `tolerance` (see
+[Tuning](tuning.md)). The defaults below assume the default `fps` 30,
+`slack` 5, and `tolerance` 1.5, targeting 30 fps video + ≤100 Hz state at
 typical WAN latencies (~50 ms RTT).
 
 | Parameter | Default | When to raise | When to lower |
 |-----------|---------|---------------|---------------|
-| `video_buffer_size` | 30 | Bursty video or slow state pacing | Memory-constrained; video rate ≫ state rate |
-| `state_buffer_size` | 30 | Long video stalls you want to tolerate | Very high-rate state you're OK dropping |
-| `search_range_us` | 30 000 | Video arrives with more jitter (mobile network) | Tight sync needed; fps high enough |
+| `video_buffer_size` | 5 | Bursty video or slow state pacing | Memory-constrained; video rate ≫ state rate |
+| `state_buffer_size` | 5 | Long video stalls you want to tolerate | Very high-rate state you're OK dropping |
+| `search_range_us` | 50 000 | Video arrives with more jitter (mobile network) | Tight sync needed; fps high enough |
 | `observation_buffer_size` | 10 | Consumer is pull-based and bursty | Pure push/callback consumer (can set 0) |
 
 A useful rule of thumb: `search_range_us` ≥ `1e6 / fps` — i.e. at least

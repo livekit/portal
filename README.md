@@ -343,6 +343,7 @@ this. A direct socket is enough.
 | [Concepts](docs/concepts.md) | Roles, the observation model, multi-controller, frame format |
 | [Config from YAML](docs/config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file |
 | [Tuning](docs/tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
+| [Logging](docs/logging.md) | `RUST_LOG`, and what the common warnings mean and how to fix them |
 | [RPC](docs/rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
 | [Synchronization deep dive](docs/synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |
 | [lerobot integration](docs/lerobot.md) | The optional convenience plugins |

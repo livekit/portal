@@ -87,7 +87,7 @@ impl DataPublisher {
         let task = tokio::spawn(async move {
             while let Some(packet) = rx.recv().await {
                 if let Err(e) = local_participant.publish_data(packet).await {
-                    log::warn!("failed to publish data: {e}");
+                    log::warn!("[publish-failed] data publish failed: {e}");
                 }
             }
         });
@@ -190,7 +190,7 @@ impl DataPublisher {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 log::warn!(
-                    "publish queue full for topic '{}' (cap={}); dropping packet",
+                    "[publish-full] topic '{}' queue full (cap={}), dropping packet",
                     self.topic,
                     PUBLISH_QUEUE_CAP
                 );
@@ -230,7 +230,7 @@ impl DataPublisher {
             let mut warned = self.warned_unknown_keys.lock();
             if warned.insert(key.clone()) {
                 log::warn!(
-                    "topic '{}': ignoring unknown field '{}' (not in schema)",
+                    "[unknown-field] topic '{}': field '{}' not in schema, ignored",
                     self.topic,
                     key
                 );
@@ -244,7 +244,7 @@ impl DataPublisher {
             if warned.insert(i) {
                 let field = &self.schema[i];
                 log::warn!(
-                    "topic '{}': field '{}' saturated at {:?} (first occurrence)",
+                    "[saturated] topic '{}': field '{}' clamped to {:?} range",
                     self.topic,
                     field.name,
                     field.dtype
@@ -309,7 +309,7 @@ impl<R: Clone> DataSlot<R> {
         if let Some(cb) = self.cb.lock().as_ref() {
             let result = catch_unwind(AssertUnwindSafe(|| cb(&record)));
             if result.is_err() {
-                log::error!("user callback panicked; receive loop continues");
+                log::error!("[callback-panic] user callback panicked, receive loop continues");
             }
         }
         *self.latest.lock() = Some(record);
@@ -327,7 +327,7 @@ impl<R: Clone> DataSlot<R> {
         let mut warned = self.warned_mismatches.lock();
         if warned.insert(got) {
             log::warn!(
-                "topic '{topic}': dropping packet with schema fingerprint 0x{got:08x} (expected 0x{expected:08x}); peer's schema disagrees with ours"
+                "[schema-mismatch] topic '{topic}': peer schema 0x{got:08x} != ours 0x{expected:08x}, dropping packet"
             );
         }
     }
@@ -411,7 +411,7 @@ impl ChunkPublisher {
                     ..Default::default()
                 };
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
-                    log::warn!("chunk '{chunk_name}': failed to send byte stream: {e}");
+                    log::warn!("[publish-failed] chunk '{chunk_name}' byte stream failed: {e}");
                 }
             }
         });
@@ -457,7 +457,7 @@ impl ChunkPublisher {
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 log::warn!(
-                    "chunk publish queue full for chunk '{}' (cap={}); dropping packet",
+                    "[publish-full] chunk '{}' queue full (cap={}), dropping packet",
                     self.spec.name,
                     PUBLISH_QUEUE_CAP
                 );
@@ -475,7 +475,7 @@ impl ChunkPublisher {
             let mut warned = self.warned_unknown_keys.lock();
             if warned.insert(key.clone()) {
                 log::warn!(
-                    "chunk '{}': ignoring unknown field '{}' (not in chunk schema)",
+                    "[unknown-field] chunk '{}': field '{}' not in chunk schema, ignored",
                     self.spec.name,
                     key
                 );
@@ -492,7 +492,7 @@ impl ChunkPublisher {
                 let fi = i % n_fields;
                 let field = &self.spec.fields[fi];
                 log::warn!(
-                    "chunk '{}': field '{}' at t={} saturated at {:?} (first occurrence)",
+                    "[saturated] chunk '{}': field '{}' at t={} clamped to {:?} range",
                     self.spec.name,
                     field.name,
                     t,
@@ -529,7 +529,7 @@ pub(crate) fn dispatch_chunk_payload(
     sender: String,
 ) {
     if payload.len() < 4 {
-        log::warn!("chunk byte stream payload shorter than 4-byte fingerprint header");
+        log::warn!("[bad-payload] chunk byte stream shorter than 4-byte fingerprint header");
         return;
     }
     let fp = u32::from_le_bytes(payload[0..4].try_into().unwrap());
@@ -537,11 +537,11 @@ pub(crate) fn dispatch_chunk_payload(
         let mut warned = unknown_fp_warns.lock();
         if warned.len() < UNKNOWN_FP_WARN_CAP && warned.insert(fp) {
             log::warn!(
-                "topic '{ACTION_CHUNK_TOPIC}': dropping byte stream with unknown fingerprint 0x{fp:08x}; no declared chunk matches"
+                "[unknown-chunk] topic '{ACTION_CHUNK_TOPIC}': unknown fingerprint 0x{fp:08x}, dropping byte stream"
             );
             if warned.len() == UNKNOWN_FP_WARN_CAP {
                 log::warn!(
-                    "topic '{ACTION_CHUNK_TOPIC}': unknown-fingerprint warn cap ({UNKNOWN_FP_WARN_CAP}) reached; suppressing further warnings"
+                    "[unknown-chunk] topic '{ACTION_CHUNK_TOPIC}': unknown-fingerprint warn cap ({UNKNOWN_FP_WARN_CAP}) reached, suppressing further warnings"
                 );
             }
         }
@@ -572,7 +572,7 @@ pub(crate) fn dispatch_chunk_payload(
             slot.warn_mismatch(expected, got);
         }
         Err(DecodeError::Malformed(e)) => {
-            log::warn!("failed to deserialize chunk '{}' payload: {e}", slot.spec.name);
+            log::warn!("[bad-payload] chunk '{}' deserialize failed: {e}", slot.spec.name);
         }
     }
 }
@@ -649,7 +649,7 @@ pub(crate) fn handle_data_received(
                     action.warn_mismatch(topic, expected, got);
                 }
                 Err(DecodeError::Malformed(e)) => {
-                    log::warn!("failed to deserialize action payload: {e}");
+                    log::warn!("[bad-payload] action deserialize failed: {e}");
                 }
             }
         }
@@ -666,7 +666,7 @@ pub(crate) fn handle_data_received(
                     state.warn_mismatch(topic, expected, got);
                 }
                 Err(DecodeError::Malformed(e)) => {
-                    log::warn!("failed to deserialize state payload: {e}");
+                    log::warn!("[bad-payload] state deserialize failed: {e}");
                 }
             }
         }

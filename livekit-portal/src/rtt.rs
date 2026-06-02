@@ -45,7 +45,7 @@ impl RttService {
                     destination_identities: Vec::new(),
                 };
                 if let Err(e) = lp_send.publish_data(packet).await {
-                    log::warn!("rtt publish failed: {e}");
+                    log::warn!("[publish-failed] rtt publish failed: {e}");
                 }
             }
         });

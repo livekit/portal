@@ -259,7 +259,7 @@ impl FrameVideoPublisher {
                 };
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
                     log::warn!(
-                        "frame_video '{track_name}': failed to send byte stream: {e}"
+                        "[publish-failed] frame_video '{track_name}' byte stream failed: {e}"
                     );
                 }
             }
@@ -295,7 +295,7 @@ impl FrameVideoPublisher {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.metrics.record_dropped_publisher_full();
                 log::warn!(
-                    "frame_video '{}' publish queue full (cap={}); dropping frame",
+                    "[publish-full] frame_video '{}' queue full (cap={}), dropping frame",
                     self.spec.name,
                     PUBLISH_QUEUE_CAP
                 );
@@ -339,20 +339,20 @@ pub(crate) fn dispatch_frame_payload(
     let header = match deserialize_frame(&payload) {
         Ok(h) => h,
         Err(e) => {
-            log::warn!("frame_video: bad payload header ({e})");
+            log::warn!("[bad-payload] frame_video: bad header ({e})");
             return;
         }
     };
     let Some(entry) = entries.get(header.track_name) else {
         log::warn!(
-            "frame_video: dropping frame for undeclared track '{}'",
+            "[unknown-track] frame_video: track '{}' not declared, dropping frame",
             header.track_name
         );
         return;
     };
     if header.codec != entry.spec.codec {
         log::warn!(
-            "frame_video '{}': codec mismatch (declared {:?}, got {:?}); dropping frame",
+            "[codec-mismatch] frame_video '{}': declared {:?}, got {:?}, dropping frame",
             header.track_name,
             entry.spec.codec,
             header.codec
@@ -381,7 +381,7 @@ pub(crate) fn dispatch_frame_payload(
                 &payload[HEADER_FIXED_LEN..HEADER_FIXED_LEN + track_name_len],
             )
             .unwrap_or("<invalid utf-8>");
-            log::warn!("frame_video '{}': decode failed: {e}", track_name);
+            log::warn!("[decode-failed] frame_video '{}': decode failed: {e}", track_name);
             return;
         }
     };
@@ -402,8 +402,8 @@ pub(crate) fn dispatch_frame_payload(
         let result = catch_unwind(AssertUnwindSafe(|| cb(track_name_for_dispatch, &frame)));
         if result.is_err() {
             log::error!(
-                "frame_video frame callback panicked on track '{}'; \
-                 receive loop continues",
+                "[callback-panic] frame_video frame callback panicked on track \
+                 '{}', receive loop continues",
                 track_name_for_dispatch
             );
         }

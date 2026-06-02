@@ -1,10 +1,10 @@
-<p align="center">
-  <a href="https://livekit.io/">
-    <img src=".github/assets/livekit-mark.png" alt="LiveKit logo" width="100" height="100">
-  </a>
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="/.github/banner_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="/.github/banner_light.png">
+  <img style="width:100%;" alt="The LiveKit icon, the name of the repository and some sample code in the background." src="https://raw.githubusercontent.com/livekit/portal/main/.github/banner_light.png">
+</picture>
 
-<h1 align="center">livekit-portal</h1>
+<h1 align="center">LiveKit Portal</h1>
 
 <p align="center">
   <a href="https://github.com/livekit/portal/actions/workflows/tests.yml"><img src="https://github.com/livekit/portal/actions/workflows/tests.yml/badge.svg?branch=main" alt="tests"></a>
@@ -68,7 +68,7 @@ Or with uv:
 uv add livekit-portal
 ```
 
-Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc ≥ 2.35), Linux aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. On any other platform or Python version (Windows, Intel macOS, Python 3.10/3.11), build from source instead. The library itself supports Python 3.10+.
+Prebuilt wheels cover CPython 3.12 on Linux x86_64 (glibc ≥ 2.35), Linux aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. On any other platform or Python version (Windows, Intel macOS, Python 3.10/3.11), build from source instead. The library itself supports Python 3.10+.
 
 **lerobot plugin.** If your stack uses [lerobot](https://github.com/huggingface/lerobot), install the matching plugin instead:
 
@@ -240,13 +240,13 @@ await human.set_active_operator("policy-v1")
 
 Four common patterns:
 
-| Pattern | Who's in the room | What changes |
-|---|---|---|
-| **Single operator** | robot + 1 operator | Operator self-claims at startup. |
-| **HITL teleop** | robot + policy + human | Either side calls `set_active_operator(...)` to switch. The robot's stream of executed actions is continuous across the cutover. |
-| **HITL data recording** | robot + policy + human + recorder | Recorder joins as a passive observer with `set_action_subscription(True)`. Receives every executed action labeled with `action.sender`, paired with the synchronized observation. |
-| **Shadow eval** | robot + active policy + candidate policy + recorder | Candidate streams its actions; the gate drops them. Recorder captures both streams for offline divergence scoring. |
-| **Supervisor** | robot + N operators + supervisor UI | Supervisor never claims control. Calls `set_active_operator(...)` to route control to whichever operator should be active. |
+| Pattern                 | Who's in the room                                   | What changes                                                                                                                                                                      |
+| ----------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Single operator**     | robot + 1 operator                                  | Operator self-claims at startup.                                                                                                                                                  |
+| **HITL teleop**         | robot + policy + human                              | Either side calls `set_active_operator(...)` to switch. The robot's stream of executed actions is continuous across the cutover.                                                  |
+| **HITL data recording** | robot + policy + human + recorder                   | Recorder joins as a passive observer with `set_action_subscription(True)`. Receives every executed action labeled with `action.sender`, paired with the synchronized observation. |
+| **Shadow eval**         | robot + active policy + candidate policy + recorder | Candidate streams its actions; the gate drops them. Recorder captures both streams for offline divergence scoring.                                                                |
+| **Supervisor**          | robot + N operators + supervisor UI                 | Supervisor never claims control. Calls `set_active_operator(...)` to route control to whichever operator should be active.                                                        |
 
 Backing primitives:
 
@@ -319,17 +319,17 @@ lerobot device to any workflow (teleop, dataset recording, policy eval). See
 Portal sits on LiveKit rather than raw WebRTC or a custom transport.
 The choice keeps the codebase focused on robotics instead of plumbing.
 
-| What LiveKit gives you | Why it matters for Portal |
-|---|---|
-| **Rooms with N participants** | A robot, two operators, a recorder, and a supervisor are the same session as 1:1. No new signaling, no mesh, no per-pair connection setup. |
-| **Participant attributes** | Server-managed key-value state per participant, broadcast on change, included in JoinResponse for late joiners. The active-operator pointer is one attribute on the robot. |
-| **Cross-participant RPC** | `portal.set_active_operator` is one method registered on the robot. Any operator calls it with one line. |
-| **Production SFU** | A late joiner gets the full state without warm-up. Bandwidth is fanned out by the server, not by the robot. |
-| **Tokens with attributes** | Initial values like `active_operator` can be seeded at token-mint time so the robot starts focused on a specific operator before anyone connects. JWT-based permissions per participant. |
-| **Transport primitives** | RTP media with pacing and bandwidth adaptation. SCTP data channels, reliable or unreliable. Typed byte streams with chunking. Portal maps observations straight onto these. |
-| **Cross-language SDKs** | Rust, Python, Swift, Kotlin, JavaScript, Unity. A browser teleop UI speaks the same protocol as the robot host. |
-| **Deploy anywhere** | [LiveKit Cloud](https://livekit.io/cloud) for zero ops, or self-host the open-source server. TURN relays handle NAT traversal. |
-| **Recording and egress** | Server-side session recording is one webhook away. |
+| What LiveKit gives you        | Why it matters for Portal                                                                                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rooms with N participants** | A robot, two operators, a recorder, and a supervisor are the same session as 1:1. No new signaling, no mesh, no per-pair connection setup.                                               |
+| **Participant attributes**    | Server-managed key-value state per participant, broadcast on change, included in JoinResponse for late joiners. The active-operator pointer is one attribute on the robot.               |
+| **Cross-participant RPC**     | `portal.set_active_operator` is one method registered on the robot. Any operator calls it with one line.                                                                                 |
+| **Production SFU**            | A late joiner gets the full state without warm-up. Bandwidth is fanned out by the server, not by the robot.                                                                              |
+| **Tokens with attributes**    | Initial values like `active_operator` can be seeded at token-mint time so the robot starts focused on a specific operator before anyone connects. JWT-based permissions per participant. |
+| **Transport primitives**      | RTP media with pacing and bandwidth adaptation. SCTP data channels, reliable or unreliable. Typed byte streams with chunking. Portal maps observations straight onto these.              |
+| **Cross-language SDKs**       | Rust, Python, Swift, Kotlin, JavaScript, Unity. A browser teleop UI speaks the same protocol as the robot host.                                                                          |
+| **Deploy anywhere**           | [LiveKit Cloud](https://livekit.io/cloud) for zero ops, or self-host the open-source server. TURN relays handle NAT traversal.                                                           |
+| **Recording and egress**      | Server-side session recording is one webhook away.                                                                                                                                       |
 
 Running on a single machine or a LAN-only robot? You do not need any of
 this. A direct socket is enough.
@@ -339,20 +339,35 @@ this. A direct socket is enough.
 Start with the [documentation overview](docs/00-overview.md) for a guided
 reading order. The pages, in sequence:
 
-| Page | What's in it |
-|---|---|
-| [0. Overview](docs/00-overview.md) | Map of the docs and how to navigate them |
-| [1. Quickstart](docs/01-quickstart.md) | Install, tokens, first run with `Robot` and `Operator` |
-| [2. Concepts](docs/02-concepts.md) | Roles, the observation model, multi-controller, frame format |
-| [3. Portal API](docs/03-portal-api.md) | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
-| [4. Config from YAML](docs/04-config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file |
-| [5. Frame video](docs/05-frame-video.md) | Per-frame RGB over byte streams (RAW / PNG / MJPEG) for pixel-exact policies |
-| [6. Tuning](docs/06-tuning.md) | `fps`, `slack`, `tolerance`, asymmetric rates, reliability |
-| [7. RPC](docs/07-rpc.md) | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC |
-| [8. E2EE](docs/08-e2ee.md) | Shared-key end-to-end encryption for media and data |
-| [9. Synchronization deep dive](docs/09-synchronization.md) | The full match algorithm, cursor bookkeeping, complexity |
-| [10. lerobot integration](docs/10-lerobot.md) | The optional convenience plugins |
+| Page                                                       | What's in it                                                                        |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| [0. Overview](docs/00-overview.md)                         | Map of the docs and how to navigate them                                            |
+| [1. Quickstart](docs/01-quickstart.md)                     | Install, tokens, first run with `Robot` and `Operator`                              |
+| [2. Concepts](docs/02-concepts.md)                         | Roles, the observation model, multi-controller, frame format                        |
+| [3. Portal API](docs/03-portal-api.md)                     | The primary surface. `Robot`, `Operator`, callbacks, send methods, multi-controller |
+| [4. Config from YAML](docs/04-config-file.md)              | Build `RobotConfig` / `OperatorConfig` from a shareable YAML file                   |
+| [5. Frame video](docs/05-frame-video.md)                   | Per-frame RGB over byte streams (RAW / PNG / MJPEG) for pixel-exact policies        |
+| [6. Tuning](docs/06-tuning.md)                             | `fps`, `slack`, `tolerance`, asymmetric rates, reliability                          |
+| [7. RPC](docs/07-rpc.md)                                   | Imperative commands (`home`, `calibrate`, ...) on top of LiveKit RPC                |
+| [8. E2EE](docs/08-e2ee.md)                                 | Shared-key end-to-end encryption for media and data                                 |
+| [9. Synchronization deep dive](docs/09-synchronization.md) | The full match algorithm, cursor bookkeeping, complexity                            |
+| [10. lerobot integration](docs/10-lerobot.md)              | The optional convenience plugins                                                    |
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) for details.
+
+<br/><table>
+
+<thead><tr><th colspan="2">LiveKit Ecosystem</th></tr></thead>
+<tbody>
+<tr><td>Agents SDKs</td><td><a href="https://github.com/livekit/agents">Python</a> · <a href="https://github.com/livekit/agents-js">Node.js</a></td></tr><tr></tr>
+<tr><td>LiveKit SDKs</td><td><a href="https://github.com/livekit/client-sdk-js">Browser</a> · <a href="https://github.com/livekit/client-sdk-swift">Swift</a> · <a href="https://github.com/livekit/client-sdk-android">Android</a> · <a href="https://github.com/livekit/client-sdk-flutter">Flutter</a> · <a href="https://github.com/livekit/client-sdk-react-native">React Native</a> · <a href="https://github.com/livekit/rust-sdks">Rust</a> · <a href="https://github.com/livekit/node-sdks">Node.js</a> · <a href="https://github.com/livekit/python-sdks">Python</a> · <a href="https://github.com/livekit/client-sdk-unity">Unity</a> · <a href="https://github.com/livekit/client-sdk-unity-web">Unity (WebGL)</a> · <a href="https://github.com/livekit/client-sdk-esp32">ESP32</a> · <a href="https://github.com/livekit/client-sdk-cpp">C++</a></td></tr><tr></tr>
+<tr><td>Starter Apps</td><td><a href="https://github.com/livekit-examples/agent-starter-python">Python Agent</a> · <a href="https://github.com/livekit-examples/agent-starter-node">TypeScript Agent</a> · <a href="https://github.com/livekit-examples/agent-starter-react">React App</a> · <a href="https://github.com/livekit-examples/agent-starter-swift">SwiftUI App</a> · <a href="https://github.com/livekit-examples/agent-starter-android">Android App</a> · <a href="https://github.com/livekit-examples/agent-starter-flutter">Flutter App</a> · <a href="https://github.com/livekit-examples/agent-starter-react-native">React Native App</a> · <a href="https://github.com/livekit-examples/agent-starter-embed">Web Embed</a></td></tr><tr></tr>
+<tr><td>UI Components</td><td><a href="https://github.com/livekit/components-js">React</a> · <a href="https://github.com/livekit/components-android">Android Compose</a> · <a href="https://github.com/livekit/components-swift">SwiftUI</a> · <a href="https://github.com/livekit/components-flutter">Flutter</a></td></tr><tr></tr>
+<tr><td>Server APIs</td><td><a href="https://github.com/livekit/node-sdks">Node.js</a> · <a href="https://github.com/livekit/server-sdk-go">Golang</a> · <a href="https://github.com/livekit/server-sdk-ruby">Ruby</a> · <a href="https://github.com/livekit/server-sdk-kotlin">Java/Kotlin</a> · <a href="https://github.com/livekit/python-sdks">Python</a> · <a href="https://github.com/livekit/rust-sdks">Rust</a> · <a href="https://github.com/agence104/livekit-server-sdk-php">PHP (community)</a> · <a href="https://github.com/pabloFuente/livekit-server-sdk-dotnet">.NET (community)</a></td></tr><tr></tr>
+<tr><td>Resources</td><td><a href="https://docs.livekit.io">Docs</a> · <a href="https://docs.livekit.io/mcp">Docs MCP Server</a> · <a href="https://github.com/livekit/livekit-cli">CLI</a> · <a href="https://cloud.livekit.io">LiveKit Cloud</a></td></tr><tr></tr>
+<tr><td>LiveKit Server OSS</td><td><a href="https://github.com/livekit/livekit">LiveKit server</a> · <a href="https://github.com/livekit/egress">Egress</a> · <a href="https://github.com/livekit/ingress">Ingress</a> · <a href="https://github.com/livekit/sip">SIP</a></td></tr><tr></tr>
+<tr><td>Community</td><td><a href="https://community.livekit.io">Developer Community</a> · <a href="https://livekit.io/join-slack">Slack</a> · <a href="https://x.com/livekit">X</a> · <a href="https://www.youtube.com/@livekit_io">YouTube</a></td></tr>
+</tbody>
+</table>

@@ -149,7 +149,7 @@ jobs:
   #
   # Uses OIDC trusted publishing: no API key is stored in GitHub secrets.
   # Configure each package's trusted publisher at pypi.org with:
-  #   Repository: <owner>/livekit-portal
+  #   Repository: livekit/portal
   #   Workflow:   publish.yml
   #   Environment: pypi
   # ---------------------------------------------------------------------------

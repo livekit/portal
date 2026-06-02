@@ -54,11 +54,16 @@ moves past a state's window, drop the state).
 Each operator session holds a `SyncBuffer` with:
 
 - One `VecDeque<Arc<VideoFrameData>>` per registered video track,
-  bounded by `video_buffer_size` (default 5 frames ≈ 167 ms at 30 fps).
+  bounded by `video_buffer_size`.
 - One `VecDeque<(u64, Vec<f64>)>` for incoming state packets, bounded
-  by `state_buffer_size` (default 5).
+  by `state_buffer_size`.
 - Per-track `cursors: Vec<usize>` — see [Two-pointer cursors](#1-two-pointer-cursors).
 - A `blocker: Option<usize>` hint — see [Blocker-gated sync](#2-blocker-gated-sync).
+
+`video_buffer_size` and `state_buffer_size` are not set directly. Both
+come from the user-facing `slack` knob (default 5). `search_range_us`
+comes from `tolerance / fps` (50 ms at the defaults of fps 30, tolerance
+1.5). See [tuning](06-tuning.md) for the knobs and the math.
 
 Both deques are time-sorted *in the common case* (monotonic sender
 clock) and we lean on that fact throughout.
@@ -66,8 +71,8 @@ clock) and we lean on that fact throughout.
 ## The matching rule
 
 For a given state with timestamp `S`, a frame at timestamp `F` on track
-*k* is a **candidate match** iff `|S − F| < search_range_us` (default
-50 000 µs = 50 ms). Among candidates, we pick the **nearest**.
+*k* is a **candidate match** iff `|S − F| < search_range_us` (50 000 µs =
+50 ms at the defaults). Among candidates, we pick the **nearest**.
 
 A state produces an `Observation` only when **every** registered track
 has a candidate. If any track has no candidate in range, one of three
@@ -297,15 +302,16 @@ pub(crate) struct SyncOutput {
 
 The caller (e.g. the video receiver task or the data-received handler)
 releases the `SyncBuffer` mutex and *then* hands the output to
-`ObservationSink::dispatch`, which fires callbacks and, if configured,
-enqueues into a pull-based ring. This matters because:
+`ObservationSink::dispatch`, which fires callbacks and updates a
+latest-wins slot. This matters because:
 
 - User callbacks cross FFI (Python, Swift, Kotlin) and can block for
   milliseconds. Running them under the sync lock would stall every
   frame receiver and the room event loop.
 - The observation callback receives `&Observation` — no clone for
-  callback-only consumers. The pull-based `take_observations()` path
-  takes ownership of the buffered copy.
+  callback-only consumers. The pull-based `get_observation()` reads the
+  latest-wins slot, so a slow puller sees the freshest observation
+  rather than a backlog.
 
 ## Complexity and guarantees
 
@@ -319,7 +325,7 @@ enqueues into a pull-based ring. This matters because:
   emitted once every track has a frame in `[S − R, S + R]`, or dropped
   once any track's oldest frame exceeds `S + R`.
 - **Memory:** bounded by `video_buffer_size × tracks + state_buffer_size`
-  frames/states plus `observation_buffer_size` pending observations.
+  frames/states, plus one latest-wins observation slot.
 
 ## Known limitations and design choices we *didn't* make
 
@@ -347,21 +353,21 @@ enqueues into a pull-based ring. This matters because:
 
 ## Tuning
 
-The sync parameters derive from `fps`, `slack`, and `tolerance` (see
-[Tuning](tuning.md)). The defaults below assume the default `fps` 30,
-`slack` 5, and `tolerance` 1.5, targeting 30 fps video + ≤100 Hz state at
-typical WAN latencies (~50 ms RTT).
+You do not set these `SyncConfig` fields directly. They derive from three
+user-facing knobs (`fps`, `slack`, `tolerance`) whose defaults target
+30 fps video + ≤100 Hz state at typical WAN latencies (~50 ms RTT).
+Full setters, asymmetric-rate math, and reliability options live in
+[tuning](06-tuning.md).
 
-| Parameter | Default | When to raise | When to lower |
-|-----------|---------|---------------|---------------|
-| `video_buffer_size` | 5 | Bursty video or slow state pacing | Memory-constrained; video rate ≫ state rate |
-| `state_buffer_size` | 5 | Long video stalls you want to tolerate | Very high-rate state you're OK dropping |
-| `search_range_us` | 50 000 | Video arrives with more jitter (mobile network) | Tight sync needed; fps high enough |
-| `observation_buffer_size` | 10 | Consumer is pull-based and bursty | Pure push/callback consumer (can set 0) |
+| `SyncConfig` field | Derived from | Default | Effect |
+|--------------------|--------------|---------|--------|
+| `video_buffer_size` | `slack` | 5 | Frames buffered per track. Larger = more jitter and stall tolerance, more staleness. |
+| `state_buffer_size` | `slack` | 5 | States buffered awaiting a match. Larger = longer video stalls tolerated before eviction. |
+| `search_range_us` | `tolerance / fps` | 50 000 (50 ms) | Match window half-width. Wider = fewer drops under jitter, looser alignment. |
 
-A useful rule of thumb: `search_range_us` ≥ `1e6 / fps` — i.e. at least
-one inter-frame interval. Tighter than that and a small amount of
-jitter will start producing drops.
+A useful rule of thumb: keep `tolerance ≥ 1`, so `search_range_us` covers
+at least one inter-frame interval (`1e6 / fps`). Tighter than that and a
+small amount of jitter will start producing drops.
 
 ## Where the code lives
 

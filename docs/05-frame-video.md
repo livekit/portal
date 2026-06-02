@@ -8,7 +8,7 @@ codec, no quality drift.
 Selected by passing a byte-stream codec to `add_video`. The byte-stream
 codecs are `RAW`, `PNG`, and `MJPEG`; everything else (`H264`, `VP8`,
 `VP9`, `AV1`, `H265`) rides the WebRTC media path instead — see
-[portal-api.md](portal-api.md#webrtc-video-options) for the WebRTC codec
+[portal-api.md](03-portal-api.md#webrtc-video-options) for the WebRTC codec
 and `max_bitrate_kbps` options.
 
 ## When to use it
@@ -140,7 +140,7 @@ Picking a byte-stream codec on the same `add_video` call routes the track
 through the byte-stream transport, trading adaptive bitrate for
 deterministic per-frame delivery and bit-exact RGB. The other WebRTC
 codecs (`VP8`/`VP9`/`AV1`/`H265`) and the `max_bitrate_kbps` cap are
-documented in [portal-api.md](portal-api.md#webrtc-video-options).
+documented in [portal-api.md](03-portal-api.md#webrtc-video-options).
 
 ## Configuration
 

@@ -56,7 +56,7 @@ that counter never throttles. When a warning is rate-limited, the metric is
 the source of truth for the exact total.
 
 Reach for `metrics()` when you want a number. Reach for the tag when you want
-the cause and the fix. See [Tuning](tuning.md) for the counters and the
+the cause and the fix. See [Tuning](06-tuning.md) for the counters and the
 knobs they map to.
 
 ## Tag reference
@@ -86,7 +86,7 @@ the match window. State kept flowing while video did not.
 - Enable `reuse_stale_frames` to freeze on the last good frame instead of dropping. Use this for data collection. Leave it off for real-time control.
 - Check `metrics.sync.last_blocker_track` to see which camera is behind.
 
-See [Choosing `tolerance`](tuning.md#choosing-tolerance).
+See [Choosing `tolerance`](06-tuning.md#choosing-tolerance).
 
 ### state-overflow
 
@@ -131,7 +131,7 @@ fast as you are producing it.
 network. A persistent warning is sustained backpressure, not a spike. For
 frame video, track it with `metrics.transport.frames_dropped_publisher_full`.
 For lossy transport that sheds load instead of queuing, use a WebRTC video
-track. See [Frame video](frame-video.md).
+track. See [Frame video](05-frame-video.md).
 
 ### publish-failed
 
@@ -159,7 +159,7 @@ unique mismatch.
 
 **Fix.** Make the robot and operator declare the same fields, in the same
 order, with the same dtypes. A shared YAML config is the reliable way. See
-[Config from YAML](config-file.md).
+[Config from YAML](04-config-file.md).
 
 ### unknown-field
 

@@ -59,6 +59,10 @@ jobs:
           # side doesn't poison the other's incremental artifacts.
           key: rust-tests
 
+      # TODO: consider moving to separate job
+      - name: Lint
+        uses: clechasseur/rs-clippy-check@1e16925ceec49b64803a6abc5f6bbe79044c3bd4 # v6.0.4
+
       - name: cargo test --workspace
         run: cargo test --workspace --locked
 

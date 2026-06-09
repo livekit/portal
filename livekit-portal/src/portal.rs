@@ -3,7 +3,6 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use livekit::prelude::*;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
@@ -1657,7 +1656,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                             // zero-copy view of the wire payload all the
                             // way to `VideoFrameData.data`.
                             Ok(payload) => dispatch_frame_payload(
-                                Bytes::from(payload),
+                                payload,
                                 &entries,
                                 &sync_buffer,
                                 &obs_sink,

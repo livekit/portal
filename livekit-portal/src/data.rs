@@ -282,6 +282,7 @@ impl Drop for DataPublisher {
 /// Push-callback + latest-wins slot for a single typed record (Action or
 /// State). Paired so receivers and getters share one allocation.
 pub(crate) struct DataSlot<R: Clone> {
+    #[allow(clippy::type_complexity)]
     pub cb: Mutex<Option<Box<dyn Fn(&R) + Send + Sync>>>,
     pub latest: Mutex<Option<R>>,
     /// Peer fingerprints already reported as mismatched. Logged once per

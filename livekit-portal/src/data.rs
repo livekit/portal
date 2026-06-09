@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use livekit::prelude::*;
 use livekit::StreamByteOptions;
+use livekit::prelude::*;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -14,14 +14,13 @@ use crate::error::{PortalError, PortalResult};
 #[cfg(test)]
 use crate::dtype::DType;
 use crate::metrics::{DataStream, MetricsRegistry};
-use crate::rtt::{RttService, RTT_TOPIC};
+use crate::rtt::{RTT_TOPIC, RttService};
 use crate::serialization::{
-    action_fingerprint, chunk_fingerprint, deserialize_action, deserialize_chunk,
+    DecodeError, action_fingerprint, chunk_fingerprint, deserialize_action, deserialize_chunk,
     deserialize_values, schema_fingerprint, serialize_action, serialize_chunk, serialize_values,
-    DecodeError,
 };
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
-use crate::types::{to_value_maps, Action, ActionChunk, Role, State, TypedValue};
+use crate::types::{Action, ActionChunk, Role, State, TypedValue, to_value_maps};
 use crate::video::now_us;
 
 /// Reserved Portal topics. State and action travel as data packets;
@@ -148,16 +147,10 @@ impl DataPublisher {
             let mut last = self.last_values.lock();
             apply_carry_forward(&self.schema, &mut last, map);
             let out = match self.stream {
-                DataStream::State => {
-                    serialize_values(self.fingerprint, ts, &last, &self.schema)
+                DataStream::State => serialize_values(self.fingerprint, ts, &last, &self.schema),
+                DataStream::Action => {
+                    serialize_action(self.fingerprint, ts, in_reply_to_ts_us, &last, &self.schema)
                 }
-                DataStream::Action => serialize_action(
-                    self.fingerprint,
-                    ts,
-                    in_reply_to_ts_us,
-                    &last,
-                    &self.schema,
-                ),
                 DataStream::Chunk => unreachable!(
                     "DataPublisher only handles scalar state/action; chunks go through ChunkPublisher"
                 ),
@@ -257,11 +250,7 @@ impl DataPublisher {
 /// Update `last` in place with values from `map` for each declared field,
 /// leaving other slots untouched (carry-forward). Typed values are
 /// lossless-widened to `f64` on the way in.
-fn apply_carry_forward(
-    schema: &[FieldSpec],
-    last: &mut [f64],
-    map: &HashMap<String, TypedValue>,
-) {
+fn apply_carry_forward(schema: &[FieldSpec], last: &mut [f64], map: &HashMap<String, TypedValue>) {
     for (i, field) in schema.iter().enumerate() {
         if let Some(v) = map.get(&field.name) {
             last[i] = v.as_f64();
@@ -447,8 +436,7 @@ impl ChunkPublisher {
     ) -> PortalResult<()> {
         self.warn_unknown_keys(data);
         let ts = timestamp_us.unwrap_or_else(now_us);
-        let out =
-            serialize_chunk(self.fingerprint, ts, in_reply_to_ts_us, &self.spec, data);
+        let out = serialize_chunk(self.fingerprint, ts, in_reply_to_ts_us, &self.spec, data);
         if !out.saturated_indices.is_empty() {
             self.warn_saturated(&out.saturated_indices);
         }
@@ -553,13 +541,8 @@ pub(crate) fn dispatch_chunk_payload(
             let now = now_us();
             metrics.record_received(DataStream::Chunk, send_ts, now);
             metrics.record_e2e(in_reply_to_ts_us, now);
-            let data: HashMap<String, Vec<f64>> = slot
-                .spec
-                .fields
-                .iter()
-                .map(|f| f.name.clone())
-                .zip(columns)
-                .collect();
+            let data: HashMap<String, Vec<f64>> =
+                slot.spec.fields.iter().map(|f| f.name.clone()).zip(columns).collect();
             slot.deliver(ActionChunk {
                 name: slot.spec.name.clone(),
                 horizon: slot.spec.horizon,
@@ -594,11 +577,7 @@ pub(crate) fn build_action(
     Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us, sender }
 }
 
-fn build_state(
-    timestamp_us: u64,
-    schema: &[FieldSpec],
-    values: &[f64],
-) -> State {
+fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State {
     let (typed, raw) = to_value_maps(schema, values);
     State { values: typed, raw_values: raw, timestamp_us }
 }
@@ -699,12 +678,10 @@ mod tests {
         apply_carry_forward(&schema, &mut last, &m);
         assert_eq!(last, vec![1.0, 2.5, 0.0], "j1 carries forward; j2 updates; j3 still at seed");
 
-        let m: HashMap<String, TypedValue> = [
-            ("j1".to_string(), TypedValue::F64(-1.0)),
-            ("j3".to_string(), TypedValue::F64(7.0)),
-        ]
-        .into_iter()
-        .collect();
+        let m: HashMap<String, TypedValue> =
+            [("j1".to_string(), TypedValue::F64(-1.0)), ("j3".to_string(), TypedValue::F64(7.0))]
+                .into_iter()
+                .collect();
         apply_carry_forward(&schema, &mut last, &m);
         assert_eq!(last, vec![-1.0, 2.5, 7.0], "j2 carries forward when omitted; others update");
     }
@@ -729,10 +706,8 @@ mod tests {
             Ok(())
         }
 
-        let schema = vec![
-            FieldSpec::new("gripper", DType::Bool),
-            FieldSpec::new("mode", DType::I8),
-        ];
+        let schema =
+            vec![FieldSpec::new("gripper", DType::Bool), FieldSpec::new("mode", DType::I8)];
 
         // Correct variants pass.
         let m: HashMap<String, TypedValue> = [

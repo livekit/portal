@@ -114,11 +114,7 @@ impl ChunkSpec {
         horizon: u32,
         fields: impl IntoIterator<Item = impl Into<FieldSpec>>,
     ) -> Self {
-        Self {
-            name: name.into(),
-            horizon,
-            fields: fields.into_iter().map(Into::into).collect(),
-        }
+        Self { name: name.into(), horizon, fields: fields.into_iter().map(Into::into).collect() }
     }
 }
 

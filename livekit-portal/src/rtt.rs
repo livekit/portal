@@ -54,10 +54,8 @@ impl RttService {
             let tx_ping = tx.clone();
             let metrics_ping = metrics.clone();
             Some(tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(Duration::from_millis(ping_interval_ms));
-                interval
-                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut interval = tokio::time::interval(Duration::from_millis(ping_interval_ms));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     interval.tick().await;
                     let ts = now_us();

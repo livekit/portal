@@ -233,11 +233,7 @@ impl SyncBuffer {
             Some(_) => evicted > 0,
         };
 
-        if should_run {
-            self.try_sync()
-        } else {
-            SyncOutput::empty()
-        }
+        if should_run { self.try_sync() } else { SyncOutput::empty() }
     }
 
     pub fn push_state(&mut self, timestamp_us: u64, values: Vec<f64>) -> SyncOutput {
@@ -411,9 +407,7 @@ impl SyncBuffer {
                     if !frame_buf.is_empty() {
                         let c = self.cursors[track_i];
                         let cand = &frame_buf[c];
-                        if cand.timestamp_us <= state_ts
-                            && state_ts - cand.timestamp_us >= range
-                        {
+                        if cand.timestamp_us <= state_ts && state_ts - cand.timestamp_us >= range {
                             self.matched_scratch[track_i] = Some(MatchSlot {
                                 frame: cand.clone(),
                                 drain_to: Some(c),
@@ -423,11 +417,8 @@ impl SyncBuffer {
                         }
                     }
                     if let Some(stale) = self.last_emitted_frames[track_i].clone() {
-                        self.matched_scratch[track_i] = Some(MatchSlot {
-                            frame: stale,
-                            drain_to: None,
-                            stale: true,
-                        });
+                        self.matched_scratch[track_i] =
+                            Some(MatchSlot { frame: stale, drain_to: None, stale: true });
                         continue;
                     }
                 }
@@ -793,7 +784,11 @@ mod tests {
         // Only the second state remains. A frame matching it fires the obs.
         let out = push_f(&mut buf, "cam1", 2_005);
         assert_eq!(out.observations.len(), 1);
-        assert_eq!(out.observations[0].state["j1"], TypedValue::F64(2.0), "evicted state should not leak through");
+        assert_eq!(
+            out.observations[0].state["j1"],
+            TypedValue::F64(2.0),
+            "evicted state should not leak through"
+        );
         assert_eq!(out.observations[0].timestamp_us, 2_000);
     }
 
@@ -983,8 +978,7 @@ mod tests {
         assert_eq!(out.observations.len(), 1);
         assert_eq!(out.observations[0].state["j1"], TypedValue::F64(2.0));
         assert_eq!(
-            out.observations[0].frames["cam1"].timestamp_us,
-            1_000,
+            out.observations[0].frames["cam1"].timestamp_us, 1_000,
             "stale reuse uses the last emitted frame"
         );
     }
@@ -1010,8 +1004,7 @@ mod tests {
         assert_eq!(out.drops.len(), 0, "reuse replaces the horizon drop");
         assert_eq!(out.observations.len(), 1);
         assert_eq!(
-            out.observations[0].frames["cam1"].timestamp_us,
-            0,
+            out.observations[0].frames["cam1"].timestamp_us, 0,
             "stale reuse, not the unmatched buffered frame"
         );
         // The buffered frame must still be available for a later state.
@@ -1032,11 +1025,7 @@ mod tests {
 
         assert!(buf.push_state(1_000, vec![1.0]).is_empty());
         let out = push_f(&mut buf, "cam1", 100_000);
-        assert_eq!(
-            out.drops.len(),
-            1,
-            "no last-emitted frame yet — reuse can't save the state"
-        );
+        assert_eq!(out.drops.len(), 1, "no last-emitted frame yet — reuse can't save the state");
         assert_eq!(out.observations.len(), 0);
     }
 
@@ -1145,8 +1134,7 @@ mod tests {
         assert_eq!(out.drops.len(), 0);
         assert_eq!(out.observations.len(), 1);
         assert_eq!(
-            out.observations[0].frames["cam1"].timestamp_us,
-            200,
+            out.observations[0].frames["cam1"].timestamp_us, 200,
             "stale reuse should advance to the newest below-horizon frame"
         );
         // Buffer drained; last-emitted advanced.
@@ -1189,16 +1177,12 @@ mod tests {
             assert_eq!(out.observations.len(), 1);
             assert_eq!(out.drops.len(), 0);
             assert_eq!(
-                out.observations[0].frames["cam1"].timestamp_us,
-                frame_ts,
+                out.observations[0].frames["cam1"].timestamp_us, frame_ts,
                 "round #{i}: stale match should be the newest below-horizon frame"
             );
             // Buffer drains so it never pins at cap.
             assert_eq!(buf.video_buffers[0].len(), 0);
-            assert_eq!(
-                buf.last_emitted_frames[0].as_ref().unwrap().timestamp_us,
-                frame_ts
-            );
+            assert_eq!(buf.last_emitted_frames[0].as_ref().unwrap().timestamp_us, frame_ts);
         }
     }
 
@@ -1214,15 +1198,27 @@ mod tests {
         let mut buf = SyncBuffer::new(&tracks, schema, reuse_config(), metrics.clone());
 
         // Fresh emission #1.
-        let _ = buf.push_frame("cam1", Arc::new(VideoFrameData {
-            width: 2, height: 2, data: bytes::Bytes::from(vec![0u8; 12]), timestamp_us: 1_000,
-        }));
+        let _ = buf.push_frame(
+            "cam1",
+            Arc::new(VideoFrameData {
+                width: 2,
+                height: 2,
+                data: bytes::Bytes::from(vec![0u8; 12]),
+                timestamp_us: 1_000,
+            }),
+        );
         let _ = buf.push_state(1_050, vec![1.0]);
 
         // Fresh emission #2.
-        let _ = buf.push_frame("cam1", Arc::new(VideoFrameData {
-            width: 2, height: 2, data: bytes::Bytes::from(vec![0u8; 12]), timestamp_us: 2_000,
-        }));
+        let _ = buf.push_frame(
+            "cam1",
+            Arc::new(VideoFrameData {
+                width: 2,
+                height: 2,
+                data: bytes::Bytes::from(vec![0u8; 12]),
+                timestamp_us: 2_000,
+            }),
+        );
         let _ = buf.push_state(2_050, vec![2.0]);
 
         let snap = metrics.snapshot(HashMap::new(), 0);

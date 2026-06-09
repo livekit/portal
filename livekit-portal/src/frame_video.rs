@@ -51,24 +51,24 @@
 //! quality knob.
 
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use livekit::prelude::*;
 use livekit::StreamByteOptions;
+use livekit::prelude::*;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::codec::{decode_frame, encode_frame_into, estimated_encoded_size, Codec};
+use crate::codec::{Codec, decode_frame, encode_frame_into, estimated_encoded_size};
 use crate::config::FrameVideoSpec;
 use crate::error::{PortalError, PortalResult};
 use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
 use crate::sync_buffer::SyncBuffer;
 use crate::types::VideoFrameData;
-use crate::video::{now_us, VideoTrackSlots};
+use crate::video::{VideoTrackSlots, now_us};
 
 /// Reserved Portal topic for frame-video byte streams. A single topic
 /// multiplexes all frame-video tracks; the per-frame header carries the
@@ -161,8 +161,7 @@ pub(crate) fn build_frame_payload(
         )));
     }
     let header_len = HEADER_FIXED_LEN + name_bytes.len();
-    let mut buf =
-        Vec::with_capacity(header_len + estimated_encoded_size(width, height, codec));
+    let mut buf = Vec::with_capacity(header_len + estimated_encoded_size(width, height, codec));
     buf.push(WIRE_VERSION);
     buf.push(codec_id(codec));
     buf.extend_from_slice(&(width as u16).to_le_bytes());
@@ -377,10 +376,9 @@ pub(crate) fn dispatch_frame_payload(
         Err(e) => {
             // Re-borrow the name from the header buffer for the log; the
             // buffer is `payload`, still alive because we sliced from it.
-            let track_name = std::str::from_utf8(
-                &payload[HEADER_FIXED_LEN..HEADER_FIXED_LEN + track_name_len],
-            )
-            .unwrap_or("<invalid utf-8>");
+            let track_name =
+                std::str::from_utf8(&payload[HEADER_FIXED_LEN..HEADER_FIXED_LEN + track_name_len])
+                    .unwrap_or("<invalid utf-8>");
             log::warn!("[decode-failed] frame_video '{}': decode failed: {e}", track_name);
             return;
         }

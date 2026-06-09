@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
@@ -141,10 +141,8 @@ pub(crate) struct MetricsRegistry {
 
 impl MetricsRegistry {
     pub fn new(video_tracks: &[String]) -> Self {
-        let per_track: HashMap<String, Arc<TrackMetrics>> = video_tracks
-            .iter()
-            .map(|n| (n.clone(), Arc::new(TrackMetrics::new())))
-            .collect();
+        let per_track: HashMap<String, Arc<TrackMetrics>> =
+            video_tracks.iter().map(|n| (n.clone(), Arc::new(TrackMetrics::new()))).collect();
         Self {
             track_order: video_tracks.to_vec(),
             per_track,
@@ -244,11 +242,7 @@ impl MetricsRegistry {
         self.rtt_last.store(rtt_us.max(1), Ordering::Relaxed);
     }
 
-    pub fn snapshot(
-        &self,
-        video_fill: HashMap<String, usize>,
-        state_fill: usize,
-    ) -> PortalMetrics {
+    pub fn snapshot(&self, video_fill: HashMap<String, usize>, state_fill: usize) -> PortalMetrics {
         let n = self.track_order.len();
         let mut frames_sent = HashMap::with_capacity(n);
         let mut frames_received = HashMap::with_capacity(n);
@@ -263,10 +257,8 @@ impl MetricsRegistry {
                 frames_received.insert(name.clone(), t.frames_received.load(Ordering::Relaxed));
                 frame_jitter_us.insert(name.clone(), t.jitter.lock().jitter_us);
                 evictions.insert(name.clone(), t.evictions.load(Ordering::Relaxed));
-                frames_dropped_publisher_full.insert(
-                    name.clone(),
-                    t.frames_dropped_publisher_full.load(Ordering::Relaxed),
-                );
+                frames_dropped_publisher_full
+                    .insert(name.clone(), t.frames_dropped_publisher_full.load(Ordering::Relaxed));
                 bytes_sent.insert(name.clone(), t.bytes_sent.load(Ordering::Relaxed));
                 bytes_received.insert(name.clone(), t.bytes_received.load(Ordering::Relaxed));
             }
@@ -296,9 +288,7 @@ impl MetricsRegistry {
         PortalMetrics {
             sync: SyncMetrics {
                 observations_emitted: self.observations_emitted.load(Ordering::Relaxed),
-                stale_observations_emitted: self
-                    .stale_observations_emitted
-                    .load(Ordering::Relaxed),
+                stale_observations_emitted: self.stale_observations_emitted.load(Ordering::Relaxed),
                 states_dropped: self.states_dropped.load(Ordering::Relaxed),
                 match_delta_us_p50: match_p50,
                 match_delta_us_p95: match_p95,

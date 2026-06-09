@@ -78,9 +78,7 @@ pub struct DecodedFrame {
 pub enum CodecError {
     #[error("invalid frame dimensions: {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
-    #[error(
-        "wrong RGB buffer size for {width}x{height}: expected {expected} bytes, got {got}"
-    )]
+    #[error("wrong RGB buffer size for {width}x{height}: expected {expected} bytes, got {got}")]
     WrongRgbSize { width: u32, height: u32, expected: usize, got: usize },
     #[error("encode failed: {0}")]
     EncodeFailed(String),
@@ -110,12 +108,7 @@ fn check_rgb(rgb: &[u8], width: u32, height: u32) -> CodecResult<()> {
         .and_then(|n| n.checked_mul(3))
         .ok_or(CodecError::InvalidDimensions { width, height })?;
     if rgb.len() != expected {
-        return Err(CodecError::WrongRgbSize {
-            width,
-            height,
-            expected,
-            got: rgb.len(),
-        });
+        return Err(CodecError::WrongRgbSize { width, height, expected, got: rgb.len() });
     }
     Ok(())
 }
@@ -130,9 +123,7 @@ fn check_rgb(rgb: &[u8], width: u32, height: u32) -> CodecResult<()> {
 ///   * Mjpeg = raw / 8 (≈ q90 ratio on natural images; loose, but avoids
 ///     the common case of `Vec` doubling-from-zero during encode)
 pub fn estimated_encoded_size(width: u32, height: u32, codec: Codec) -> usize {
-    let raw = (width as usize)
-        .saturating_mul(height as usize)
-        .saturating_mul(3);
+    let raw = (width as usize).saturating_mul(height as usize).saturating_mul(3);
     match codec {
         Codec::Raw => raw,
         Codec::Png => raw,
@@ -230,11 +221,7 @@ pub fn decode_frame(
     match codec {
         Codec::Raw => {
             check_rgb(&bytes, declared_width, declared_height)?;
-            Ok(DecodedFrame {
-                rgb: bytes,
-                width: declared_width,
-                height: declared_height,
-            })
+            Ok(DecodedFrame { rgb: bytes, width: declared_width, height: declared_height })
         }
         Codec::Png => decode_with_image_crate(
             &bytes,
@@ -262,10 +249,7 @@ fn decode_with_image_crate(
 ) -> CodecResult<DecodedFrame> {
     let cursor = Cursor::new(bytes);
     let reader = image::ImageReader::with_format(cursor, format);
-    let decoded = reader
-        .decode()
-        .map_err(|e| CodecError::DecodeFailed(e.to_string()))?
-        .into_rgb8();
+    let decoded = reader.decode().map_err(|e| CodecError::DecodeFailed(e.to_string()))?.into_rgb8();
     let (w, h) = decoded.dimensions();
     if (declared_width != 0 || declared_height != 0)
         && (w != declared_width || h != declared_height)

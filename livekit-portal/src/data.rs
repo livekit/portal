@@ -201,14 +201,14 @@ impl DataPublisher {
     /// here — they're already reported via `warn_unknown_keys`.
     fn check_dtypes(&self, map: &HashMap<String, TypedValue>) -> PortalResult<()> {
         for field in &self.schema {
-            if let Some(v) = map.get(&field.name) {
-                if v.dtype() != field.dtype {
-                    return Err(PortalError::DtypeMismatch {
-                        field: field.name.clone(),
-                        expected: field.dtype,
-                        got: v.variant_name(),
-                    });
-                }
+            if let Some(v) = map.get(&field.name)
+                && v.dtype() != field.dtype
+            {
+                return Err(PortalError::DtypeMismatch {
+                    field: field.name.clone(),
+                    expected: field.dtype,
+                    got: v.variant_name(),
+                });
             }
         }
         Ok(())

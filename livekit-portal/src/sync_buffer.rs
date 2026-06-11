@@ -372,10 +372,10 @@ impl SyncBuffer {
                             // closer claim, leave the frame for it. Prevents a
                             // greedy head-state from stealing its neighbor's frame
                             // when tolerance > 1 tick.
-                            if let Some(nts) = next_state_ts {
-                                if nts.abs_diff(f.timestamp_us) < d {
-                                    continue;
-                                }
+                            if let Some(nts) = next_state_ts
+                                && nts.abs_diff(f.timestamp_us) < d
+                            {
+                                continue;
                             }
                             best_delta = d;
                             best_idx = Some(candidate);

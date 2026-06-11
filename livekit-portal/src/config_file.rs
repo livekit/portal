@@ -268,15 +268,15 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
         }
     }
 
-    if let Some(fps) = p.fps {
-        if fps == 0 {
-            return Err(ConfigFileError::Invalid("fps must be > 0".into()));
-        }
+    if let Some(fps) = p.fps
+        && fps == 0
+    {
+        return Err(ConfigFileError::Invalid("fps must be > 0".into()));
     }
-    if let Some(slack) = p.slack {
-        if slack == 0 {
-            return Err(ConfigFileError::Invalid("slack must be > 0".into()));
-        }
+    if let Some(slack) = p.slack
+        && slack == 0
+    {
+        return Err(ConfigFileError::Invalid("slack must be > 0".into()));
     }
     if let Some(tol) = p.tolerance {
         // Equivalent to `!(tol > 0.0)` but explicit about NaN. Mirrors

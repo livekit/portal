@@ -197,12 +197,12 @@ impl ObservationSink {
             }
         }
 
-        if !drops.is_empty() {
-            if let Some(cb) = self.drop_cb.lock().as_ref() {
-                let result = catch_unwind(AssertUnwindSafe(|| cb(drops)));
-                if result.is_err() {
-                    log::error!("[callback-panic] drop callback panicked, event loop continues");
-                }
+        if !drops.is_empty()
+            && let Some(cb) = self.drop_cb.lock().as_ref()
+        {
+            let result = catch_unwind(AssertUnwindSafe(|| cb(drops)));
+            if result.is_err() {
+                log::error!("[callback-panic] drop callback panicked, event loop continues");
             }
         }
     }
@@ -685,35 +685,35 @@ impl Portal {
         // raw `f64` columns — we hand the same `data` map straight to the
         // slot, padded/truncated to the declared horizon to match what
         // the wire path emits.
-        if self.config.action_subscription && self.is_self_active() {
-            if let Some(slot) = self.chunk_slots.get(chunk_name) {
-                let local_id = self
-                    .local_identity()
-                    .expect("local_identity is Some when self == active_operator");
-                let horizon = slot.spec.horizon as usize;
-                let normalized: HashMap<String, Vec<f64>> = slot
-                    .spec
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let mut col = data.get(&f.name).cloned().unwrap_or_default();
-                        if col.len() < horizon {
-                            col.resize(horizon, 0.0);
-                        } else if col.len() > horizon {
-                            col.truncate(horizon);
-                        }
-                        (f.name.clone(), col)
-                    })
-                    .collect();
-                slot.deliver(ActionChunk {
-                    name: slot.spec.name.clone(),
-                    horizon: slot.spec.horizon,
-                    data: normalized,
-                    timestamp_us: send_ts,
-                    in_reply_to_ts_us,
-                    sender: local_id,
-                });
-            }
+        if self.config.action_subscription
+            && self.is_self_active()
+            && let Some(slot) = self.chunk_slots.get(chunk_name)
+        {
+            let local_id =
+                self.local_identity().expect("local_identity is Some when self == active_operator");
+            let horizon = slot.spec.horizon as usize;
+            let normalized: HashMap<String, Vec<f64>> = slot
+                .spec
+                .fields
+                .iter()
+                .map(|f| {
+                    let mut col = data.get(&f.name).cloned().unwrap_or_default();
+                    if col.len() < horizon {
+                        col.resize(horizon, 0.0);
+                    } else if col.len() > horizon {
+                        col.truncate(horizon);
+                    }
+                    (f.name.clone(), col)
+                })
+                .collect();
+            slot.deliver(ActionChunk {
+                name: slot.spec.name.clone(),
+                horizon: slot.spec.horizon,
+                data: normalized,
+                timestamp_us: send_ts,
+                in_reply_to_ts_us,
+                sender: local_id,
+            });
         }
         Ok(())
     }
@@ -1605,12 +1605,9 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                             // refcount bump, so the `Raw` codec gets a
                             // zero-copy view of the wire payload all the
                             // way to `VideoFrameData.data`.
-                            Ok(payload) => dispatch_frame_payload(
-                                payload,
-                                &entries,
-                                &sync_buffer,
-                                &obs_sink,
-                            ),
+                            Ok(payload) => {
+                                dispatch_frame_payload(payload, &entries, &sync_buffer, &obs_sink)
+                            }
                             Err(e) => log::warn!(
                                 "[bad-payload] failed to read frame_video byte stream: {e}"
                             ),

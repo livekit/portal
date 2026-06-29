@@ -29,10 +29,14 @@ mechanics.
 Robotics policies expect a single bundled tuple per step:
 
 ```
-Observation { frames: {cam1: ndarray, cam2: ndarray, ...},
+Observation { frames: {cam1: VideoFrameData, cam2: VideoFrameData, ...},
               state:  {joint1: 0.1, joint2: -0.3, ...},
               timestamp_us: int }
 ```
+
+Each `VideoFrameData` carries packed RGB24 bytes in `.data` plus `.width`,
+`.height`, and `.timestamp_us`. Call `frame_bytes_to_numpy_rgb(f.data,
+f.width, f.height)` to get an `(H, W, 3)` uint8 array.
 
 LiveKit doesn't deliver data that way. Video tracks, state streams, and action
 streams each have their own pacing, codec path, and retransmission. On the

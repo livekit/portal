@@ -923,19 +923,55 @@ class Portal:
     )
 
     def __init__(self, config: PortalConfig) -> None:
+        # Wrap the unified FFI Portal. The `Robot` / `Operator` role facades
+        # reuse `_over` to wrap an `_ffi.Robot` / `_ffi.Operator` instead —
+        # the ergonomic layer below is identical regardless of which FFI
+        # object backs it, since all three expose the same method names.
+        self._init(
+            lambda dispatcher: _ffi.Portal(config._inner, dispatcher),
+            config.state_schema,
+            config.action_schema,
+            config.action_chunks,
+        )
+
+    @classmethod
+    def _over(
+        cls,
+        inner_factory: Callable[["_Dispatcher"], Any],
+        state_schema: List[FieldSpec],
+        action_schema: List[FieldSpec],
+        action_chunks: List[ChunkSpec],
+    ) -> "Portal":
+        """Build a Portal over a prebuilt FFI object. `inner_factory`
+        receives the dispatcher and must return the FFI object constructed
+        with it as its callbacks (e.g. `_ffi.Robot(cfg, dispatcher)`). Used
+        by the `Robot` / `Operator` facades so the role split lives in Rust
+        while this ergonomic layer stays shared.
+        """
+        self = cls.__new__(cls)
+        self._init(inner_factory, state_schema, action_schema, action_chunks)
+        return self
+
+    def _init(
+        self,
+        inner_factory: Callable[["_Dispatcher"], Any],
+        state_schema: List[FieldSpec],
+        action_schema: List[FieldSpec],
+        action_chunks: List[ChunkSpec],
+    ) -> None:
         # Schema snapshots let delivery records reconstruct Python types
         # per declared dtype — the FFI boundary delivers everything as
         # `Dict[str, float]` (the core pipeline is f64 throughout).
-        self._state_schema: List[FieldSpec] = list(config.state_schema)
-        self._action_schema: List[FieldSpec] = list(config.action_schema)
-        self._action_chunks: List[ChunkSpec] = list(config.action_chunks)
+        self._state_schema: List[FieldSpec] = list(state_schema)
+        self._action_schema: List[FieldSpec] = list(action_schema)
+        self._action_chunks: List[ChunkSpec] = list(action_chunks)
         self._chunk_schemas: Dict[str, List[FieldSpec]] = {
             spec.name: list(spec.fields) for spec in self._action_chunks
         }
         self._dispatcher = _Dispatcher(
             self._action_schema, self._state_schema, self._chunk_schemas
         )
-        self._inner = _ffi.Portal(config._inner, self._dispatcher)
+        self._inner = inner_factory(self._dispatcher)
         # Snapshot what the Rust side confirmed it was built with.
         self._state_fields: List[str] = list(self._inner.state_fields())
         self._action_fields: List[str] = list(self._inner.action_fields())
@@ -1224,50 +1260,51 @@ class Portal:
 class _RoleConfigBase:
     """Shared declaration surface for `RobotConfig` and `OperatorConfig`.
 
-    Holds an internal `PortalConfig` keyed to the appropriate `Role`. All
-    declarative methods (schemas, video tracks, action chunks, tuning knobs)
-    forward straight through. Subclasses don't extend this surface; they
-    only differ in which role they construct.
+    Wraps the role-specific FFI config (`_ffi.RobotConfig` /
+    `_ffi.OperatorConfig`), which pins the role in Rust — the role split
+    lives in the bindings rather than being reconstructed here. Declarative
+    methods forward through after the Python-side ergonomic conversion
+    (codec defaults, `(name, DType)` tuple sugar). Schemas are read back
+    from the FFI config, not mirrored in Python.
     """
 
-    __slots__ = ("_inner",)
+    __slots__ = ("_inner", "_session", "_role")
 
-    def __init__(self, session: str, role: Role) -> None:
-        self._inner = PortalConfig(session, role)
-
-    @classmethod
-    def _from_portal_config(cls, inner: PortalConfig) -> "_RoleConfigBase":
-        instance = cls.__new__(cls)
-        instance._inner = inner
-        return instance
+    def __init__(self, inner: Any, session: str, role: Role) -> None:
+        # `inner` is a prebuilt `_ffi.RobotConfig` / `_ffi.OperatorConfig`.
+        # `session` / `role` are kept Python-side for the properties since
+        # the FFI config doesn't expose them back.
+        self._inner = inner
+        self._session = session
+        self._role = role
 
     @property
     def session(self) -> str:
-        return self._inner.session
+        return self._session
 
     @property
     def role(self) -> Role:
-        return self._inner.role
+        return self._role
 
     @property
     def video_tracks(self) -> List[str]:
-        return self._inner.video_tracks
+        return list(self._inner.video_tracks())
 
     @property
     def frame_video_tracks(self) -> List[FrameVideoSpec]:
-        return self._inner.frame_video_tracks
+        return list(self._inner.frame_video_tracks())
 
     @property
     def state_schema(self) -> List[FieldSpec]:
-        return self._inner.state_schema
+        return list(self._inner.state_schema())
 
     @property
     def action_schema(self) -> List[FieldSpec]:
-        return self._inner.action_schema
+        return list(self._inner.action_schema())
 
     @property
     def action_chunks(self) -> List[ChunkSpec]:
-        return self._inner.action_chunks
+        return list(self._inner.action_chunks())
 
     def add_video(
         self,
@@ -1279,10 +1316,10 @@ class _RoleConfigBase:
         self._inner.add_video(name, codec, quality, max_bitrate_kbps)
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
-        self._inner.add_state_typed(schema)
+        self._inner.add_state_typed(_to_field_specs(schema))
 
     def add_action_typed(self, schema: Iterable[SchemaEntry]) -> None:
-        self._inner.add_action_typed(schema)
+        self._inner.add_action_typed(_to_field_specs(schema))
 
     def add_action_chunk(
         self,
@@ -1290,7 +1327,7 @@ class _RoleConfigBase:
         horizon: int,
         fields: Iterable[SchemaEntry],
     ) -> None:
-        self._inner.add_action_chunk(name, horizon, fields)
+        self._inner.add_action_chunk(name, horizon, _to_field_specs(fields))
 
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
@@ -1311,7 +1348,7 @@ class _RoleConfigBase:
         self._inner.set_ping_ms(ms)
 
     def set_e2ee_key(self, key: bytes) -> None:
-        self._inner.set_e2ee_key(key)
+        self._inner.set_e2ee_key(bytes(key))
 
     def set_reuse_stale_frames(self, enable: bool) -> None:
         self._inner.set_reuse_stale_frames(enable)
@@ -1326,19 +1363,22 @@ class _RoleConfigBase:
 
 class RobotConfig(_RoleConfigBase):
     """Robot-side session config. Same declarative surface as
-    `OperatorConfig`; the Role is pinned to `Role.ROBOT` internally.
+    `OperatorConfig`; the Role is pinned to `Role.ROBOT` internally by the
+    underlying `_ffi.RobotConfig`.
     """
 
     def __init__(self, session: str) -> None:
-        super().__init__(session, Role.ROBOT)
+        super().__init__(_ffi.RobotConfig(session), session, Role.ROBOT)
 
     @classmethod
     def from_yaml_str(cls, yaml: str, session: str) -> "RobotConfig":
         """Build a `RobotConfig` from a YAML string. See
         `PortalConfig.from_yaml_str` for the schema and semantics.
         """
-        inner = PortalConfig.from_yaml_str(yaml, session, Role.ROBOT)
-        return cls._from_portal_config(inner)  # type: ignore[return-value]
+        inner = _ffi.RobotConfig.from_yaml_str(yaml, session)
+        obj = cls.__new__(cls)
+        _RoleConfigBase.__init__(obj, inner, session, Role.ROBOT)
+        return obj
 
     @classmethod
     def from_yaml_file(
@@ -1346,13 +1386,14 @@ class RobotConfig(_RoleConfigBase):
         path: Union[str, os.PathLike],
         session: str,
     ) -> "RobotConfig":
-        inner = PortalConfig.from_yaml_file(path, session, Role.ROBOT)
-        return cls._from_portal_config(inner)  # type: ignore[return-value]
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.from_yaml_str(f.read(), session)
 
 
 class OperatorConfig(_RoleConfigBase):
     """Operator-side session config. Same declarative surface as
-    `RobotConfig`; the Role is pinned to `Role.OPERATOR`.
+    `RobotConfig`; the Role is pinned to `Role.OPERATOR` by the underlying
+    `_ffi.OperatorConfig`.
 
     Identity is set on the LiveKit access token (`with_identity(...)` at
     mint time) and read back via `Operator.local_identity()` after
@@ -1362,15 +1403,17 @@ class OperatorConfig(_RoleConfigBase):
     """
 
     def __init__(self, session: str) -> None:
-        super().__init__(session, Role.OPERATOR)
+        super().__init__(_ffi.OperatorConfig(session), session, Role.OPERATOR)
 
     @classmethod
     def from_yaml_str(cls, yaml: str, session: str) -> "OperatorConfig":
         """Build an `OperatorConfig` from a YAML string. See
         `PortalConfig.from_yaml_str` for the schema and semantics.
         """
-        inner = PortalConfig.from_yaml_str(yaml, session, Role.OPERATOR)
-        return cls._from_portal_config(inner)  # type: ignore[return-value]
+        inner = _ffi.OperatorConfig.from_yaml_str(yaml, session)
+        obj = cls.__new__(cls)
+        _RoleConfigBase.__init__(obj, inner, session, Role.OPERATOR)
+        return obj
 
     @classmethod
     def from_yaml_file(
@@ -1378,8 +1421,8 @@ class OperatorConfig(_RoleConfigBase):
         path: Union[str, os.PathLike],
         session: str,
     ) -> "OperatorConfig":
-        inner = PortalConfig.from_yaml_file(path, session, Role.OPERATOR)
-        return cls._from_portal_config(inner)  # type: ignore[return-value]
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.from_yaml_str(f.read(), session)
 
 
 class Robot:
@@ -1394,7 +1437,15 @@ class Robot:
     __slots__ = ("_portal",)
 
     def __init__(self, config: RobotConfig) -> None:
-        self._portal = Portal(config._inner)
+        # Back the facade with `_ffi.Robot` — the role-split surface defined
+        # in Rust. `Portal._over` layers the shared ergonomics (typed values,
+        # numpy, asyncio callback hopping) on top.
+        self._portal = Portal._over(
+            lambda dispatcher: _ffi.Robot(config._inner, dispatcher),
+            config.state_schema,
+            config.action_schema,
+            config.action_chunks,
+        )
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1514,7 +1565,14 @@ class Operator:
     __slots__ = ("_portal",)
 
     def __init__(self, config: OperatorConfig) -> None:
-        self._portal = Portal(config._inner)
+        # Back the facade with `_ffi.Operator` — the role-split surface
+        # defined in Rust. `Portal._over` layers the shared ergonomics on top.
+        self._portal = Portal._over(
+            lambda dispatcher: _ffi.Operator(config._inner, dispatcher),
+            config.state_schema,
+            config.action_schema,
+            config.action_chunks,
+        )
 
     # -- lifecycle -----------------------------------------------------------
 

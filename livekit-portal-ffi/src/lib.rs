@@ -7,6 +7,9 @@
 //! Shape:
 //!   * `PortalConfig` and `Portal` are `#[uniffi::Object]`s. Constructors and
 //!     methods run through UniFFI's Arc-based lifecycle.
+//!   * `RobotConfig` / `OperatorConfig` and `Robot` / `Operator` are thin
+//!     role-split wrappers over those, so every binding inherits the split
+//!     from UniFFI instead of hand-reimplementing it per host language.
 //!   * Records (`VideoFrame`, `Observation`, `Action`, `State`, metrics)
 //!     cross the boundary by value. Callbacks always own their payload.
 //!   * `PortalCallbacks` is a foreign trait (`with_foreign`). The foreign
@@ -968,6 +971,501 @@ impl Portal {
             .perform_rpc(destination.as_deref(), &method, payload, timeout)
             .await
             .map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Role-split surface
+//
+// `Robot` / `Operator` (and their configs) are thin wrappers over the unified
+// `Portal` / `PortalConfig`. They exist so foreign bindings inherit the role
+// split straight from UniFFI instead of hand-reimplementing it in every host
+// language — which is what the Python layer did before this. Each type
+// exposes only the methods that make sense for its role; the wrong-role
+// methods are simply absent rather than runtime-erroring with `WrongRole`.
+// The core crate stays unified: both roles drive the same `core::Portal`.
+//
+// Configs are distinct objects (`RobotConfig` / `OperatorConfig`) purely for
+// the type safety — `Robot::new` takes an `Arc<RobotConfig>`, so an operator
+// config can't be passed by mistake. Both pin the role internally, so callers
+// never name `Role` themselves.
+//
+// Callbacks are still delivered through the uniform `PortalCallbacks` trait,
+// passed at construction. A binding wires up only the events its role
+// consumes (a Robot ignores `on_state` / `on_observation`; an Operator
+// ignores `on_action` unless it opted into action subscription).
+// ---------------------------------------------------------------------------
+
+/// Robot-side session config. Same declarative surface as `OperatorConfig`;
+/// the role is pinned to `Role::Robot` internally.
+#[derive(uniffi::Object)]
+pub struct RobotConfig {
+    inner: Arc<PortalConfig>,
+}
+
+#[uniffi::export]
+impl RobotConfig {
+    #[uniffi::constructor]
+    pub fn new(session: String) -> Arc<Self> {
+        Arc::new(Self { inner: PortalConfig::new(session, Role::Robot) })
+    }
+
+    /// Build a `RobotConfig` from a YAML string. See
+    /// `PortalConfig::from_yaml_str` for the schema and semantics.
+    #[uniffi::constructor]
+    pub fn from_yaml_str(yaml: String, session: String) -> Result<Arc<Self>, ConfigFileError> {
+        Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Robot)? }))
+    }
+
+    pub fn add_video(
+        &self,
+        name: String,
+        codec: VideoCodec,
+        quality: u8,
+        max_bitrate_kbps: Option<u32>,
+    ) {
+        self.inner.add_video(name, codec, quality, max_bitrate_kbps);
+    }
+
+    pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_state_typed(schema);
+    }
+
+    pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_action_typed(schema);
+    }
+
+    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
+        self.inner.add_action_chunk(name, horizon, fields);
+    }
+
+    pub fn set_fps(&self, fps: u32) {
+        self.inner.set_fps(fps);
+    }
+
+    pub fn set_slack(&self, ticks: u32) {
+        self.inner.set_slack(ticks);
+    }
+
+    pub fn set_tolerance(&self, ticks: f32) {
+        self.inner.set_tolerance(ticks);
+    }
+
+    pub fn set_state_reliable(&self, reliable: bool) {
+        self.inner.set_state_reliable(reliable);
+    }
+
+    pub fn set_action_reliable(&self, reliable: bool) {
+        self.inner.set_action_reliable(reliable);
+    }
+
+    pub fn set_ping_ms(&self, ms: u64) {
+        self.inner.set_ping_ms(ms);
+    }
+
+    pub fn set_e2ee_key(&self, key: Vec<u8>) {
+        self.inner.set_e2ee_key(key);
+    }
+
+    pub fn set_reuse_stale_frames(&self, enable: bool) {
+        self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// No-op on the Robot side — the robot always processes actions. Kept on
+    /// the surface so `RobotConfig` and `OperatorConfig` stay symmetrical.
+    pub fn set_action_subscription(&self, enable: bool) {
+        self.inner.set_action_subscription(enable);
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    pub fn state_schema(&self) -> Vec<FieldSpec> {
+        self.inner.state_schema()
+    }
+
+    pub fn action_schema(&self) -> Vec<FieldSpec> {
+        self.inner.action_schema()
+    }
+
+    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
+        self.inner.action_chunks()
+    }
+}
+
+/// Operator-side session config. Same declarative surface as `RobotConfig`;
+/// the role is pinned to `Role::Operator` internally. Identity is set on the
+/// LiveKit access token at mint time and read back via
+/// `Operator::local_identity` after `connect()` — there is no config-level
+/// identity field.
+#[derive(uniffi::Object)]
+pub struct OperatorConfig {
+    inner: Arc<PortalConfig>,
+}
+
+#[uniffi::export]
+impl OperatorConfig {
+    #[uniffi::constructor]
+    pub fn new(session: String) -> Arc<Self> {
+        Arc::new(Self { inner: PortalConfig::new(session, Role::Operator) })
+    }
+
+    /// Build an `OperatorConfig` from a YAML string. See
+    /// `PortalConfig::from_yaml_str` for the schema and semantics.
+    #[uniffi::constructor]
+    pub fn from_yaml_str(yaml: String, session: String) -> Result<Arc<Self>, ConfigFileError> {
+        Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Operator)? }))
+    }
+
+    pub fn add_video(
+        &self,
+        name: String,
+        codec: VideoCodec,
+        quality: u8,
+        max_bitrate_kbps: Option<u32>,
+    ) {
+        self.inner.add_video(name, codec, quality, max_bitrate_kbps);
+    }
+
+    pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_state_typed(schema);
+    }
+
+    pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_action_typed(schema);
+    }
+
+    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
+        self.inner.add_action_chunk(name, horizon, fields);
+    }
+
+    pub fn set_fps(&self, fps: u32) {
+        self.inner.set_fps(fps);
+    }
+
+    pub fn set_slack(&self, ticks: u32) {
+        self.inner.set_slack(ticks);
+    }
+
+    pub fn set_tolerance(&self, ticks: f32) {
+        self.inner.set_tolerance(ticks);
+    }
+
+    pub fn set_state_reliable(&self, reliable: bool) {
+        self.inner.set_state_reliable(reliable);
+    }
+
+    pub fn set_action_reliable(&self, reliable: bool) {
+        self.inner.set_action_reliable(reliable);
+    }
+
+    pub fn set_ping_ms(&self, ms: u64) {
+        self.inner.set_ping_ms(ms);
+    }
+
+    pub fn set_e2ee_key(&self, key: Vec<u8>) {
+        self.inner.set_e2ee_key(key);
+    }
+
+    pub fn set_reuse_stale_frames(&self, enable: bool) {
+        self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// Operator-side opt-in to receiving executed actions ("HITL recording").
+    /// Off by default. See `PortalConfig::set_action_subscription` for full
+    /// semantics.
+    pub fn set_action_subscription(&self, enable: bool) {
+        self.inner.set_action_subscription(enable);
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    pub fn state_schema(&self) -> Vec<FieldSpec> {
+        self.inner.state_schema()
+    }
+
+    pub fn action_schema(&self) -> Vec<FieldSpec> {
+        self.inner.action_schema()
+    }
+
+    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
+        self.inner.action_chunks()
+    }
+}
+
+/// Robot-side Portal facade. Exposes publish-state/video, receive
+/// actions/chunks, and the shared control plane. Wrong-role methods
+/// (`send_action`, observation getters) are absent by construction.
+#[derive(uniffi::Object)]
+pub struct Robot {
+    inner: Arc<Portal>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Robot {
+    #[uniffi::constructor]
+    pub fn new(config: Arc<RobotConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
+        Arc::new(Self { inner: Portal::new(config.inner.clone(), callbacks) })
+    }
+
+    pub async fn connect(&self, url: String, token: String) -> PortalResult<()> {
+        self.inner.connect(url, token).await
+    }
+
+    pub async fn disconnect(&self) -> PortalResult<()> {
+        self.inner.disconnect().await
+    }
+
+    // -- publish (robot-side) ------------------------------------------------
+
+    pub fn send_video_frame(
+        &self,
+        track_name: String,
+        rgb_data: Vec<u8>,
+        width: u32,
+        height: u32,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_video_frame(track_name, rgb_data, width, height, timestamp_us)
+    }
+
+    pub fn send_state(
+        &self,
+        values: HashMap<String, f64>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_state(values, timestamp_us)
+    }
+
+    // -- receive (robot-side) ------------------------------------------------
+
+    pub fn get_action(&self) -> Option<Action> {
+        self.inner.get_action()
+    }
+
+    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
+        self.inner.get_action_chunk(chunk_name)
+    }
+
+    // -- introspection (shared) ----------------------------------------------
+
+    pub fn state_fields(&self) -> Vec<String> {
+        self.inner.state_fields()
+    }
+
+    pub fn action_fields(&self) -> Vec<String> {
+        self.inner.action_fields()
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
+        self.inner.action_chunks()
+    }
+
+    // -- multi-controller + rpc + metrics (shared) ---------------------------
+
+    pub fn local_identity(&self) -> Option<String> {
+        self.inner.local_identity()
+    }
+
+    pub fn active_operator(&self) -> Option<String> {
+        self.inner.active_operator()
+    }
+
+    pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
+        self.inner.set_active_operator(identity).await
+    }
+
+    pub fn operators(&self) -> Vec<String> {
+        self.inner.operators()
+    }
+
+    pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
+        self.inner.register_rpc_method(method, handler);
+    }
+
+    pub fn unregister_rpc_method(&self, method: String) {
+        self.inner.unregister_rpc_method(method);
+    }
+
+    pub async fn perform_rpc(
+        &self,
+        destination: Option<String>,
+        method: String,
+        payload: String,
+        response_timeout_ms: Option<u64>,
+    ) -> PortalResult<String> {
+        self.inner.perform_rpc(destination, method, payload, response_timeout_ms).await
+    }
+
+    pub fn metrics(&self) -> PortalMetrics {
+        self.inner.metrics()
+    }
+
+    pub fn reset_metrics(&self) {
+        self.inner.reset_metrics();
+    }
+}
+
+/// Operator-side Portal facade. Exposes publish-action/chunk, receive
+/// observations/state/video, and the shared control plane. Wrong-role methods
+/// (`send_state`, `send_video_frame`) are absent by construction. The
+/// action-subscription getters (`get_action` / `get_action_chunk`) are
+/// present but only yield values when `OperatorConfig::set_action_subscription`
+/// was enabled.
+#[derive(uniffi::Object)]
+pub struct Operator {
+    inner: Arc<Portal>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Operator {
+    #[uniffi::constructor]
+    pub fn new(config: Arc<OperatorConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
+        Arc::new(Self { inner: Portal::new(config.inner.clone(), callbacks) })
+    }
+
+    pub async fn connect(&self, url: String, token: String) -> PortalResult<()> {
+        self.inner.connect(url, token).await
+    }
+
+    pub async fn disconnect(&self) -> PortalResult<()> {
+        self.inner.disconnect().await
+    }
+
+    // -- publish (operator-side) ---------------------------------------------
+
+    pub fn send_action(
+        &self,
+        values: HashMap<String, f64>,
+        timestamp_us: Option<u64>,
+        in_reply_to_ts_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_action(values, timestamp_us, in_reply_to_ts_us)
+    }
+
+    pub fn send_action_chunk(
+        &self,
+        chunk_name: String,
+        data: HashMap<String, Vec<f64>>,
+        timestamp_us: Option<u64>,
+        in_reply_to_ts_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_action_chunk(chunk_name, data, timestamp_us, in_reply_to_ts_us)
+    }
+
+    // -- receive (operator-side) ---------------------------------------------
+
+    pub fn get_state(&self) -> Option<State> {
+        self.inner.get_state()
+    }
+
+    pub fn get_observation(&self) -> Option<Observation> {
+        self.inner.get_observation()
+    }
+
+    pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {
+        self.inner.get_video_frame(track_name)
+    }
+
+    /// Latest executed action, or `None`. Requires
+    /// `OperatorConfig::set_action_subscription(true)` for any value to land.
+    pub fn get_action(&self) -> Option<Action> {
+        self.inner.get_action()
+    }
+
+    /// Latest executed chunk for `chunk_name`, or `None`. Requires
+    /// `OperatorConfig::set_action_subscription(true)`.
+    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
+        self.inner.get_action_chunk(chunk_name)
+    }
+
+    // -- introspection (shared) ----------------------------------------------
+
+    pub fn state_fields(&self) -> Vec<String> {
+        self.inner.state_fields()
+    }
+
+    pub fn action_fields(&self) -> Vec<String> {
+        self.inner.action_fields()
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
+        self.inner.action_chunks()
+    }
+
+    // -- multi-controller + rpc + metrics (shared) ---------------------------
+
+    pub fn local_identity(&self) -> Option<String> {
+        self.inner.local_identity()
+    }
+
+    pub fn active_operator(&self) -> Option<String> {
+        self.inner.active_operator()
+    }
+
+    pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
+        self.inner.set_active_operator(identity).await
+    }
+
+    pub fn operators(&self) -> Vec<String> {
+        self.inner.operators()
+    }
+
+    pub fn robot_identity(&self) -> Option<String> {
+        self.inner.robot_identity()
+    }
+
+    pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
+        self.inner.register_rpc_method(method, handler);
+    }
+
+    pub fn unregister_rpc_method(&self, method: String) {
+        self.inner.unregister_rpc_method(method);
+    }
+
+    pub async fn perform_rpc(
+        &self,
+        destination: Option<String>,
+        method: String,
+        payload: String,
+        response_timeout_ms: Option<u64>,
+    ) -> PortalResult<String> {
+        self.inner.perform_rpc(destination, method, payload, response_timeout_ms).await
+    }
+
+    pub fn metrics(&self) -> PortalMetrics {
+        self.inner.metrics()
+    }
+
+    pub fn reset_metrics(&self) {
+        self.inner.reset_metrics();
     }
 }
 

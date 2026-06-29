@@ -24,6 +24,7 @@ questions come up.
 | 9 | [Synchronization](09-synchronization.md) | Deep dive on the match algorithm, cursors, and complexity. |
 | 10 | [lerobot integration](10-lerobot.md) | Optional plugins that wrap the Portal API for lerobot users. |
 | 11 | [Logging](11-logging.md) | `RUST_LOG`, the reference tags on every warning, and the cause and fix for each. |
+| 12 | [Wire protocol](12-wire-protocol.md) | Topics, attributes, RPC, and binary layouts for building a Portal peer in an SDK with no plugin. |
 
 ## How to navigate
 
@@ -43,6 +44,9 @@ questions come up.
   API.
 - **Seeing warnings in the logs?** Every warning carries a reference tag.
   [Logging](11-logging.md) maps each tag to its cause and fix.
+- **Interfacing with Portal using another SDK?**
+  [Wire protocol](12-wire-protocol.md) is the implementer-facing contract:
+  topic names, participant attributes, RPC, and every binary layout.
 
 ## Conventions
 

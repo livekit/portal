@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -13,6 +14,7 @@ use livekit::webrtc::video_frame::FrameMetadata;
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::codec::Codec;
@@ -158,8 +160,91 @@ impl VideoTrackSlots {
     }
 }
 
+/// Frames buffered between the drain task and the processing task. At 60fps
+/// this is ~130ms of slack, enough to ride out bursts and brief callback
+/// stalls before the oldest queued frames start being dropped. Kept small so
+/// a sustained slow consumer sheds load promptly instead of ballooning
+/// memory or delivery latency.
+const RECV_CHANNEL_CAPACITY: usize = 8;
+
+/// Minimum gap between `[recv-overflow]` warnings so a sustained stall logs
+/// periodically instead of once per dropped frame.
+const RECV_DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Bounded, latest-biased handoff between the stream-drain task and the
+/// processing task.
+///
+/// The drain task must never block on downstream work (user callbacks, sync,
+/// dispatch). If it does, libwebrtc's native receive queue backs up and
+/// overflows, dropping thousands of frames in bulk (the "native video stream
+/// queue overflow" warning). So the drain converts each frame and pushes it
+/// here without blocking; when the processing task falls behind and the ring
+/// is at capacity, the *oldest* queued frame is dropped so the freshest
+/// frames keep flowing.
+struct FrameChannel {
+    inner: Mutex<FrameChannelState>,
+    notify: Notify,
+    capacity: usize,
+}
+
+struct FrameChannelState {
+    queue: VecDeque<Arc<VideoFrameData>>,
+    closed: bool,
+}
+
+impl FrameChannel {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(FrameChannelState { queue: VecDeque::new(), closed: false }),
+            notify: Notify::new(),
+            capacity,
+        }
+    }
+
+    /// Enqueue a frame, dropping the oldest if the ring is full. Returns
+    /// `true` when a frame was dropped to make room. Never blocks.
+    fn push(&self, frame: Arc<VideoFrameData>) -> bool {
+        let dropped = {
+            let mut st = self.inner.lock();
+            let dropped = st.queue.len() >= self.capacity && st.queue.pop_front().is_some();
+            st.queue.push_back(frame);
+            dropped
+        };
+        self.notify.notify_one();
+        dropped
+    }
+
+    /// Signal that no more frames will arrive. Wakes a parked consumer so it
+    /// can drain the remainder and exit.
+    fn close(&self) {
+        self.inner.lock().closed = true;
+        self.notify.notify_one();
+    }
+
+    /// Await the next frame, or `None` once the channel is closed and drained.
+    async fn recv(&self) -> Option<Arc<VideoFrameData>> {
+        loop {
+            // Register interest before checking the queue so a `push` racing
+            // between the check and the await can't be missed (a permit
+            // stored by `notify_one` satisfies the pending `notified`).
+            let notified = self.notify.notified();
+            {
+                let mut st = self.inner.lock();
+                if let Some(frame) = st.queue.pop_front() {
+                    return Some(frame);
+                }
+                if st.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
 pub(crate) struct VideoReceiver {
-    task_handle: JoinHandle<()>,
+    drain_handle: JoinHandle<()>,
+    process_handle: JoinHandle<()>,
 }
 
 impl VideoReceiver {
@@ -171,8 +256,21 @@ impl VideoReceiver {
         obs_sink: Arc<ObservationSink>,
         metrics: Arc<TrackMetrics>,
     ) -> Self {
-        let handle = tokio::spawn(async move {
+        let channel = Arc::new(FrameChannel::new(RECV_CHANNEL_CAPACITY));
+
+        // Drain task: pull decoded frames off the native stream as fast as
+        // they arrive and hand them to the processing task. This task does
+        // the bare minimum and never touches user callbacks, sync, or
+        // dispatch — any stall here lets libwebrtc's native receive queue
+        // overflow and drop frames in bulk. Its only per-frame cost is
+        // bounded CPU: colour-convert plus a latest-wins slot update.
+        let drain_channel = channel.clone();
+        let drain_slots = slots.clone();
+        let drain_name = name.clone();
+        let drain_handle = tokio::spawn(async move {
             let mut stream = stream;
+            let mut dropped_total: u64 = 0;
+            let mut last_warn: Option<Instant> = None;
             while let Some(frame) = stream.next().await {
                 // Hard requirement: every frame must carry a user_timestamp.
                 // Portal-published tracks set this automatically; subscribed
@@ -187,10 +285,43 @@ impl VideoReceiver {
 
                 metrics.record_received(timestamp_us, now_us());
 
+                // Freshest-frame slot for `get_video_frame`. Updated on the
+                // drain so polling consumers see the newest frame even when
+                // per-frame callbacks fall behind. Clone is cheap — pixel
+                // buffer is `Bytes`.
+                *drain_slots.latest.lock() = Some((*frame_arc).clone());
+
+                if drain_channel.push(frame_arc) {
+                    dropped_total += 1;
+                    let now = Instant::now();
+                    let should_warn =
+                        last_warn.is_none_or(|t| now.duration_since(t) >= RECV_DROP_WARN_INTERVAL);
+                    if should_warn {
+                        log::warn!(
+                            "[recv-overflow] '{drain_name}' frame processing is behind; dropped \
+                             {dropped_total} frame(s) so far to keep the receive loop \
+                             draining. A slow on-frame or on-observation callback is the \
+                             usual cause."
+                        );
+                        last_warn = Some(now);
+                    }
+                }
+            }
+            // Stream ended (track unsubscribed / room closed). Let the
+            // processing task drain what's left and exit on its own.
+            drain_channel.close();
+        });
+
+        // Processing task: everything that can block on user code or contend
+        // for shared locks — the per-frame callback, sync-buffer push, and
+        // observation dispatch. Falling behind here drops frames at the
+        // channel instead of stalling the drain.
+        let process_handle = tokio::spawn(async move {
+            while let Some(frame_arc) = channel.recv().await {
                 if let Some(cb) = slots.cb.lock().as_ref() {
-                    // User callback runs on this tokio worker; a panic
-                    // would abort the receive task and silently stop
-                    // delivering frames. Catch and log.
+                    // User callback runs on this tokio worker; a panic would
+                    // abort the task and silently stop delivering frames.
+                    // Catch and log.
                     let result = catch_unwind(AssertUnwindSafe(|| cb(&name, &frame_arc)));
                     if result.is_err() {
                         log::error!(
@@ -198,19 +329,19 @@ impl VideoReceiver {
                         );
                     }
                 }
-                // VideoFrameData clone is cheap — pixel buffer is `Bytes`.
-                *slots.latest.lock() = Some((*frame_arc).clone());
                 let output = sync_buffer.lock().push_frame(&name, frame_arc);
                 if !output.is_empty() {
                     obs_sink.dispatch(output);
                 }
             }
         });
-        Self { task_handle: handle }
+
+        Self { drain_handle, process_handle }
     }
 
     pub fn abort(&self) {
-        self.task_handle.abort();
+        self.drain_handle.abort();
+        self.process_handle.abort();
     }
 }
 
@@ -287,4 +418,74 @@ fn rgb_to_i420(src: &[u8], width: u32, height: u32, buffer: &mut I420Buffer) {
 
 pub(crate) fn now_us() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(ts: u64) -> Arc<VideoFrameData> {
+        Arc::new(VideoFrameData {
+            width: 2,
+            height: 2,
+            data: Bytes::from_static(&[0u8; 12]),
+            timestamp_us: ts,
+        })
+    }
+
+    /// Frames flow through in FIFO order when the consumer keeps up.
+    #[tokio::test]
+    async fn channel_fifo_order() {
+        let ch = FrameChannel::new(4);
+        assert!(!ch.push(frame(1)));
+        assert!(!ch.push(frame(2)));
+        assert_eq!(ch.recv().await.unwrap().timestamp_us, 1);
+        assert_eq!(ch.recv().await.unwrap().timestamp_us, 2);
+    }
+
+    /// At capacity, `push` drops the oldest frame and reports it, keeping the
+    /// freshest `capacity` frames.
+    #[tokio::test]
+    async fn channel_drops_oldest_when_full() {
+        let ch = FrameChannel::new(2);
+        assert!(!ch.push(frame(1)));
+        assert!(!ch.push(frame(2)));
+        // Ring full; this evicts frame(1).
+        assert!(ch.push(frame(3)));
+        // Survivors are the two freshest, oldest-first.
+        assert_eq!(ch.recv().await.unwrap().timestamp_us, 2);
+        assert_eq!(ch.recv().await.unwrap().timestamp_us, 3);
+    }
+
+    /// After close, a consumer drains what remains and then gets `None`.
+    #[tokio::test]
+    async fn channel_close_drains_then_ends() {
+        let ch = FrameChannel::new(4);
+        ch.push(frame(1));
+        ch.close();
+        assert_eq!(ch.recv().await.unwrap().timestamp_us, 1);
+        assert!(ch.recv().await.is_none());
+    }
+
+    /// A consumer parked on an empty channel wakes when a frame is pushed
+    /// from another task.
+    #[tokio::test]
+    async fn channel_recv_wakes_on_push() {
+        let ch = Arc::new(FrameChannel::new(4));
+        let producer = ch.clone();
+        let handle = tokio::spawn(async move { producer.push(frame(42)) });
+        assert_eq!(ch.recv().await.unwrap().timestamp_us, 42);
+        handle.await.unwrap();
+    }
+
+    /// A consumer parked on an empty channel wakes and ends when the channel
+    /// is closed with nothing queued.
+    #[tokio::test]
+    async fn channel_recv_wakes_on_close() {
+        let ch = Arc::new(FrameChannel::new(4));
+        let closer = ch.clone();
+        let handle = tokio::spawn(async move { closer.close() });
+        assert!(ch.recv().await.is_none());
+        handle.await.unwrap();
+    }
 }

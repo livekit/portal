@@ -301,6 +301,15 @@ pub struct Portal {
     // attribute-change and participant-connect events can update operators,
     // robot_identity, and active_operator without taking a Portal-level lock.
     controller: Arc<ControllerState>,
+
+    // Handle to the tokio runtime `connect()` ran on. Captured because
+    // `register_rpc_method` can be called from a foreign thread with no
+    // runtime context (e.g. a binding's asyncio loop); registering an RPC
+    // method on a live LocalParticipant triggers publisher negotiation,
+    // which `tokio::spawn`s and would otherwise panic with "no reactor
+    // running". We enter this handle around that call. `None` before the
+    // first connect.
+    runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
 }
 
 impl Portal {
@@ -379,11 +388,15 @@ impl Portal {
             rpc_handlers: Arc::new(Mutex::new(HashMap::new())),
             local_participant: Arc::new(Mutex::new(None)),
             controller: Arc::new(ControllerState::new()),
+            runtime_handle: Mutex::new(None),
         }
     }
 
     pub async fn connect(&self, url: &str, token: &str) -> PortalResult<()> {
         let _lifecycle = self.lifecycle.lock().await;
+        // Capture the runtime we're running on so `register_rpc_method` can
+        // enter it when called later from a non-runtime (foreign) thread.
+        *self.runtime_handle.lock() = Some(tokio::runtime::Handle::current());
         if self.conn.lock().room.is_some() {
             return Err(PortalError::AlreadyConnected);
         }
@@ -852,7 +865,20 @@ impl Portal {
             map.insert(method.to_string(), handler.clone());
         }
         if let Some(lp) = self.local_participant.lock().clone() {
-            register_handler_on(&lp, method.to_string(), handler);
+            // The SDK's `register_rpc_method` kicks off publisher negotiation,
+            // which `tokio::spawn`s internally. If we were called from a
+            // foreign thread with no runtime context (a binding's asyncio
+            // loop), that spawn panics. Enter the runtime `connect()` ran on
+            // so the spawn lands on it. The handle is always present here
+            // (an LP exists only after a successful connect set it), but fall
+            // back to a bare call rather than panicking if it somehow isn't.
+            match self.runtime_handle.lock().clone() {
+                Some(handle) => {
+                    let _guard = handle.enter();
+                    register_handler_on(&lp, method.to_string(), handler);
+                }
+                None => register_handler_on(&lp, method.to_string(), handler),
+            }
         }
     }
 

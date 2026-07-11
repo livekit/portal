@@ -41,36 +41,6 @@ def config_path() -> pathlib.Path:
     return here if here.exists() else pathlib.Path("/root/portal.yaml")
 
 
-# --- Modal --------------------------------------------------------------------
-# A Portal operator only dials out to LiveKit, so it drops straight onto Modal.
-# livekit-portal ships on PyPI, so the image is a plain pip install. The two apt
-# packages are OpenCV's shared libs. This mock is CPU-only; for a real model add
-# gpu="A10G" here and pip-install your stack.
-app = modal.App("portal-modal-mock")
-image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("libgl1", "libglib2.0-0")
-    .pip_install(
-        "livekit-portal", "livekit-api>=0.7",
-        "numpy>=1.24", "opencv-python-headless>=4.9",
-    )
-    .add_local_python_source("policy")
-    .add_local_file(str(pathlib.Path(__file__).parent / "portal.yaml"), "/root/portal.yaml")
-)
-
-
-@app.function(image=image, secrets=[modal.Secret.from_name("livekit-credentials")], timeout=3600)
-def run_on_modal():
-    asyncio.run(main())
-
-
-@app.local_entrypoint()
-def modal_entry():
-    run_on_modal.remote()
-
-
-# --- Policy -------------------------------------------------------------------
-
 def connect(identity: str):
     """Mint a room token from the LiveKit creds in the environment.
 
@@ -137,7 +107,7 @@ async def main() -> None:
             misses += 1
             return
         arrived = state_arrival.pop(int(action["seq"]), None)
-        lag_us = int((time.monotonic() - arrived) * 1_000_000) if arrived else 0
+        lag_us = int((time.monotonic() - arrived) * 1_000_000) if arrived is not None else 0
         action["codec_lag_us"] = float(lag_us)
         # in_reply_to_ts_us feeds Portal's built-in e2e metric the QR capture
         # time, which turns that metric into a glass-to-glass number.
@@ -165,6 +135,34 @@ async def main() -> None:
         print(f"[policy] decoded {hits} frames, disconnecting...")
         await op.disconnect()
         op.close()
+
+
+# --- Deploy to Modal ----------------------------------------------------------
+# A Portal operator only dials out to LiveKit, so it drops straight onto Modal.
+# livekit-portal ships on PyPI, so the image is a plain pip install. The two apt
+# packages are OpenCV's shared libs. This mock is CPU-only; for a real model add
+# gpu="A10G" here and pip-install your stack.
+app = modal.App("portal-modal-mock")
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("libgl1", "libglib2.0-0")
+    .pip_install(
+        "livekit-portal", "livekit-api>=0.7",
+        "numpy>=1.24", "opencv-python-headless>=4.9",
+    )
+    .add_local_python_source("policy")
+    .add_local_file(str(pathlib.Path(__file__).parent / "portal.yaml"), "/root/portal.yaml")
+)
+
+
+@app.function(image=image, secrets=[modal.Secret.from_name("livekit-credentials")], timeout=3600)
+def run_on_modal():
+    asyncio.run(main())
+
+
+@app.local_entrypoint()
+def modal_entry():
+    run_on_modal.remote()
 
 
 if __name__ == "__main__":

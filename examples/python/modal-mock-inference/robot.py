@@ -146,6 +146,10 @@ async def main() -> None:
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
 
+        # Let the last in-flight replies land before the final tally, or they
+        # would look like dropped frames.
+        await asyncio.sleep(1.0)
+
         m = robot.metrics()
         print()
         print("[robot] final:")

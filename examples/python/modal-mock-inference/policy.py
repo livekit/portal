@@ -119,10 +119,15 @@ async def main() -> None:
 
     print(f"[policy] connecting to {url} in room '{ROOM}' ...")
     await op.connect(url, token)
+    print("[policy] connected, waiting for the robot to join ...")
 
-    # Claim control, or the robot's gate drops our actions.
+    # Claim control, or the robot's gate drops our actions. set_active_operator
+    # RPCs the robot, so the robot must already be in the room. On Modal the
+    # policy usually starts first, so wait for the robot to appear.
+    while op.robot_identity() is None:
+        await asyncio.sleep(0.2)
     await op.set_active_operator(op.local_identity())
-    print(f"[policy] connected and controlling as '{op.local_identity()}'")
+    print(f"[policy] robot '{op.robot_identity()}' joined, controlling as '{op.local_identity()}'")
 
     stop_at = time.monotonic() + DURATION_S + 5.0   # outlast the robot a little
     try:

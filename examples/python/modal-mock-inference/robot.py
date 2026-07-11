@@ -113,7 +113,14 @@ async def main() -> None:
 
     print(f"[robot] connecting to {url} in room '{ROOM}' ...")
     await robot.connect(url, token)
-    print(f"[robot] connected, streaming {WIDTH}x{HEIGHT} H264 at {FPS} fps for {DURATION_S}s")
+
+    # Wait for a policy to take control before streaming, so we do not stream
+    # into an empty room and count those early frames as dropped.
+    print("[robot] connected, waiting for a policy to take control ...")
+    while robot.active_operator() is None:
+        await asyncio.sleep(0.2)
+    print(f"[robot] '{robot.active_operator()}' in control, streaming "
+          f"{WIDTH}x{HEIGHT} H264 at {FPS} fps for {DURATION_S}s")
 
     interval = 1.0 / FPS
     start = time.monotonic()

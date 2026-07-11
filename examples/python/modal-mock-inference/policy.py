@@ -22,6 +22,7 @@ import datetime
 import os
 import pathlib
 import time
+from collections import deque
 from typing import Optional
 
 import modal
@@ -90,29 +91,31 @@ async def main() -> None:
     policy = Policy()
     hits = misses = 0
 
-    # When each raw state packet arrived, by seq, on our own clock. Portal pairs
-    # a frame and a state by the capture time the robot stamped, so the video's
-    # extra delay never shows up as a timestamp. Instead the fused observation
-    # fires later than the state, once the matching frame lands. obs-fire minus
-    # state-arrival is that extra video delay, one way.
+    # When each raw state packet arrived, by seq, on our own clock.
     state_arrival: dict[int, float] = {}
+
+    # Only ever hold the freshest observations. If decoding cannot keep up with
+    # the frame rate, we drop the backlog and act on the newest frame instead of
+    # working through stale ones. Acting on a stale observation is what would
+    # defeat the point of Portal, and it shows up as latency that climbs far
+    # above the network round trip.
+    latest: deque = deque(maxlen=2)
+    got_obs = asyncio.Event()
 
     def on_state(state: State) -> None:
         state_arrival[int(state.values["seq"])] = time.monotonic()
 
     def on_observation(obs: Observation) -> None:
-        nonlocal hits, misses
-        action = policy.get_action(obs)   # QR decode is fast, so run it inline
-        if action is None:
-            misses += 1
-            return
-        arrived = state_arrival.pop(int(action["seq"]), None)
+        # Measure codec lag here, at arrival, so a decode backlog cannot distort
+        # it. Portal pairs the frame and state on the capture time the robot
+        # stamped, so the video's extra delay is not a timestamp gap. It is the
+        # observation firing later than the state, once the frame lands. That gap
+        # (obs arrival minus state arrival) is the one-way video-over-data cost.
+        seq = int(obs.state["seq"])
+        arrived = state_arrival.pop(seq, None)
         lag_us = int((time.monotonic() - arrived) * 1_000_000) if arrived is not None else 0
-        action["codec_lag_us"] = float(lag_us)
-        # in_reply_to_ts_us feeds Portal's built-in e2e metric the QR capture
-        # time, which turns that metric into a glass-to-glass number.
-        op.send_action(action, in_reply_to_ts_us=int(action["t_capture_us"]))
-        hits += 1
+        latest.append((obs, lag_us))
+        got_obs.set()
 
     op.on_state(on_state)
     op.on_observation(on_observation)
@@ -130,12 +133,34 @@ async def main() -> None:
     print(f"[policy] robot '{op.robot_identity()}' joined, controlling as '{op.local_identity()}'")
 
     stop_at = time.monotonic() + DURATION_S + 5.0   # outlast the robot a little
+    last_log = time.monotonic()
     try:
         while time.monotonic() < stop_at:
-            await asyncio.sleep(1.0)
-            total = hits + misses
-            rate = (hits / total * 100.0) if total else 0.0
-            print(f"[policy] decoded={hits} missed={misses} decode_rate={rate:.0f}%")
+            try:
+                await asyncio.wait_for(got_obs.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            got_obs.clear()
+
+            if latest:
+                obs, lag_us = latest[-1]   # freshest; any older frames are skipped
+                latest.clear()
+                action = policy.get_action(obs)
+                if action is None:
+                    misses += 1
+                else:
+                    action["codec_lag_us"] = float(lag_us)
+                    # in_reply_to_ts_us feeds Portal's built-in e2e metric the QR
+                    # capture time, making that metric a glass-to-glass number.
+                    op.send_action(action, in_reply_to_ts_us=int(action["t_capture_us"]))
+                    hits += 1
+
+            now = time.monotonic()
+            if now - last_log >= 1.0:
+                total = hits + misses
+                rate = (hits / total * 100.0) if total else 0.0
+                print(f"[policy] decoded={hits} missed={misses} decode_rate={rate:.0f}%")
+                last_log = now
     finally:
         print(f"[policy] decoded {hits} frames, disconnecting...")
         await op.disconnect()

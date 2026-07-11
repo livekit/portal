@@ -131,8 +131,11 @@ What each field means:
 - **`sent`** frames the robot has published.
 - **`replies`** decoded tokens that came back from the policy.
 - **`dropped`** frames that never made the round trip. A `seq` gap means the
-  frame was lost in the video pipe or its QR was too degraded to read. This is
-  real frame loss the video layer normally hides.
+  frame was lost in the video pipe, its QR was too degraded to read, or the
+  policy skipped it. The policy keeps only the freshest observation (a small
+  `deque`), so if decoding cannot keep up it drops the backlog and acts on the
+  newest frame. That keeps latency near the network round trip instead of
+  letting a queue build, which is the whole point of running a policy on Portal.
 - **`glass2glass`** the full video round trip, `now - capture_us`. This is the
   headline number.
 - **`codec_lag`** how much later the camera frame arrived than the joint state

@@ -73,8 +73,13 @@ def modal_entry():
 # --- Policy -------------------------------------------------------------------
 
 def connect(identity: str):
-    """Read creds from .env (or the Modal secret) and mint a room token."""
-    load_dotenv(pathlib.Path(__file__).parent / ".env")   # no-op if the file is absent
+    """Mint a room token from the LiveKit creds in the environment.
+
+    Locally those come from .env. On Modal there is no .env (only policy.py and
+    portal.yaml are shipped), so this load_dotenv is a no-op and the creds come
+    from the Modal secret, which sets them as real environment variables.
+    """
+    load_dotenv(pathlib.Path(__file__).parent / ".env")
     grants = api.VideoGrants(
         room_join=True, room=ROOM, can_publish=True,
         can_subscribe=True, can_update_own_metadata=True,

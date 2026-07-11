@@ -9,6 +9,18 @@ The policy is a mock. It reads a QR code instead of running a real model, so the
 tutorial stays focused on how to run a policy on Modal. When you have a real
 policy, it drops straight in (see [step 6](#step-6-swap-in-a-real-policy)).
 
+> **This is a demo, read the numbers with that in mind.** Two things are not
+> production-grade on purpose:
+> - **QR over H264.** H264 is lossy, so it can blur the QR and some frames fail
+>   to decode and show up as `dropped`. Pushing a QR through a lossy video codec
+>   is a fun way to see the pipeline, not a robust data channel. If you need data
+>   to arrive pixel-exact, use a byte-stream codec (`codec: png` or `mjpeg` in
+>   `portal.yaml`).
+> - **Latency is mostly distance.** The loop crosses the network twice
+>   (robot to policy and back), so a robot and a policy in different regions is
+>   inherently a few hundred ms. The `rtt` field is the pure network round trip
+>   for comparison. For low latency, run the policy near the robot.
+
 ## The idea in one picture
 
 ```mermaid

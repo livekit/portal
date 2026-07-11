@@ -52,13 +52,8 @@ def connect(identity: str):
 
 
 def make_frame(seq: int, capture_us: int) -> np.ndarray:
-    """A static grey frame with a QR code of `p1:seq,capture_us` in the middle.
-
-    The background is static on purpose, so only the QR region changes each
-    frame and H264 has almost nothing to encode. A pattern that changes every
-    pixel every frame would balloon the bitrate and add latency, and it is not
-    how a real camera feed behaves anyway.
-    """
+    """A grey frame with a QR code of `p1:seq,capture_us` in the middle. The
+    grey drifts a little so the stream looks alive."""
     import qrcode
     from PIL import Image
 
@@ -69,7 +64,7 @@ def make_frame(seq: int, capture_us: int) -> np.ndarray:
     px = min(WIDTH, HEIGHT) // 2
     code = np.asarray(img.resize((px, px), Image.NEAREST), dtype=np.uint8)
 
-    frame = np.full((HEIGHT, WIDTH, 3), 110, dtype=np.uint8)   # static background
+    frame = np.full((HEIGHT, WIDTH, 3), 100 + seq % 40, dtype=np.uint8)
     top, left = (HEIGHT - px) // 2, (WIDTH - px) // 2
     frame[top:top + px, left:left + px] = code
     return frame

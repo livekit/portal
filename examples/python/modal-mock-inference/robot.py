@@ -144,7 +144,7 @@ async def main() -> None:
                     f"replies={stats.replies} dropped={stats.dropped} "
                     f"glass2glass={fmt_us(stats.glass_us)} codec_lag={fmt_us(stats.codec_us)} "
                     f"e2e={fmt_us(m.policy.e2e_us_p50)}/{fmt_us(m.policy.e2e_us_p95)} "
-                    f"active={robot.active_operator()}"
+                    f"rtt={fmt_us(m.rtt.rtt_us_last)} active={robot.active_operator()}"
                 )
                 last_log = now
 
@@ -161,6 +161,7 @@ async def main() -> None:
         print()
         print("[robot] final:")
         print(f"  glass-to-glass p50/p95: {fmt_us(m.policy.e2e_us_p50)} / {fmt_us(m.policy.e2e_us_p95)}")
+        print(f"  network rtt (last):     {fmt_us(m.rtt.rtt_us_last)}")
         print(f"  codec lag (last):       {fmt_us(stats.codec_us)}")
         print(f"  frames sent:            {DURATION_S * FPS}")
         print(f"  replies / dropped:      {stats.replies} / {stats.dropped}")

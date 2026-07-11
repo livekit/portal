@@ -1,0 +1,18 @@
+# Wire contract shared by robot.py and policy.py, loaded with
+# RobotConfig.from_yaml_file / OperatorConfig.from_yaml_file. It holds only the
+# shareable schema, no identity or secrets: the room and token are set in code.
+
+version: 1
+
+fps: 15
+
+videos:
+  - { name: cam1, codec: h264 }   # the real WebRTC video path
+
+state:
+  - { name: seq, dtype: f64 }
+
+action:
+  - { name: seq, dtype: f64 }
+  - { name: t_capture_us, dtype: f64 }   # capture time, carried through the QR
+  - { name: codec_lag_us, dtype: f64 }   # how much later video arrived than state

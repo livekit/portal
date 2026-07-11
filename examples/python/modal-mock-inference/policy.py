@@ -25,7 +25,6 @@ import time
 from typing import Optional
 
 import modal
-from dotenv import load_dotenv
 from livekit import api
 from livekit.portal import (
     Observation, Operator, OperatorConfig, State, frame_bytes_to_numpy_rgb,
@@ -52,7 +51,7 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("libgl1", "libglib2.0-0")
     .pip_install(
-        "livekit-portal", "livekit-api>=0.7", "python-dotenv>=1",
+        "livekit-portal", "livekit-api>=0.7",
         "numpy>=1.24", "opencv-python-headless>=4.9",
     )
     .add_local_python_source("policy")
@@ -75,11 +74,9 @@ def modal_entry():
 def connect(identity: str):
     """Mint a room token from the LiveKit creds in the environment.
 
-    Locally those come from .env. On Modal there is no .env (only policy.py and
-    portal.yaml are shipped), so this load_dotenv is a no-op and the creds come
-    from the Modal secret, which sets them as real environment variables.
+    On Modal the secret sets LIVEKIT_URL / KEY / SECRET as env vars. For a
+    local run, export them first (for example: `set -a; . .env; set +a`).
     """
-    load_dotenv(pathlib.Path(__file__).parent / ".env")
     grants = api.VideoGrants(
         room_join=True, room=ROOM, can_publish=True,
         can_subscribe=True, can_update_own_metadata=True,

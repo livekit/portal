@@ -1,0 +1,21 @@
+[project]
+name = "livekit-portal-modal-mock-inference-example"
+version = "0.1.0"
+description = "Run a Portal operator on Modal: a robot streams synthetic QR video, a cloud policy decodes it and closes a glass-to-glass latency loop"
+requires-python = ">=3.12"
+dependencies = [
+    "livekit-portal",
+    "livekit-api>=0.7",
+    "python-dotenv>=1",
+    "numpy>=1.24",
+    # robot: render QR codes into frames
+    "qrcode>=7",
+    "pillow>=10",
+    # policy: decode QR codes out of frames
+    "opencv-python-headless>=4.9",
+    # deploy: run the policy on Modal
+    "modal>=0.64",
+]
+
+[tool.uv.sources]
+livekit-portal = { path = "../../../python/packages/livekit-portal", editable = true }

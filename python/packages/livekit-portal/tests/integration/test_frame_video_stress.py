@@ -89,13 +89,16 @@ async def test_4k_frame_roundtrip(pair, codec):
 
     t0 = time.perf_counter()
     pair.robot.send_video_frame("cam", sent)
-    # Generous settle — 25 MB has to traverse the SFU and decode locally.
-    await asyncio.sleep(SETTLE_S + 4.0)
+    # 25 MB raw can take several seconds to traverse the SFU and decode.
+    # Poll up to a generous ceiling rather than race a fixed settle window,
+    # which flakes under load (issue #60).
+    from integration.conftest import wait_for
+
+    timeout_s = 30.0
+    ok = await wait_for(lambda: len(received) == 1, timeout_s=timeout_s)
     elapsed = time.perf_counter() - t0
 
-    assert len(received) == 1, (
-        f"4K {codec} not received within {SETTLE_S + 4.0}s; got {len(received)}"
-    )
+    assert ok, f"4K {codec} not received within {timeout_s}s; got {len(received)}"
     got = received[0]
     assert (got.width, got.height) == (3840, 2160)
     arr = frame_bytes_to_numpy_rgb(bytes(got.data), got.width, got.height)

@@ -49,6 +49,31 @@ collect_ignore = (
 )
 
 
+async def wait_for(
+    predicate,
+    timeout_s: float = 15.0,
+    interval_s: float = 0.05,
+) -> bool:
+    """Poll `predicate` until it returns truthy or `timeout_s` elapses, then
+    return its final value.
+
+    Use this instead of a fixed `asyncio.sleep` before a receive assertion.
+    Large byte-stream payloads (e.g. a 25 MB raw frame) can take several
+    seconds to traverse the SFU, so a fixed settle window races the transfer
+    and flakes under load. Polling returns as soon as the data arrives and
+    only waits out the full timeout on genuine failure.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval_s)
+    return bool(predicate())
+
+
 def _make_token(
     identity: str,
     room: str,

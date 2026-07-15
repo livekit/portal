@@ -262,9 +262,11 @@ async def test_large_frame_above_data_packet_cap(pair):
     )
     sent = _gradient(1280, 720, seed=3)
     pair.robot.send_video_frame("cam", sent)
-    # Larger payloads need more settle time.
-    await asyncio.sleep(SETTLE_S + 1.0)
-    assert len(received) == 1
+    # ~2.7 MB raw over the byte-stream path. Poll for arrival rather than
+    # race a fixed settle window, which flakes under load (issue #60).
+    from integration.conftest import wait_for
+
+    assert await wait_for(lambda: len(received) == 1, timeout_s=15.0)
     arr = frame_bytes_to_numpy_rgb(
         bytes(received[0].data), received[0].width, received[0].height
     )

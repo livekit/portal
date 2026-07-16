@@ -42,7 +42,11 @@ def mint_token(identity: str, room: str) -> str:
     key = required_env("LIVEKIT_API_KEY")
     secret = required_env("LIVEKIT_API_SECRET")
     grants = api.VideoGrants(
-        room_join=True, room=room, can_publish=True, can_subscribe=True
+        room_join=True,
+        room=room,
+        can_publish=True,
+        can_subscribe=True,
+        can_update_own_metadata=True,
     )
     room_cfg = RoomConfiguration(name=room, min_playout_delay=0, max_playout_delay=1)
     return (

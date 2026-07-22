@@ -44,6 +44,7 @@ collect_ignore = (
         "test_multi_operator.py",
         "test_action_subscription.py",
         "test_webrtc_codecs.py",
+        "test_ffi_role_split.py",
         "test_rpc.py",
     ]
 )

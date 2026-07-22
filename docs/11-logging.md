@@ -116,6 +116,28 @@ sync still works.
 shallow to bridge the two rates. Raise `slack`. The cumulative count is
 `metrics.buffers.evictions`.
 
+### recv-overflow
+
+```
+[recv-overflow] 'front' frame processing is behind; dropped 120 frame(s) so far to keep the receive loop draining. A slow on-frame or on-observation callback is the usual cause.
+```
+
+Decoded frames arrive faster than they can be processed. Each subscribed
+video track drains libwebrtc's native queue on one task and does the
+per-frame work (your `on_frame` callback, sync, `on_observation` dispatch)
+on another, connected by a small bounded channel. When the processing side
+falls behind and the channel fills, the oldest queued frame is dropped so
+the drain keeps pulling. This drops frames at the SDK boundary on purpose,
+which is far better than letting the native queue overflow and flush
+thousands of frames at once (the raw `native video stream queue overflow`
+warning from libwebrtc).
+
+**Fix.** Make the per-frame path faster. The usual cause is a heavy or
+blocking `on_frame` / `on_observation` callback — offload its work (queue it,
+downsample, move CPU-bound or GIL-bound processing to another thread) so it
+returns quickly. A steady stream of these warnings means frames are being
+shed continuously, not just in a one-off burst.
+
 ### publish-full
 
 ```

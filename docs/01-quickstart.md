@@ -163,8 +163,9 @@ async def main():
     portal = Operator(cfg)
 
     def on_observation(obs):
-        # obs.frames: dict[str, np.ndarray]      # one per registered video track
-        # obs.state:  dict[str, float]
+        # obs.frames: dict[str, VideoFrameData]  # one per video track; .data is RGB24 bytes
+        #   -> frame_bytes_to_numpy_rgb(f.data, f.width, f.height) for an (H, W, 3) array
+        # obs.state:  dict[str, bool|int|float]  # native per dtype; obs.raw_state is all-float
         # obs.timestamp_us: int                  # sender clock
         action = policy(obs)                     # or teleop.get_action(), etc.
         portal.send_action(action)

@@ -191,7 +191,7 @@ class Policy:
 ```
 
 For getting a checkpoint onto the GPU, see the
-[LeRobot plugin docs](../../../docs/10-lerobot.md).
+[LeRobot plugin docs](../../../docs/reference/lerobot.md).
 
 ## The wire contract
 

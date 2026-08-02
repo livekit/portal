@@ -1,389 +1,555 @@
 # Portal API
 
-The primary surface for using livekit-portal from any robotics stack.
+> The main surface. Build a config, construct a `Robot` or an `Operator`,
+> register callbacks, push data.
 
-You construct a `RobotConfig` or `OperatorConfig`, hand it to a `Robot` or
-`Operator`, register callbacks, and push frames and state or actions.
-Everything else in this repository, including the optional lerobot plugins,
-is built on top of this API.
+This is the API everything else in the repository is built on, including the
+optional lerobot plugins. It works with any robotics stack, because it has no
+opinion about where your frames or your actions come from.
 
-## Installation
+The shape is always the same. Build a config. Construct the role. Register
+callbacks. Connect. Push data.
+
+## Install
 
 ```bash
 pip install livekit-portal      # or: uv add livekit-portal
 ```
 
-Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc ≥ 2.35), Linux
-aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. On any other platform or
-Python version, build from source. See the
-[Quickstart](01-quickstart.md#build-from-source) for that flow.
-
-If the cdylib lives elsewhere (e.g. during Rust-side dev), point
-`LIVEKIT_PORTAL_FFI_LIB` at it and skip the copy step.
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc 2.35 and newer),
+Linux aarch64 (glibc 2.39 and newer), and macOS Apple Silicon. On any other
+platform or Python version, [build from
+source](01-quickstart.md#build-from-source).
 
 ### Rust
 
-The core crate is usable directly without going through Python. From
-another Cargo workspace, depend on the path:
+The core crate works directly, with no Python involved:
 
 ```toml
 [dependencies]
-livekit-portal = { path = "path/to/livekit-portal/livekit-portal" }
+livekit-portal = { path = "path/to/portal/livekit-portal" }
 ```
 
-Python bindings ship via the `livekit-portal-ffi` crate (UniFFI + C ABI)
-and a pure-Python package in `python/packages/livekit-portal/`.
+The Python bindings ship as the `livekit-portal-ffi` crate (UniFFI over a C
+ABI) plus a pure-Python package under `python/packages/livekit-portal/`.
 
-## Roles
+## Declaring the schema
 
-Portal is a two-role system: one **robot** and one or more **operators**
-per session.
+Both sides must declare the same schema before connecting. Field names, field
+order, and per-field dtypes all participate.
 
-| Role | Publishes | Subscribes |
-|------|-----------|------------|
-| `Robot` | video frames, state | actions |
-| `Operator` | actions | video frames + state, merged into synced observations |
+```python
+from livekit.portal import DType, RobotConfig
 
-Roles are baked into the class you instantiate (`Robot` or `Operator`).
-There can be at most one robot per session. There can be any number of
-operators (humans teleoperating, policies running inference, supervisors
-arbitrating control). The robot listens to one operator at a time, named
-by the `active_operator` pointer; everyone else streams silently and the
-robot drops their actions at the gate. See
-[Multi-controller](#multi-controller-and-active_operator) below.
+cfg = RobotConfig("session-1")
 
-Both sides must register the same schema via `add_video` /
-`add_state_typed` / `add_action_typed`. Camera names, field names, and
-per-field dtypes must match across sides.
+cfg.add_video("camera1")
+cfg.add_video("wrist")
 
-State and action schemas are typed. Each field declares a `DType` that
-drives its on-wire width. `DType.F64` is the lossless default. `F32`
-halves the bytes per field for joint angles. `I8`, `I16`, `U8`, `U16`,
-`U32` suit discrete indices or counters. `Bool` is one byte for binary
-signals like gripper open or estop. Values you send through `send_state`
-/ `send_action` stay as Python floats. Saturation applies at the wire
-boundary for out-of-range integer values.
+cfg.add_state_typed([
+    ("joint1", DType.F32),
+    ("joint2", DType.F32),
+    ("gripper", DType.BOOL),
+    ("mode", DType.I8),
+])
+cfg.add_action_typed([
+    ("joint1", DType.F32),
+    ("joint2", DType.F32),
+    ("gripper", DType.BOOL),
+    ("mode", DType.I8),
+])
+
+cfg.set_fps(30)
+```
+
+The string passed to `RobotConfig` is the **session name**. It is a local label
+used in logs. It is not compared against the LiveKit room name, which comes
+from your token.
+
+### Choosing dtypes
+
+Each field declares a dtype that fixes its width on the wire.
+
+| dtype | Bytes | Use it for |
+|---|---|---|
+| `F64` | 8 | The lossless default. |
+| `F32` | 4 | Joint angles. Halves the bytes per field, and the precision is almost always fine. |
+| `I32`, `I16`, `I8` | 4, 2, 1 | Signed indices, modes, counters. |
+| `U32`, `U16`, `U8` | 4, 2, 1 | Unsigned indices and counters. |
+| `Bool` | 1 | Gripper open, estop, any binary signal. |
+
+Values you pass to `send_state` and `send_action` stay ordinary Python values.
+Conversion happens at the wire boundary.
+
+> **Note.** Field order is part of the contract, not just the names. Reordering
+> two fields on one side changes the schema fingerprint and all traffic drops.
+> A [shared YAML file](reference/config-file.md) is the reliable way to keep
+> both sides in step.
+
+### Full config surface
+
+Both `RobotConfig` and `OperatorConfig` accept all of these. Anything
+role-specific is a no-op on the wrong side.
+
+| Method | Default | What it does |
+|---|---|---|
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
+| `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
+| `add_action_chunk(name, horizon, fields)` | none | Declare a fixed-horizon action batch. |
+| `set_fps(int)` | 30 | Capture rate. Drives the match window. |
+| `set_slack(int)` | 5 | Ticks of buffer headroom. |
+| `set_tolerance(float)` | 1.5 | Match window, in ticks. |
+| `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
+| `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
+| `set_ping_ms(int)` | 1000 | RTT probe cadence. `0` disables probing on this side. |
+| `set_reuse_stale_frames(bool)` | `False` | Freeze video on loss instead of dropping state. |
+| `set_action_subscription(bool)` | `False` | Operator-only. Receive executed actions. |
+| `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
+
+`set_fps`, `set_slack`, and `set_tolerance` are covered in
+[Tuning](04-tuning.md).
+
+You can also build the whole config from a file with
+`RobotConfig.from_yaml_file("portal.yaml", "session-1")`. See
+[Config from YAML](reference/config-file.md).
 
 ## Robot side
 
 ```python
 import asyncio
+import time
+
 from livekit.portal import DType, Robot, RobotConfig
 
-async def main():
-    cfg = RobotConfig("session")
+SCHEMA = [("joint1", DType.F32), ("joint2", DType.F32), ("gripper", DType.BOOL)]
+
+
+async def main(url: str, token: str, hardware) -> None:
+    cfg = RobotConfig("session-1")
     cfg.add_video("camera1")
-    cfg.add_video("camera2")
-    cfg.add_state_typed([
-        ("joint1", DType.F32),
-        ("joint2", DType.F32),
-        ("joint3", DType.F32),
-    ])
-    cfg.add_action_typed([
-        ("joint1", DType.F32),
-        ("joint2", DType.F32),
-        ("joint3", DType.F32),
-    ])
+    cfg.add_state_typed(SCHEMA)
+    cfg.add_action_typed(SCHEMA)
+    cfg.set_fps(30)
 
-    portal = Robot(cfg)
+    robot = Robot(cfg)
 
-    def on_action(action):
-        # action.values is the dict.
-        # action.timestamp_us is the sender's clock.
-        # Only actions from the active operator reach this callback;
-        # everyone else is dropped silently at the gate.
-        robot.send_action(action.values)
+    def on_action(action) -> None:
+        # action.values is the typed dict.
+        # action.timestamp_us is the operator's clock.
+        # action.sender is the operator identity, stamped at the gate.
+        # Only the active operator reaches here.
+        hardware.apply(action.values)
 
-    portal.on_action(on_action)
-    await portal.connect(url, token)
+    robot.on_action(on_action)
+    await robot.connect(url, token)
 
-    while running:
-        obs = robot.get_observation()
-        portal.send_video_frame("camera1", obs.image.cam1, width, height)
-        portal.send_video_frame("camera2", obs.image.cam2, width, height)
-        portal.send_state(obs.state)
-        await asyncio.sleep(1 / fps)
-
-asyncio.run(main())
+    try:
+        while hardware.running:
+            reading = hardware.read()
+            ts = int(time.time() * 1_000_000)
+            robot.send_video_frame("camera1", reading.rgb, timestamp_us=ts)
+            robot.send_state(reading.joints, timestamp_us=ts)
+            await asyncio.sleep(1 / 30)
+    finally:
+        await robot.disconnect()
+        robot.close()
 ```
+
+Stamp the frame and the state from the **same** `ts`. That shared timestamp is
+what lets the operator pair them.
+
+If you omit `timestamp_us`, Portal stamps with the current time at the moment
+of the call. That is fine when the two calls are adjacent, and wrong if you
+capture, do 40 ms of processing, then send.
+
+`send_video_frame` infers width and height from the NumPy array. Pass them
+explicitly only when handing over raw bytes.
 
 ## Operator side
 
 ```python
 import asyncio
-from livekit.portal import DType, Operator, OperatorConfig
 
-async def main():
-    cfg = OperatorConfig("session")
+from livekit.portal import DType, Operator, OperatorConfig, frame_bytes_to_numpy_rgb
+
+SCHEMA = [("joint1", DType.F32), ("joint2", DType.F32), ("gripper", DType.BOOL)]
+
+
+async def main(url: str, token: str, policy) -> None:
+    cfg = OperatorConfig("session-1")
     cfg.add_video("camera1")
-    cfg.add_video("camera2")
-    cfg.add_state_typed([
-        ("joint1", DType.F32),
-        ("joint2", DType.F32),
-        ("joint3", DType.F32),
-    ])
-    cfg.add_action_typed([
-        ("joint1", DType.F32),
-        ("joint2", DType.F32),
-        ("joint3", DType.F32),
-    ])
+    cfg.add_state_typed(SCHEMA)
+    cfg.add_action_typed(SCHEMA)
+    cfg.set_fps(30)
 
-    portal = Operator(cfg)
+    op = Operator(cfg)
 
-    def on_observation(obs):
-        # obs.frames: dict[str, VideoFrameData]  # one per video track; .data is RGB24 bytes
-        #   -> frame_bytes_to_numpy_rgb(f.data, f.width, f.height) for an (H, W, 3) array
-        # obs.state:  dict[str, bool|int|float]  # native per dtype; obs.raw_state is all-float
-        # obs.timestamp_us: int               # sender clock
-        action = model.select_action(obs)
-        portal.send_action(action)
+    def on_observation(obs) -> None:
+        frame = obs.frames["camera1"]
+        rgb = frame_bytes_to_numpy_rgb(bytes(frame.data), frame.width, frame.height)
+        action = policy(rgb, obs.state)
+        op.send_action(action, in_reply_to_ts_us=obs.timestamp_us)
 
-    portal.on_observation(on_observation)
-    await portal.connect(url, token)
+    op.on_observation(on_observation)
+    await op.connect(url, token)
 
-    # Robot starts with `active_operator=None` and drops every action.
-    # Claim control to be the one whose actions are accepted.
-    await portal.set_active_operator(portal.local_identity())
+    # Without this the robot drops every action we send.
+    await op.set_active_operator(op.local_identity())
 
-asyncio.run(main())
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await op.disconnect()
+        op.close()
 ```
 
-Callbacks fire on the asyncio loop that was running when you registered
-them. User code never runs on the tokio worker thread.
+Passing `in_reply_to_ts_us` is optional but cheap, and it is what turns
+`metrics.policy.e2e_us_p50` into a real observation-to-action latency instead
+of a network ping. See [Metrics](07-metrics.md#policy).
 
-## Multi-controller and `active_operator`
-
-The robot exposes one piece of state, `active_operator`, naming the
-operator whose actions are accepted. Anyone in the room can read or
-change it. The robot's attribute is the source of truth.
+## Lifecycle
 
 ```python
-# Robot side
-portal.active_operator()            # -> Optional[str]
-await portal.set_active_operator("policy-v1")
-portal.operators()                  # currently-connected operator identities
-portal.local_identity()             # this robot's identity (after connect)
+await portal.connect(url, token)   # join the room
+await portal.disconnect()          # leave it
+portal.close()                     # release the native handle
+```
 
-# Operator side
-portal.active_operator()            # mirrors the robot's attribute
-await portal.set_active_operator("policy-v1")   # RPC under the hood
-portal.operators()                  # peer operators in the room
-portal.robot_identity()             # the robot's identity (once discovered)
-portal.local_identity()             # this operator's own identity
+Call `close()` when you are finished with the object. It frees the underlying
+Rust handle. Skipping it leaks until the process exits, which is harmless for
+a script and not for a long-running service that builds portals repeatedly.
+
+`connect` raises `PortalError.AlreadyConnected` if you call it twice.
+
+## Sending data
+
+**Robot only.**
+
+```python
+robot.send_video_frame(track, frame, width=None, height=None, timestamp_us=None)
+robot.send_state(values, timestamp_us=None)
+```
+
+**Operator only.**
+
+```python
+op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
+op.send_action_chunk(name, data, timestamp_us=None, in_reply_to_ts_us=None)
+```
+
+`send_action_chunk` accepts either a dict of per-field columns of length
+`horizon`, or a single NumPy array of shape `(horizon, n_fields)` in declared
+field order. The array form is what most VLA policies emit already. Columns of
+the wrong length are zero-padded.
+
+Chunks travel as byte streams rather than data packets, so a full horizon is
+not bounded by the 15 KB packet limit.
+
+## Receiving data
+
+Every callback has a matching pull accessor. Use callbacks for push-driven
+loops and the accessors when your own loop sets the pace. Accessors are
+latest-wins, so a slow reader sees the freshest value rather than a backlog.
+
+**Operator.**
+
+| Callback | Pull | Fires with |
+|---|---|---|
+| `op.on_observation(cb)` | `op.get_observation()` | `Observation` |
+| `op.on_state(cb)` | `op.get_state()` | `State`, every packet, unmatched |
+| `op.on_video_frame(track, cb)` | `op.get_video_frame(track)` | `VideoFrameData`, unmatched |
+| `op.on_drop(cb)` | none | `List[Dict[str, ...]]` |
+
+**Robot.**
+
+| Callback | Pull | Fires with |
+|---|---|---|
+| `robot.on_action(cb)` | `robot.get_action()` | `Action` |
+| `robot.on_action_chunk(name, cb)` | `robot.get_action_chunk(name)` | `ActionChunk` |
+
+`on_state` and `on_video_frame` are raw firehoses. They fire on arrival with no
+matching at all. Use them for a preview pane or a debug log. Use
+`on_observation` for anything that needs frames and state to agree.
+
+`on_drop` receives a **list** of state dicts, not a single state:
+
+```python
+def on_drop(dropped):
+    # dropped is List[Dict[str, bool | int | float]], no timestamps
+    metrics_counter += len(dropped)
+
+op.on_drop(on_drop)
+```
+
+### Typed values on receive
+
+`Action`, `State`, `Observation`, and `ActionChunk` are typed by default.
+`.values` (and `observation.state`) hold Python-native types per your declared
+schema. `.raw_values` (and `observation.raw_state`) hold the lossless all-`f64`
+view.
+
+```python
+def on_action(action):
+    action.values["gripper"]    # True, a real bool
+    action.values["mode"]       # 3, a real int
+    action.values["joint1"]     # 0.5, a float
+    action.raw_values           # Dict[str, float], every field widened
+```
+
+The Rust core mirrors this. `Action`, `State`, and `Observation` carry
+`values: HashMap<String, TypedValue>` alongside `raw_values: HashMap<String,
+f64>`. Declare a dtype, send an ordinary value, receive the declared type.
+
+## The active operator
+
+The robot accepts actions from one operator at a time, named by its
+`active_operator` pointer. Anyone in the room can read it or change it. The
+robot's copy is authoritative.
+
+```python
+# Either role
+portal.active_operator()                        # Optional[str]
+await portal.set_active_operator("policy-v1")   # None clears it
+portal.operators()                              # connected operator identities
+portal.local_identity()                         # own identity, after connect
+
+# Operator only
+op.robot_identity()                             # the robot, once discovered
 ```
 
 `set_active_operator` is symmetric. The robot writes its own attribute
-directly; the operator dispatches a `portal.set_active_operator` RPC and
-the robot's handler does the write. Pass `None` to clear the pointer
-(robot will drop everything until something sets it again).
+directly. An operator sends a `portal.set_active_operator` RPC and the robot's
+handler does the write. Either way the change propagates to everyone.
 
-Three callbacks let you react to room changes:
+React to changes with three callbacks:
 
 ```python
 portal.on_operator_joined(lambda identity: ...)
 portal.on_operator_left(lambda identity: ...)
-portal.on_active_operator_changed(lambda new_identity: ...)
+portal.on_active_operator_changed(lambda identity: ...)   # identity may be None
 ```
 
-**Defaults and edge cases.**
+### Behavior worth knowing
 
-- `active_operator` defaults to `None`. A robot with no active operator
-  drops every action.
-- When the active operator disconnects, the pointer **stays pinned** at
-  the disconnected identity. A reconnect with the same identity resumes
-  control. To reassign, anyone in the room can call
-  `set_active_operator("...")`.
-- Tokens may seed the robot's `lk.portal.active_operator` attribute at
-  mint time so the pointer is set before anyone connects:
+**It starts unset.** A robot with no active operator drops every action. Your
+first operator must claim control.
 
-  ```python
-  api.AccessToken(...)
-     .with_attributes({"lk.portal.active_operator": "policy-v1"})
-  ```
+**It stays pinned on disconnect.** If the active operator leaves, the pointer
+keeps naming it so a reconnect with the same identity resumes control. Reassign
+explicitly to move on.
 
-- Tokens for `Robot` and `Operator` participants must include
-  `can_update_own_metadata=True`. Both classes self-set the
-  `lk.portal.role` attribute on connect; without the grant the call
-  fails.
-
-## Operator-side action subscription (HITL recording)
-
-By default an operator only sends actions; it does not see what the
-robot ends up executing. Recorders, shadow-evaluation policies, and
-live-monitoring UIs need that view. Turn it on with one config flag:
+**It can be seeded at token-mint time**, so the robot is focused before anyone
+connects:
 
 ```python
-cfg = OperatorConfig("session")
-cfg.add_action_typed([("a", DType.F32)])     # required to deserialize
-cfg.set_action_subscription(True)
-op = Operator(cfg)
-op.on_action(lambda a: log.append(a))
+api.AccessToken(key, secret).with_attributes(
+    {"lk.portal.active_operator": "policy-v1"}
+)
 ```
 
-When enabled, the operator runs the same active-operator gate the robot
-uses. `on_action` / `on_action_chunk` fire only for the active operator's
-output, and `get_action()` / `get_action_chunk(name)` mirror the
-latest gate-passed value. Off by default — most operators are pure
-controllers and do not want the bandwidth or callback noise.
+**Both roles need `can_update_own_metadata=True`** in their token. `Robot` and
+`Operator` self-set an `lk.portal.role` attribute on connect, and that write
+fails without the grant. See
+[Troubleshooting](08-troubleshooting.md#connect-fails-with-a-metadata-error).
 
-**Self-echo when active.** LiveKit does not fan a publisher's own data
-packets back to itself, so an active operator with subscription on would
-otherwise miss its own actions. Portal closes the gap by firing the
-local callback after `send_action` / `send_action_chunk` whenever
-`local_identity == active_operator`. An inactive subscriber sending an
-action gets no echo — the gate would have dropped it on the receive side
-too, so nothing reaches the robot or the local callback.
+## Multi-operator patterns
 
-**Sender attribution.** Every `Action` and `ActionChunk` carries a
-`sender` field stamped at gate time (or, for echo, the publisher's own
-identity). Use it for dataset labels rather than `active_operator()` —
-the latter can race against a handoff that already moved the pointer
-forward by the time the callback runs.
+Because operators are just room participants, several useful setups fall out
+without any extra API.
+
+| Pattern | Who is in the room | What makes it work |
+|---|---|---|
+| **Single operator** | robot, 1 operator | Operator claims control at startup. |
+| **Human in the loop** | robot, policy, human | Either side calls `set_active_operator`. Executed actions stay continuous across the cutover. |
+| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription(True)` and logs every executed action with `action.sender`. |
+| **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. Both streams get recorded for offline comparison. |
+| **Supervisor** | robot, N operators, supervisor UI | Supervisor never claims control. It only calls `set_active_operator` to route. |
+
+Working versions of the last three live in the integration tests:
+[action subscription](../python/packages/livekit-portal/tests/integration/test_action_subscription.py),
+[handoff](../python/packages/livekit-portal/tests/integration/test_multi_operator.py).
+
+## Operator-side action subscription
+
+By default an operator only sends actions. It never sees what the robot
+actually executed. Recorders, shadow policies, and monitoring UIs need that
+view. One flag turns it on.
+
+```python
+cfg = OperatorConfig("session-1")
+cfg.add_action_typed([("joint1", DType.F32)])   # needed to deserialize
+cfg.set_action_subscription(True)
+
+op = Operator(cfg)
+op.on_action(lambda action: log.append(action))
+```
+
+With it on, the operator runs the same gate the robot runs. `on_action` and
+`on_action_chunk` fire only for the active operator's output. `get_action()`
+and `get_action_chunk(name)` mirror the latest gate-passed value.
+
+It is off by default because most operators are pure controllers that want
+neither the bandwidth nor the callback traffic.
+
+**Your own actions echo back.** LiveKit does not fan a publisher's own data
+packets back to it, so an active operator with subscription on would otherwise
+miss its own output. Portal fires the local callback after `send_action` when
+`local_identity == active_operator`. An **inactive** subscriber gets no echo,
+which matches what the robot does with those packets.
+
+**Label rows with `action.sender`, not `active_operator()`.** Every `Action`
+and `ActionChunk` carries a `sender` stamped at gate time. Reading
+`active_operator()` inside the callback can race a handoff that already moved
+the pointer.
 
 ```python
 def on_action(action):
     log.append({
         "ts_us": action.timestamp_us,
         "in_reply_to": action.in_reply_to_ts_us,
-        "sender": action.sender,         # gate-time identity
+        "sender": action.sender,
         "values": action.values,
     })
 ```
 
-The same shape covers shadow eval (replace logging with a `model.compare`
-call) and live monitoring (push to a UI websocket). One flag covers
-both subscription and self-echo by design — the single-knob behaviour
-matches the common recorder + HITL self-record cases.
+Swap the append for `model.compare(...)` and it is shadow evaluation. Swap it
+for a websocket push and it is a monitoring UI.
 
-## Typed values on receive
+## Video codecs
 
-`Action`, `State`, and `Observation` are typed by default. `.values`
-(and `observation.state`) hold Python-native types per the declared
-schema: `DType.BOOL` fields are `bool`, integer dtypes are `int`, float
-dtypes are `float`. `.raw_values` (and `observation.raw_state`) keep
-the lossless `f64` view if you want to write into a numpy buffer
-without a per-field cast.
-
-```python
-def on_action(action):
-    # action.values["gripper"] is True (bool)
-    # action.values["mode"] is 3 (int)
-    # action.values["shoulder"] is 0.5 (float)
-    # action.raw_values is the underlying Dict[str, float]
-    ...
-```
-
-The Rust SDK mirrors this: `Action` / `State` / `Observation` carry
-`values: HashMap<String, TypedValue>` alongside `raw_values:
-HashMap<String, f64>`. The mental model is identical across languages:
-declare a dtype, send whatever you want, receive back as the declared
-type.
-
-## Gotchas
-
-- **Send-time dtype mismatch raises immediately.** If you send a
-  `float` into a `BOOL` field, a `bool` into a `F32` field, or any
-  other type that doesn't match the declared dtype, `send_state` /
-  `send_action` raises `PortalError::DtypeMismatch` before the packet
-  is constructed. No silent cast. Python follows the same rule via
-  `isinstance` checks on each value. `int` is accepted for float
-  dtypes (standard numeric promotion); `bool` is rejected everywhere
-  except `BOOL` fields.
-- **Saturation is silent except for a one-time log.** Saturation
-  happens after the dtype check passes — e.g., sending `9999` as an
-  `i8` in Rust (or `9999` as an int for an `I8` field in Python)
-  clips to `127`. The publisher emits a single `WARN` per (topic,
-  field) on first saturation, then stays quiet. The peer receives
-  the clipped value and never sees the original.
-- **Schema mismatch is detected but not raised.** Every packet carries a
-  `u32` fingerprint derived from the ordered field names and dtypes. A
-  peer whose schema disagrees (any rename, dtype flip, or reorder) sees
-  its packets dropped with a `WARN` per unique offending fingerprint. The
-  healthy side keeps running. No exception is raised.
-- **Unknown field names on send are dropped.** Keys in the dict you pass
-  to `send_action` / `send_state` that are not in the declared schema get
-  a one-time `WARN` and are then silently ignored. Check `portal.metrics()`
-  and your logs if a field appears to not arrive — the typo is the usual
-  cause.
-- **Inactive operators stream into the void.** The robot drops actions
-  whose sender is not the active operator. There is no error or callback
-  on the operator side. Read `op.active_operator()` (or watch
-  `on_active_operator_changed`) to know whether your `send_action` is
-  actually being honored.
-- **NaN into `Bool` becomes `false`.** NaN into integer dtypes becomes
-  `0`. Both count as saturation and log once per field.
-- **Boundary values do not saturate.** `127.0` into `I8`, `-128.0` into
-  `I8`, `65535.0` into `U16`, and `0.0` into any unsigned type are
-  representable and silent.
-
-## Frame format
-
-`send_video_frame` expects packed RGB24 NumPy arrays of shape `(H, W, 3)`
-uint8. Width and height must both be even. Full details in
-[concepts.md](02-concepts.md#video-frame-format).
-
-## WebRTC video options
-
-`add_video(name)` defaults to `VideoCodec.H264` on the WebRTC media path.
-The other WebRTC codecs are available on the same call — `VideoCodec.VP8`,
-`VideoCodec.VP9`, `VideoCodec.AV1`, `VideoCodec.H265`. VP9 and AV1 compress
-better than H264 at higher CPU cost; AV1 and H265 support is platform- and
-peer-dependent, so confirm both ends negotiate the codec.
-
-`max_bitrate_kbps` caps the encoder's peak rate for any WebRTC codec. It's a
-ceiling, not a target — libwebrtc still picks a lower operating bitrate from
-content. Omit it for the default 10 Mbps ceiling.
+`add_video(name)` defaults to H.264 on the WebRTC media path. That is the right
+choice for live preview and teleop, where a human is watching and bandwidth
+should adapt.
 
 ```python
 from livekit.portal import VideoCodec
 
-cfg.add_video("front", max_bitrate_kbps=8000)              # H264, capped at 8 Mbps
+cfg.add_video("front", max_bitrate_kbps=8000)                  # H264, 8 Mbps cap
 cfg.add_video("wide", codec=VideoCodec.VP9, max_bitrate_kbps=4000)
 ```
 
-## Frame video (lossless or codec-of-your-choice)
+`VP8`, `VP9`, `AV1`, and `H265` are also available. VP9 and AV1 compress better
+at higher CPU cost. AV1 and H265 depend on both peers negotiating them, so
+confirm before relying on either.
 
-For policies that read the pixels — VLA inference, behavior cloning, any
-case where colorspace shift breaks the policy distribution — pass a
-byte-stream codec on the same call:
+`max_bitrate_kbps` is a ceiling, not a target. libwebrtc still picks a lower
+operating bitrate from the content. Omit it for the 10 Mbps default.
+
+**When a policy reads the pixels, H.264 is usually wrong.** It shifts
+colorspace, adds block artifacts, and drifts in quality as the bitrate adapts.
+Pass a byte-stream codec instead and each frame ships whole over a reliable
+stream:
 
 ```python
-from livekit.portal import VideoCodec
-
 cfg.add_video("front", codec=VideoCodec.MJPEG, quality=90)
 cfg.add_video("wrist", codec=VideoCodec.PNG)
 cfg.add_video("debug", codec=VideoCodec.RAW)
 ```
 
-The user-facing API is identical — `send_video_frame`, `on_video_frame`,
-`get_video_frame`, observations all work the same way. The frames travel
-over a reliable byte stream (not WebRTC media), encoded with the chosen
-codec, and arrive as RGB on the other end.
+The user-facing API does not change. `send_video_frame`, `on_video_frame`,
+`get_video_frame`, and observations all behave identically, and frames arrive
+as RGB either way. Codec choice, the latency math, and per-track fps ceilings
+are in [Frame video](05-frame-video.md).
 
-Latency scales with encoded payload size: the byte-stream path costs
-roughly `1 ms + 2 ms × ⌈encoded_size / 15 KB⌉` per frame on localhost.
-Pick a codec whose output fits in one chunk for low-latency inference.
-At typical inference resolutions (224×224 to 480p) MJPEG q=80–95 fits.
+## RPC
 
-See [frame-video.md](05-frame-video.md) for the codec/fps tables, wire
-format, and metrics surface.
+Either side can register methods and either side can invoke them. Use it for
+one-shots that do not belong in a control loop.
+
+```python
+robot.register_rpc_method("home", lambda data: "ok")
+robot.unregister_rpc_method("home")
+
+reply = await op.perform_rpc("home", payload="{}")
+```
+
+Handlers must return a string. Full surface, error codes, and payload limits
+are in [RPC](06-rpc.md).
+
+## Metrics
+
+```python
+m = portal.metrics()
+m.sync.observations_emitted
+m.sync.states_dropped
+m.rtt.rtt_us_p95
+m.policy.e2e_us_p95
+
+portal.reset_metrics()
+```
+
+Every field is documented in [Metrics](07-metrics.md).
+
+## Gotchas
+
+These are the behaviors that surprise people. Each one is deliberate.
+
+**Dtype mismatch on send raises immediately.** Sending a `float` into a `BOOL`
+field, or a `bool` into an `F32` field, raises
+`PortalError.DtypeMismatch` before any packet is built. There is no silent
+cast. `int` is accepted for float dtypes. `bool` is rejected everywhere except
+`BOOL`.
+
+**Schema mismatch is detected but never raises.** Every packet carries a `u32`
+fingerprint over the ordered field names and dtypes. A peer whose schema
+disagrees sees its packets dropped with one warning per offending fingerprint.
+The healthy side keeps running. Nothing throws. See
+[`schema-mismatch`](08-troubleshooting.md#schema-mismatch).
+
+**Unknown field names on send are dropped.** Keys not in the declared schema
+get one warning and are then ignored silently. A typo in a field name looks
+exactly like a field that never arrives.
+
+**Saturation is silent after one log line.** Sending `9999` into an `I8` clips
+to `127`. The publisher warns once per field, then stays quiet. The peer only
+ever sees the clipped value. `NaN` into an integer dtype becomes `0`, and into
+`Bool` becomes `false`. Boundary values like `127` into `I8` do not saturate.
+
+**Inactive operators stream into the void.** The robot drops actions from
+anyone who is not the active operator, with no error and no callback on the
+sender's side. Check `op.active_operator()`.
+
+**Odd frame dimensions raise.** Both width and height must be even.
+
+## Errors
+
+`PortalError` variants you can catch:
+
+| Variant | Cause |
+|---|---|
+| `AlreadyConnected` | `connect` called on a connected portal. |
+| `NotConnected` | A send or RPC before `connect`, or after `disconnect`. |
+| `NoPeer` | `perform_rpc` with no peer discovered and no `destination`. |
+| `AmbiguousPeer` | Several remote participants and no peer identified. Pass `destination`. |
+| `UnknownVideoTrack` | Track name was never declared with `add_video`. |
+| `UnknownChunk` | Chunk name was never declared with `add_action_chunk`. |
+| `WrongFrameSize` | Buffer length is not `width * height * 3`. |
+| `InvalidFrameDimensions` | Width or height is odd. |
+| `WrongRole` | `send_action` on a robot, or `send_state` on an operator. |
+| `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
+| `Deserialization` | A received payload could not be parsed. |
+| `Codec` | Frame encode or decode failed. |
+| `Rpc` | The remote handler raised. Carries the `RpcError`. |
+
+`ConfigFileError` is separate and only comes from the YAML loader. See
+[Config from YAML](reference/config-file.md#errors).
 
 ## Surface summary
 
 **Robot**
 
 ```text
-# data plane
-robot.send_video_frame(track, frame, [width, height,] timestamp_us=...)
-robot.send_state(values, timestamp_us=...)
-robot.on_action(cb)                      # only fires for the active operator
+# data
+robot.send_video_frame(track, frame, width=None, height=None, timestamp_us=None)
+robot.send_state(values, timestamp_us=None)
+robot.on_action(cb)                          # active operator only
 robot.on_action_chunk(name, cb)
 robot.get_action() / robot.get_action_chunk(name)
 
 # control plane
-robot.active_operator() / await robot.set_active_operator(id)
-robot.operators()
-robot.local_identity()
+robot.active_operator() / await robot.set_active_operator(identity)
+robot.operators() / robot.local_identity()
 robot.on_operator_joined(cb) / robot.on_operator_left(cb)
 robot.on_active_operator_changed(cb)
 
@@ -391,23 +557,23 @@ robot.on_active_operator_changed(cb)
 robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
 await robot.perform_rpc(method, payload, destination=None, response_timeout_ms=None)
 robot.metrics() / robot.reset_metrics()
-await robot.connect(url, token) / await robot.disconnect()
+await robot.connect(url, token) / await robot.disconnect() / robot.close()
 ```
 
 **Operator**
 
 ```text
-# data plane
-op.send_action(values, timestamp_us=..., in_reply_to_ts_us=...)
-op.send_action_chunk(name, data, timestamp_us=..., in_reply_to_ts_us=...)
-op.on_state(cb) / op.on_observation(cb) / op.on_drop(cb)
+# data
+op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
+op.send_action_chunk(name, data, timestamp_us=None, in_reply_to_ts_us=None)
+op.on_observation(cb) / op.on_state(cb) / op.on_drop(cb)
 op.on_video_frame(track, cb)
-op.get_state() / op.get_observation() / op.get_video_frame(track)
+op.get_observation() / op.get_state() / op.get_video_frame(track)
+op.on_action(cb) / op.get_action()           # requires action subscription
 
 # control plane
-op.active_operator() / await op.set_active_operator(id)   # RPC under the hood
-op.operators()
-op.robot_identity() / op.local_identity()
+op.active_operator() / await op.set_active_operator(identity)
+op.operators() / op.robot_identity() / op.local_identity()
 op.on_operator_joined(cb) / op.on_operator_left(cb)
 op.on_active_operator_changed(cb)
 
@@ -415,70 +581,33 @@ op.on_active_operator_changed(cb)
 op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)
 await op.perform_rpc(method, payload, destination=None, response_timeout_ms=None)
 op.metrics() / op.reset_metrics()
-await op.connect(url, token) / await op.disconnect()
+await op.connect(url, token) / await op.disconnect() / op.close()
 ```
 
-## Loading a config from YAML
+## Using `Portal` directly
 
-`RobotConfig`, `OperatorConfig`, and `PortalConfig` each have
-`from_yaml_str` / `from_yaml_file` classmethods that build the config
-from a shareable YAML file. The file describes the wire contract only
-— schemas, video tracks, sync knobs — and `session`, `role`, and the
-E2EE key are supplied at the call site. The same file is reusable
-across the robot and operator processes.
+`Robot` and `Operator` are facades over a unified `Portal` class, which is also
+exported:
 
 ```python
-from livekit.portal import RobotConfig
+from livekit.portal import Portal, PortalConfig, Role
 
-cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
-```
-
-See [Config from YAML](04-config-file.md) for the schema reference.
-
-## End-to-end encryption
-
-Call `cfg.set_e2ee_key(key: bytes)` before `connect`. Both peers must use the
-same key. All media tracks and data channels (state, actions, RPC) are
-encrypted with AES-GCM.
-
-```python
-import os
-
-cfg.set_e2ee_key(os.environ["PORTAL_E2EE_KEY"].encode())
-```
-
-See [e2ee.md](08-e2ee.md) for key generation, distribution patterns, and coverage
-details.
-
-## Direct `Portal` usage
-
-`Robot` and `Operator` are role-specific facades around a unified
-`Portal` class that also ships in `livekit.portal` for advanced use:
-
-```python
-from livekit.portal import DType, Portal, PortalConfig, Role
-cfg = PortalConfig("session", Role.ROBOT)
+cfg = PortalConfig("session-1", Role.ROBOT)
 portal = Portal(cfg)
 ```
 
-The unified surface gets the same multi-controller behavior `Robot` /
-`Operator` do (gate, role attribute, RPC handler, etc.) — there is no
-opt-in flag. The class choice only affects which methods the type system
-exposes; runtime behavior is identical. New code should usually pick
-`Robot` or `Operator` for the role-correct surface.
+`Portal` gets the same behavior the facades do. The gate, the role attribute,
+and the built-in RPC handler are all present, with no opt-in flag. The only
+difference is that the type system exposes every method regardless of role, so
+you can call one that raises `WrongRole` at runtime.
 
-## Reference
+Prefer `Robot` or `Operator` in new code. Reach for `Portal` when the role is
+genuinely dynamic.
 
-- [Concepts](02-concepts.md). Roles, observation model, frame format.
-- [Config from YAML](04-config-file.md). Build configs from a shareable
-  file instead of declaring them in code.
-- [Frame video](05-frame-video.md). Codec choice, latency math, wire format
-  for byte-stream-based per-frame video.
-- [Tuning](06-tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates.
-- [Synchronization deep dive](09-synchronization.md). The match algorithm.
-- [RPC](07-rpc.md). Imperative commands on top of LiveKit RPC.
-- [E2EE](08-e2ee.md). Shared-key end-to-end encryption.
-- [`examples/python/basic/`](../examples/python/basic). The smallest
-  end-to-end script using this API, with synthetic video.
-- [lerobot integration](10-lerobot.md). The optional convenience plugins that
-  wrap this API for lerobot users.
+## Next steps
+
+- [Tuning](04-tuning.md). `fps`, `slack`, `tolerance`, and reliability.
+- [Frame video](05-frame-video.md). Pixel-exact frames for policies.
+- [Metrics](07-metrics.md). Every counter, and which ones to alert on.
+- [Config from YAML](reference/config-file.md). Move the schema into one shared
+  file.

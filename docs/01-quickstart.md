@@ -1,249 +1,387 @@
 # Quickstart
 
-Get a robot host and a control host talking over LiveKit in about 5 minutes
-using the Portal API directly.
+> Run a robot and an operator against each other in about five minutes.
 
-If you are already on lerobot, there is a one-line shortcut at the bottom of
-this page that wraps the same code.
+You will write two files. `robot.py` publishes video and joint state.
+`operator_app.py` receives them fused into observations and sends actions back.
+Both run on your own machine for now, talking through a real LiveKit server.
 
-## What you need
+You do not need a physical robot. The robot script publishes a synthetic test
+pattern.
 
-- Python 3.12 and [`uv`](https://docs.astral.sh/uv/) (or `pip`)
-- A LiveKit server: [LiveKit Cloud](https://cloud.livekit.io) (free tier
-  works) or a local `livekit-server --dev`
-- Your `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
-- A [Rust toolchain](https://rustup.rs/) only if you build from source (see
-  below)
+## Prerequisites
 
-You do **not** need a physical robot to try this. The first example publishes
-a synthetic test pattern.
+- **Python 3.12.** Prebuilt wheels target 3.12. The library itself supports
+  3.10 and up, but on older versions you have to
+  [build from source](#build-from-source).
+- **A LiveKit server.** [LiveKit Cloud](https://cloud.livekit.io) has a free
+  tier that works. A local `livekit-server --dev` also works.
+- **Your credentials.** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and
+  `LIVEKIT_API_SECRET`, from the LiveKit Cloud dashboard or your dev server.
 
 ## 1. Install
 
 ```bash
-pip install livekit-portal      # or: uv add livekit-portal
+pip install livekit-portal livekit-api numpy
 ```
 
-Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc ≥ 2.35), Linux
-aarch64 (glibc ≥ 2.39), and macOS Apple Silicon. That is everything the
-examples below need.
-
-### Build from source
-
-Build from source when there is no wheel for your platform (Windows, Intel
-macOS, Python 3.10/3.11) or when you are changing the Rust core. The library
-supports Python 3.10+ this way.
+Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/livekit/portal.git
-cd portal
-
-bash scripts/build_ffi_python.sh release   # compile cdylib + generate UniFFI bindings
-cd python && uv sync                        # install the workspace into .venv
+uv add livekit-portal livekit-api numpy
 ```
 
-`build_ffi_python.sh` runs `cargo build -p livekit-portal-ffi`, drops the
-platform cdylib (`liblivekit_portal_ffi.{dylib,so}`) next to the Python
-package, and emits the matching UniFFI Python module. First build takes a
-couple of minutes. Subsequent builds are incremental. Rerun it whenever the
-Rust code changes.
+`livekit-portal` is the library. `livekit-api` is only used here to mint
+access tokens, which is normally a server-side job. `numpy` carries the frames.
 
-### Use a source build from another project
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc 2.35 and newer),
+Linux aarch64 (glibc 2.39 and newer), and macOS Apple Silicon. Anything else
+needs a [source build](#build-from-source).
 
-To depend on a source build elsewhere, install the package by path. The
-editable install picks up a fresh cdylib on next import.
+## 2. Set your credentials
 
 ```bash
-# uv
-uv add --editable /absolute/path/to/livekit-portal/python/packages/livekit-portal
-
-# pip
-pip install -e /absolute/path/to/livekit-portal/python/packages/livekit-portal
+export LIVEKIT_URL="wss://your-project.livekit.cloud"
+export LIVEKIT_API_KEY="APIxxxxxxxx"
+export LIVEKIT_API_SECRET="xxxxxxxxxxxx"
 ```
 
-## 2. Mint tokens
+## 3. Write a shared token helper
 
-Both sides need a JWT for the same LiveKit room. Minimal helper:
+Both scripts need a JWT for the same LiveKit room. Save this as
+`portal_token.py`.
+
+> **Note.** The filenames in this guide are chosen to avoid shadowing Python
+> standard library modules. Do not name these files `token.py` or `operator.py`.
+> A module in your working directory takes precedence over the stdlib, and
+> shadowing either of those breaks imports across the interpreter.
 
 ```python
+# portal_token.py
 import datetime
+import os
+
 from livekit import api
 from livekit.protocol.room import RoomConfiguration
 
-def mint(identity: str, room: str, key: str, secret: str) -> str:
+ROOM = "portal-quickstart"
+
+
+def mint(identity: str) -> str:
     grants = api.VideoGrants(
         room_join=True,
-        room=room,
+        room=ROOM,
         can_publish=True,
         can_subscribe=True,
-        # `Robot` and `Operator` self-set the `lk.portal.role` attribute on
-        # connect so other participants can discover them. The grant must
-        # include this; tokens that omit it fail at connect with a clear
-        # error.
+        # Required. Robot and Operator both self-set an `lk.portal.role`
+        # attribute on connect so peers can discover them. Without this
+        # grant, connect fails with a clear error.
         can_update_own_metadata=True,
     )
     return (
-        api.AccessToken(key, secret)
+        api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"])
         .with_identity(identity)
         .with_grants(grants)
-        # tight playout delay bounds minimize teleop latency
+        # Tight playout delay bounds keep teleop latency low.
         .with_room_config(
-            RoomConfiguration(name=room, min_playout_delay=0, max_playout_delay=1)
+            RoomConfiguration(name=ROOM, min_playout_delay=0, max_playout_delay=1)
         )
         .with_ttl(datetime.timedelta(hours=6))
         .to_jwt()
     )
 ```
 
-Identities must be unique within the room. The robot is a singleton so
-`"robot"` is fine; operators get their own free-form identity per
-participant (e.g. `"policy-v1"`, `"binh-teleop"`, `"supervisor-ui"`).
+Identities must be unique inside a room. There is one robot per session, so
+`"robot"` is fine. Operators pick their own name, like `"policy-v1"` or
+`"binh-teleop"`.
 
-## 3. Robot host
+> **Note.** Minting tokens with your API secret belongs on a server, not in a
+> robot or a browser. It is inline here to keep the quickstart to two files.
 
-Runs next to the hardware.
+## 4. Write the robot
 
-It declares what it will publish (video tracks, state fields) and what it
-will receive (action fields). Then it pumps frames and state at your
-capture rate.
+This runs next to the hardware. It declares what it publishes (one camera, five
+state fields) and what it accepts (the same five as actions). Then it pumps
+frames and state at 30 fps.
+
+Save it as `robot.py`.
 
 ```python
-import asyncio, time
+# robot.py
+import asyncio
+import math
+import os
+import time
+
+import numpy as np
 from livekit.portal import DType, Robot, RobotConfig
 
-async def main():
-    cfg = RobotConfig("session-1")
+from portal_token import ROOM, mint
+
+FPS = 30
+WIDTH, HEIGHT = 320, 240
+
+# Both sides must declare the same fields, in the same order, with the
+# same dtypes. Mixed dtypes are normal: joints as floats, a gripper as a
+# bool, a control mode as a small int.
+SCHEMA = [
+    ("j1", DType.F32),
+    ("j2", DType.F32),
+    ("j3", DType.F32),
+    ("gripper", DType.BOOL),
+    ("mode", DType.I8),
+]
+
+
+def make_frame(phase: float) -> np.ndarray:
+    """A moving test pattern. Returns (H, W, 3) uint8 RGB."""
+    x = np.arange(WIDTH, dtype=np.float32) / WIDTH
+    y = np.arange(HEIGHT, dtype=np.float32)[:, None] / HEIGHT
+    r = np.broadcast_to((0.5 + 0.5 * np.sin(2 * math.pi * (x + phase))) * 255, (HEIGHT, WIDTH))
+    g = np.broadcast_to((0.5 + 0.5 * np.sin(2 * math.pi * (y + phase))) * 255, (HEIGHT, WIDTH))
+    b = np.full((HEIGHT, WIDTH), 128, dtype=np.float32)
+    return np.stack([r, g, b], axis=-1).astype(np.uint8)
+
+
+async def main() -> None:
+    cfg = RobotConfig(ROOM)
     cfg.add_video("cam1")
-    cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
-    cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
-    cfg.set_fps(30)
+    cfg.add_state_typed(SCHEMA)
+    cfg.add_action_typed(SCHEMA)
+    cfg.set_fps(FPS)
 
-    portal = Robot(cfg)
+    robot = Robot(cfg)
 
-    def on_action(a):
-        # a.values is the action dict.
-        # a.timestamp_us is the sender's clock.
-        # a comes from whichever operator currently holds control. Other
-        # operators in the room are silently dropped at the gate.
-        robot.send_action(a.values)
+    # Actions arrive here from whichever operator currently holds control.
+    # Actions from every other operator are dropped before this fires.
+    def on_action(action) -> None:
+        print(f"[robot] action from {action.sender}: {action.values}")
 
-    portal.on_action(on_action)
-    await portal.connect(URL, mint("robot", "session-1", API_KEY, API_SECRET))
+    robot.on_action(on_action)
 
-    while running:
-        obs = robot.get_observation()
-        ts = int(time.time() * 1_000_000)
-        portal.send_video_frame("cam1", obs.image, width, height, timestamp_us=ts)
-        portal.send_state(obs.state, timestamp_us=ts)
-        await asyncio.sleep(1 / 30)
+    # A one-shot command. Either side can register, either side can invoke.
+    robot.register_rpc_method("home", lambda data: "homed")
 
-asyncio.run(main())
+    await robot.connect(os.environ["LIVEKIT_URL"], mint("robot"))
+    print("[robot] connected")
+
+    try:
+        for i in range(FPS * 60):
+            phase = i / FPS
+            # One clock for both the frame and the state. This is what lets
+            # the operator match them back together.
+            ts = int(time.time() * 1_000_000)
+            robot.send_video_frame("cam1", make_frame(phase), timestamp_us=ts)
+            robot.send_state(
+                {
+                    "j1": math.sin(phase),
+                    "j2": math.cos(phase),
+                    "j3": 0.1 * phase,
+                    "gripper": int(phase) % 2 == 0,
+                    "mode": int(phase) % 3,
+                },
+                timestamp_us=ts,
+            )
+            await asyncio.sleep(1 / FPS)
+    finally:
+        await robot.disconnect()
+        robot.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-`obs.image` must be a NumPy `uint8` array of shape `(H, W, 3)` in RGB.
+Frames must be `uint8` NumPy arrays of shape `(H, W, 3)` in RGB order. Width
+and height must both be even. See
+[Concepts: frame format](02-concepts.md#video-frame-format).
 
-## 4. Control host
+## 5. Write the operator
 
-Runs wherever your operator, trainer, or policy lives.
+This runs wherever your policy or teleop UI lives. It declares the same schema,
+consumes fused observations, and publishes actions.
 
-It declares the same schema as the robot host. Then it consumes
-synchronized observations and publishes actions.
+Save it as `operator_app.py`.
 
 ```python
+# operator_app.py
 import asyncio
-from livekit.portal import DType, Operator, OperatorConfig
+import os
 
-async def main():
-    cfg = OperatorConfig("session-1")
+from livekit.portal import DType, Operator, OperatorConfig, frame_bytes_to_numpy_rgb
+
+from portal_token import ROOM, mint
+
+FPS = 30
+
+# Identical to the robot's schema. Same fields, same order, same dtypes.
+SCHEMA = [
+    ("j1", DType.F32),
+    ("j2", DType.F32),
+    ("j3", DType.F32),
+    ("gripper", DType.BOOL),
+    ("mode", DType.I8),
+]
+
+
+async def main() -> None:
+    cfg = OperatorConfig(ROOM)
     cfg.add_video("cam1")
-    cfg.add_state_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
-    cfg.add_action_typed([("j1", DType.F32), ("j2", DType.F32), ("j3", DType.F32)])
-    cfg.set_fps(30)
+    cfg.add_state_typed(SCHEMA)
+    cfg.add_action_typed(SCHEMA)
+    cfg.set_fps(FPS)
 
-    portal = Operator(cfg)
+    op = Operator(cfg)
+    seen = 0
 
-    def on_observation(obs):
-        # obs.frames: dict[str, VideoFrameData]  # one per video track; .data is RGB24 bytes
-        #   -> frame_bytes_to_numpy_rgb(f.data, f.width, f.height) for an (H, W, 3) array
-        # obs.state:  dict[str, bool|int|float]  # native per dtype; obs.raw_state is all-float
-        # obs.timestamp_us: int                  # sender clock
-        action = policy(obs)                     # or teleop.get_action(), etc.
-        portal.send_action(action)
+    def on_observation(obs) -> None:
+        nonlocal seen
+        seen += 1
 
-    portal.on_observation(on_observation)
-    await portal.connect(URL, mint("policy-v1", "session-1", API_KEY, API_SECRET))
+        # obs.frames["cam1"] is a VideoFrameData holding packed RGB24 bytes.
+        frame = obs.frames["cam1"]
+        rgb = frame_bytes_to_numpy_rgb(bytes(frame.data), frame.width, frame.height)
 
-    # Robot starts with `active_operator=None` and drops every action.
-    # Self-claim so this operator's actions are accepted. In a HITL setup
-    # a human or supervisor could later call
-    # `await portal.set_active_operator("human-id")` to preempt.
-    await portal.set_active_operator(portal.local_identity())
+        if seen % FPS == 0:
+            print(f"[operator] obs #{seen} frame={rgb.shape} state={obs.state}")
 
-    while running:
-        await asyncio.sleep(1)
+        # Your policy goes here. This one just mirrors the state back.
+        action = dict(obs.state)
 
-asyncio.run(main())
+        # in_reply_to_ts_us tells the robot which observation this answers,
+        # which is what makes metrics.policy.e2e_us_* a real latency number
+        # instead of a ping.
+        op.send_action(action, in_reply_to_ts_us=obs.timestamp_us)
+
+    op.on_observation(on_observation)
+
+    await op.connect(os.environ["LIVEKIT_URL"], mint("policy-v1"))
+    print("[operator] connected")
+
+    # The robot starts with no active operator and drops every action.
+    # Claim control so ours are accepted.
+    await op.set_active_operator(op.local_identity())
+
+    print("[operator] home ->", await op.perform_rpc("home"))
+
+    try:
+        await asyncio.sleep(60)
+    finally:
+        await op.disconnect()
+        op.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-`policy(obs)` here is any function that turns an observation into an
-action dict. Teleoperation, imitation learning, VLA inference, a hand-written
-P controller: Portal does not care.
+## 6. Run both
 
-## 5. Try the shipped examples
+Two terminals, same directory.
 
-Before wiring Portal into your real stack, run the basic example. It uses
-the exact API above, with synthetic video and a token minter already wired
-up.
-
-- [`examples/python/basic/`](../examples/python/basic): no hardware needed.
-  Ten-minute sanity check that your LiveKit credentials and native build
-  work.
-- [`examples/python/so101/`](../examples/python/so101): real hardware. Drive
-  a physical SO-101 follower from a remote SO-101 leader, with the camera
-  and joint state rendered in [rerun](https://rerun.io). Uses the lerobot
-  plugin shortcut (see below). Full calibration + wiring walkthrough in its
-  [README](../examples/python/so101/README.md).
-
-## Shortcut: lerobot users
-
-Already using the [lerobot](https://github.com/huggingface/lerobot)
-`Robot` / `Teleoperator` interfaces? Two optional plugin packages wrap
-the Portal code above so you don't have to write it yourself.
-
-```python
-# robot host: wraps a local lerobot Robot
-from lerobot_teleoperator_livekit import LiveKitTeleoperator, LiveKitTeleoperatorConfig
-
-teleop = LiveKitTeleoperator(
-    LiveKitTeleoperatorConfig(url=URL, token=token, session="session-1", fps=30),
-    robot=my_robot,
-)
-teleop.connect()
+```bash
+python robot.py       # terminal 1
 ```
 
-```python
-# control host: wraps a local lerobot Teleoperator (or a policy)
-from lerobot_robot_livekit import LiveKitRobot, LiveKitRobotConfig
-
-robot = LiveKitRobot(
-    LiveKitRobotConfig(
-        url=URL, token=token, session="session-1", fps=30,
-        camera_names=("cam1",), camera_height=480, camera_width=640,
-    ),
-    teleop=my_leader,
-)
-robot.connect()
+```bash
+python operator_app.py    # terminal 2
 ```
 
-The plugins are syntactic sugar over the Portal API above. Full reference
-and CLI mode: [lerobot integration](10-lerobot.md).
+The operator prints an observation roughly once a second. The robot prints the
+actions coming back. If that is what you see, your credentials, your native
+build, and the sync path all work.
+
+```
+[operator] connected
+[operator] home -> homed
+[operator] obs #30 frame=(240, 320, 3) state={'j1': 0.84, 'j2': 0.54, 'j3': 0.1, 'gripper': True, 'mode': 1}
+```
+
+You will also see a `[state-overflow]` and a `[sync-drop]` warning in the first
+second or so. That is expected. State starts flowing before the video track has
+warmed up, so the earliest states have nothing to match against. Once video is
+running they stop.
+
+Nothing printing at all? Go to
+[Troubleshooting](08-troubleshooting.md#nothing-is-arriving).
+
+## What just happened
+
+The robot stamped every frame and every state packet with one clock. The
+operator buffered both streams and matched them by that timestamp, then fired
+`on_observation` once per matched pair. Actions went back on a separate
+reliable channel, gated so only the active operator's arrive.
+
+That gate is why step 5 calls `set_active_operator`. Without it the robot
+drops everything, which is the single most common first-run surprise.
+
+Read [Concepts](02-concepts.md) next for the model behind all of that.
+
+## Try the shipped examples
+
+The examples do the same thing with the rough edges sanded off, including
+`.env` loading and a live metrics printout.
+
+- [`examples/python/basic/`](../examples/python/basic). What you just built,
+  plus a YAML-config variant. No hardware.
+- [`examples/python/inference/`](../examples/python/inference). A VLA-shaped
+  loop using action chunks and end-to-end latency metrics.
+- [`examples/python/modal-mock-inference/`](../examples/python/modal-mock-inference).
+  Runs the policy on [Modal](https://modal.com) and measures true
+  glass-to-glass latency.
+- [`examples/python/so101/`](../examples/python/so101). Real hardware. A
+  physical SO-101 follower driven by a remote SO-101 leader.
+
+## Build from source
+
+Build from source when there is no wheel for your platform (Windows, Intel
+macOS, Python 3.10 or 3.11) or when you are changing the Rust core.
+
+You need a [Rust toolchain](https://rustup.rs/) and
+[`uv`](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/livekit/portal.git
+cd portal
+
+bash scripts/build_ffi_python.sh release
+cd python && uv sync
+```
+
+`build_ffi_python.sh` runs `cargo build -p livekit-portal-ffi`, drops the
+platform cdylib next to the Python package, and generates the UniFFI bindings.
+The first build takes a few minutes. Later builds are incremental. Rerun it
+whenever the Rust code changes.
+
+To depend on that build from another project, install it by path:
+
+```bash
+uv add --editable /abs/path/to/portal/python/packages/livekit-portal
+# or
+pip install -e /abs/path/to/portal/python/packages/livekit-portal
+```
+
+If the cdylib lives somewhere else, point `LIVEKIT_PORTAL_FFI_LIB` at it.
+
+## Already on lerobot?
+
+Two optional plugin packages wrap everything above so you do not write it
+yourself. Your existing lerobot `Robot` or `Teleoperator` goes in, and the
+remote arm comes out looking like a local lerobot device.
+
+```bash
+pip install lerobot-teleoperator-livekit   # robot side
+pip install lerobot-robot-livekit          # operator side
+```
+
+The plugins are a convenience layer over the API in this page, not a
+replacement for it. Read [Concepts](02-concepts.md) first, then
+[lerobot plugins](reference/lerobot.md).
 
 ## Next steps
 
-- [Portal API](03-portal-api.md). The full surface. All callbacks, send
-  methods, role semantics.
-- [Concepts](02-concepts.md). Roles, the observation model, frame format.
-- [Config from YAML](04-config-file.md). Build the same configs from a
-  shareable file so the wire contract lives in one place.
-- [Tuning](06-tuning.md). `fps`, `slack`, `tolerance`, asymmetric rates,
-  reliability.
+- [Concepts](02-concepts.md). Roles, the observation model, control handoff.
+- [Portal API](03-portal-api.md). The full surface.
+- [Tuning](04-tuning.md). `fps`, `slack`, and `tolerance`.
+- [Config from YAML](reference/config-file.md). Move the schema out of code so
+  both sides load one file.

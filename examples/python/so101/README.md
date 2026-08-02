@@ -18,7 +18,7 @@ They connect to the **same LiveKit room** and sync via Portal.
 ## 1. Prerequisites
 
 - Python 3.12+ and [`uv`](https://docs.astral.sh/uv/)
-- A LiveKit server — either [LiveKit Cloud](https://cloud.livekit.io) or a
+- A LiveKit server. Either [LiveKit Cloud](https://cloud.livekit.io) or a
   local one (`livekit-server --dev`)
 - SO-101 leader + follower arms (Feetech STS3215 motors), each with their
   own USB-serial controller
@@ -45,7 +45,7 @@ venv. The three Portal packages are picked up as editable installs from
 
 ## 3. Find the serial ports
 
-Each arm needs its own serial port. Use lerobot's helper — unplug the arm
+Each arm needs its own serial port. Use lerobot's helper. Unplug the arm
 it asks about, press enter, then plug it back in:
 
 ```bash
@@ -92,7 +92,7 @@ uv run lerobot-calibrate \
 ```
 
 > Leaders are torque-off during calibration (you move them by hand).
-> Followers will self-drive during range capture — keep clear of the arm.
+> Followers will self-drive during range capture. Keep clear of the arm.
 
 ---
 
@@ -125,7 +125,7 @@ SO101_LEADER_PORT=/dev/tty.usbmodem-LEADER
 SO101_LEADER_ID=so101_leader                      # must match --teleop.id from step 4a
 ```
 
-Same `.env` file works on both sides — each script reads only the fields
+Same `.env` file works on both sides. Each script reads only the fields
 it needs. If the two machines have different ports, either keep two copies
 or use `.env.local` for per-machine overrides (loaded after `.env`).
 
@@ -133,23 +133,23 @@ or use `.env.local` for per-machine overrides (loaded after `.env`).
 
 ## 6. Run
 
-**Terminal 1 — on the machine wired to the follower:**
+**Terminal 1, on the machine wired to the follower:**
 
 ```bash
 uv run robot.py
 ```
 
-**Terminal 2 — on the operator's laptop:**
+**Terminal 2, on the operator's laptop:**
 
 ```bash
 uv run teleoperator.py
 ```
 
 The rerun viewer auto-spawns on the operator side. You'll see:
-- `observation.<camera_name>` — live video from the follower (JPEG-compressed,
+- `observation.<camera_name>`: live video from the follower (JPEG-compressed,
   scrubbable on the `robot_time` timeline aligned to the follower's clock).
-- `observation.<motor>.pos` — follower joint positions as scalar plots.
-- `action.<motor>.pos` — commanded positions from the leader.
+- `observation.<motor>.pos`: follower joint positions as scalar plots.
+- `action.<motor>.pos`: commanded positions from the leader.
 
 Stop either side with Ctrl-C.
 
@@ -157,42 +157,49 @@ Stop either side with Ctrl-C.
 
 ## 7. Troubleshooting
 
-**"No calibration file found"** — you skipped step 4. Run `lerobot-calibrate`
+**"No calibration file found"**. You skipped step 4. Run `lerobot-calibrate`
 for the side that complained. IDs in `.env` must match the IDs you used during
 calibration (we default to `so101_leader` / `so101_follower` above).
 
-**Follower doesn't move** — check the LiveKit room name matches on both sides,
+**Follower doesn't move**. Check the LiveKit room name matches on both sides,
 and that your API key has `can_publish` / `can_subscribe` (the mint helper
 sets this automatically). Watch either script's stdout for connection errors.
 
-**Laggy or frozen video** — confirm `PORTAL_FPS` matches on both sides. If
+**Laggy or frozen video**. Confirm `PORTAL_FPS` matches on both sides. If
 you're on a local dev server, keep the two scripts on the same LAN for
 minimum RTT.
 
-**Camera not detected** — try another `SO101_CAMERA_INDEX` (0, 1, 2…). On
-macOS, the first time you run it the OS may prompt for camera permission —
+**Camera not detected**. Try another `SO101_CAMERA_INDEX` (0, 1, 2…). On
+macOS, the first time you run it the OS may prompt for camera permission,
 accept and rerun.
 
-**`ImportError: cannot find liblivekit_portal_ffi`** — build the native
+**`ImportError: cannot find liblivekit_portal_ffi`**. Build the native
 library: `cd ../../.. && bash scripts/build_ffi_python.sh`.
 
 ---
 
 ## How the pieces fit
 
-```
-┌─────────────────────┐                       ┌──────────────────────┐
-│ robot.py            │                       │ teleoperator.py      │
-│                     │                       │                      │
-│ SO101Follower  ◀────┤                       ├─▶ SO101Leader        │
-│      │              │                       │       │              │
-│      ▼              │                       │       ▼              │
-│ LiveKitTeleoperator │◀─── LiveKit Portal ──▶│  LiveKitRobot        │
-│   (Portal Robot)    │    (room = LIVEKIT_   │   (Portal Operator)  │
-│                     │     ROOM)             │       │              │
-└─────────────────────┘                       │       ▼              │
-                                              │   rerun viewer       │
-                                              └──────────────────────┘
+```mermaid
+flowchart LR
+    subgraph robot["robot.py &nbsp; (next to the hardware)"]
+        direction TB
+        F["SO101Follower<br/><i>physical arm</i>"]
+        LT["LiveKitTeleoperator<br/><i>Portal Robot</i>"]
+        LT -- "actions" --> F
+        F -- "observations" --> LT
+    end
+
+    subgraph teleop["teleoperator.py &nbsp; (your workstation)"]
+        direction TB
+        L["SO101Leader<br/><i>physical arm</i>"]
+        LR["LiveKitRobot<br/><i>Portal Operator</i>"]
+        RR["rerun viewer"]
+        L -- "actions" --> LR
+        LR -- "observations" --> RR
+    end
+
+    LT <-. "LiveKit room<br/>(LIVEKIT_ROOM)" .-> LR
 ```
 
 The Portal plugins (`lerobot-robot-livekit`, `lerobot-teleoperator-livekit`)

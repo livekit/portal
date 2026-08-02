@@ -8,11 +8,11 @@ inference rounds.
 This example is the canonical use case for two Portal features:
 
 - **Action chunks** (`add_action_chunk` / `send_action_chunk` /
-  `on_action_chunk`) — ship a `(horizon, n_fields)` tensor in one packet
+  `on_action_chunk`). These ship a `(horizon, n_fields)` tensor in one packet
   via LiveKit byte streams. No 15 KB data-packet limit; reliable by
   design.
 
-- **Observation-correlated actions** (`in_reply_to_ts_us`) — the policy
+- **Observation-correlated actions** (`in_reply_to_ts_us`). The policy
   tags every chunk with the observation timestamp it was produced from.
   The robot computes true end-to-end policy latency from this; surfaces
   as `metrics.policy.e2e_us_p50/p95`.
@@ -40,16 +40,16 @@ For LiveKit Cloud, point `LIVEKIT_URL` at your project and use real keys.
 
 Reading left to right:
 
-- `chunks` — how many chunks the policy has produced so far.
-- `chunk_age` — wall-clock time since the latest chunk arrived. Should
+- `chunks`: how many chunks the policy has produced so far.
+- `chunk_age`: wall-clock time since the latest chunk arrived. Should
   hover near `1 / PORTAL_CHUNKS_PER_SECOND`.
-- `e2e` — `metrics.policy.e2e_us_p50/p95`: observation→action latency.
+- `e2e`: `metrics.policy.e2e_us_p50/p95`: observation→action latency.
   This is the number to watch. Includes inference time, serialization,
-  and network — everything between "robot captured this state" and
+  and network. It covers everything between "robot captured this state" and
   "robot received the corresponding action."
-- `correlated` — `metrics.policy.correlated_received`. Should track the
+- `correlated`: `metrics.policy.correlated_received`. Should track the
   total chunks received (every chunk is correlated in this example).
-- `rtt` — `metrics.rtt.rtt_us_last`. Note this is much smaller than
+- `rtt`: `metrics.rtt.rtt_us_last`. Note this is much smaller than
   `e2e`: ping doesn't include inference time. That's exactly what
   `metrics.policy` measures and `metrics.rtt` does not.
 

@@ -34,11 +34,15 @@
 ## What it does
 
 Your robot is on one machine. Your policy or teleop UI is on another, possibly on
-another continent. Portal makes the second one look like it is holding the first.
+another continent. Portal closes the control loop across that gap. Cameras and
+joint state stream out of the robot, actions come back, and both directions
+traverse NAT over WebRTC with no VPN and no forwarded port. What the control side
+gets is not two streams to reconcile but one callback per tick.
 
 ```python
 # Operator side. Cameras and joint state arrive already fused.
 def on_observation(obs):
+    # obs.frames["cam1"].data is packed RGB24, obs.state is typed per your schema
     action = policy(obs.frames["cam1"], obs.state)
     op.send_action(action, in_reply_to_ts_us=obs.timestamp_us)
 
@@ -47,13 +51,33 @@ await op.connect(url, token)
 await op.set_active_operator(op.local_identity())
 ```
 
-That fusion is the point. Robotics policies want one bundle per tick, and no
-transport delivers data that way. Video rides an encoder and a
-congestion-controlled channel. State packets ride neither. They arrive out of
-phase, typically 30 to 80 ms apart.
+That fusion is the point. A policy wants one bundle per tick, and no transport
+delivers data that way. Video rides an encoder, a congestion-controlled channel,
+and a decoder. State rides a reliable data packet with none of that. The two
+surface on the receiver as separate event streams, typically 30 to 80 ms out of
+phase.
 
-Portal stamps every frame and state packet with the sender's clock, then matches
-them on the receiving side into `Observation(frames, state, timestamp_us)`.
+Portal stamps every frame and every state packet with the sender's monotonic
+clock at capture time, then reassembles them on the operator side. For a state
+at `S`, a frame at `F` on track `k` is a candidate when `|S - F| <
+search_range`, where `search_range = tolerance / fps`. That is 50 ms at the
+defaults of 30 fps and 1.5 ticks. Portal takes the nearest candidate per track.
+When every declared track has one, it emits:
+
+```python
+Observation(
+    frames={"cam1": VideoFrameData, ...},  # packed RGB24, whatever the transport
+    state={"j1": 0.1, "gripper": True},    # typed per the declared dtypes
+    raw_state={"j1": 0.1, "gripper": 1.0}, # same payload widened to f64
+    timestamp_us=1717171717000000,         # the state's send-side stamp
+)
+```
+
+A state whose window closes before some track produces a frame is unmatchable,
+because timestamps only move forward. It surfaces on `on_drop` instead of
+disappearing. Both sides also declare a schema, and a field-order or dtype
+mismatch is caught by a fingerprint in the packet header rather than decoded
+into garbage.
 
 Full walkthrough in [Quickstart](docs/01-quickstart.md).
 

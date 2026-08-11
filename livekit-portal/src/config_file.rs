@@ -356,7 +356,17 @@ action_chunks:
         assert_eq!(cfg.action_chunks().len(), 1);
         assert_eq!(cfg.action_chunks()[0].horizon, 16);
 
+        assert_eq!(cfg.session(), "demo");
+        assert_eq!(cfg.role(), Role::Robot);
+        assert_eq!(cfg.fps(), 60);
+        assert_eq!(cfg.slack(), 8);
+        assert_eq!(cfg.tolerance(), 1.0);
+        assert_eq!(cfg.ping_ms(), 500);
+        assert!(!cfg.state_reliable());
+        assert!(!cfg.action_reliable());
+        assert!(cfg.reuse_stale_frames());
         assert!(cfg.action_subscription());
+        assert!(!cfg.has_e2ee_key());
     }
 
     #[test]
@@ -369,6 +379,13 @@ action_chunks:
         assert_eq!(cfg.state_schema().len(), 0);
         assert_eq!(cfg.action_schema().len(), 0);
         assert_eq!(cfg.action_chunks().len(), 0);
+        assert_eq!(cfg.fps(), 30);
+        assert_eq!(cfg.slack(), 5);
+        assert_eq!(cfg.tolerance(), 1.5);
+        assert_eq!(cfg.ping_ms(), 1000);
+        assert!(cfg.state_reliable());
+        assert!(cfg.action_reliable());
+        assert!(!cfg.reuse_stale_frames());
         assert!(!cfg.action_subscription());
     }
 

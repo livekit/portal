@@ -42,6 +42,16 @@ PortalConfig.from_yaml_file(path: str | os.PathLike, session: str, role: Role) -
 `RobotConfig` and `OperatorConfig` pin the role for you. Use them unless you have
 a reason to drive `PortalConfig` directly.
 
+Everything the file declared is readable back off the loaded config, so a value
+the file owns doesn't have to be duplicated in your process:
+
+```python
+cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
+period = 1.0 / cfg.fps        # the file's rate, not a second copy of it
+```
+
+See [the full property list](../03-portal-api.md#full-config-surface).
+
 ## A minimal file
 
 ```yaml

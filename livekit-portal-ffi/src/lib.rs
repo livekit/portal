@@ -208,6 +208,29 @@ pub struct ChunkSpec {
     pub fields: Vec<FieldSpec>,
 }
 
+/// One column of an outgoing action chunk. Mirrors `core::ChunkColumn`:
+/// `values` is the column widened to `f64`, and `dtype` is the dtype the
+/// caller claims it holds.
+///
+/// A binding sets `dtype` when it knows the caller's intent per column, and
+/// leaves it `None` when it doesn't. The Python binding leaves it `None` and
+/// runs its own category check, for the same reason `send_action` does: a
+/// Python `int` is a legitimate `I8` *and* `I32`, so an exact claim would be
+/// invented rather than observed.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChunkColumn {
+    pub values: Vec<f64>,
+    pub dtype: Option<DType>,
+}
+
+fn chunk_columns_to_core(data: HashMap<String, ChunkColumn>) -> HashMap<String, core::ChunkColumn> {
+    data.into_iter()
+        .map(|(name, c)| {
+            (name, core::ChunkColumn { values: c.values, dtype: c.dtype.map(Into::into) })
+        })
+        .collect()
+}
+
 /// Decoded video frame. `data` is packed RGB24 (R,G,B byte order, `W*H*3`
 /// bytes) on both sides — `send_video_frame` accepts RGB, and receive-side
 /// frames are color-converted from I420 (WebRTC) or codec-decoded (frame
@@ -846,16 +869,23 @@ impl Portal {
     }
 
     /// Publish an action chunk on the named declaration. `data` is
-    /// `field -> column of length horizon` widened to `f64`.
+    /// `field -> column of length horizon` widened to `f64`, each column
+    /// optionally claiming a dtype the core checks against the declared
+    /// field.
     pub fn send_action_chunk(
         &self,
         chunk_name: String,
-        data: HashMap<String, Vec<f64>>,
+        data: HashMap<String, ChunkColumn>,
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
         self.inner
-            .send_action_chunk(&chunk_name, &data, timestamp_us, in_reply_to_ts_us)
+            .send_action_chunk(
+                &chunk_name,
+                &chunk_columns_to_core(data),
+                timestamp_us,
+                in_reply_to_ts_us,
+            )
             .map_err(Into::into)
     }
 
@@ -1365,7 +1395,7 @@ impl Operator {
     pub fn send_action_chunk(
         &self,
         chunk_name: String,
-        data: HashMap<String, Vec<f64>>,
+        data: HashMap<String, ChunkColumn>,
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {

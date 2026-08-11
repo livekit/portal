@@ -664,13 +664,20 @@ impl Portal {
     /// Publish an action chunk on the named chunk schema (operator only).
     ///
     /// `data` is `field -> column of length horizon`. Columns shorter than
-    /// `horizon` are zero-padded, longer columns are truncated, and unknown
-    /// keys are warned-and-ignored once each. Use `in_reply_to_ts_us` the
-    /// same way as `send_action` to feed `metrics.policy.e2e_us_*`.
+    /// `horizon` are zero-padded, longer columns are truncated, both with a
+    /// warn-once, and unknown keys are warned-and-ignored once each. Use
+    /// `in_reply_to_ts_us` the same way as `send_action` to feed
+    /// `metrics.policy.e2e_us_*`.
+    ///
+    /// A column built with `ChunkColumn::typed` is checked against the
+    /// declared field dtype and returns `PortalError::DtypeMismatch` on
+    /// disagreement, the same rejection `send_action` gives a `TypedValue`
+    /// of the wrong variant. `ChunkColumn::untyped` (and the `From<Vec<f64>>`
+    /// conversion) waives the check and coerces.
     pub fn send_action_chunk(
         &self,
         chunk_name: &str,
-        data: &HashMap<String, Vec<f64>>,
+        data: &HashMap<String, ChunkColumn>,
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
@@ -710,7 +717,7 @@ impl Portal {
                 .fields
                 .iter()
                 .map(|f| {
-                    let mut col = data.get(&f.name).cloned().unwrap_or_default();
+                    let mut col = data.get(&f.name).map(|c| c.values.clone()).unwrap_or_default();
                     if col.len() < horizon {
                         col.resize(horizon, 0.0);
                     } else if col.len() > horizon {

@@ -20,7 +20,7 @@ use crate::serialization::{
     deserialize_values, schema_fingerprint, serialize_action, serialize_chunk, serialize_values,
 };
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
-use crate::types::{Action, ActionChunk, Role, State, TypedValue, to_value_maps};
+use crate::types::{Action, ActionChunk, ChunkColumn, Role, State, TypedValue, to_value_maps};
 use crate::video::now_us;
 
 /// Reserved Portal topics. State and action travel as data packets;
@@ -247,6 +247,57 @@ impl DataPublisher {
     }
 }
 
+/// Reject a chunk column whose claimed dtype disagrees with the declared
+/// field. The scalar counterpart is `DataPublisher::check_dtypes`, and the
+/// semantics match: declarations are compared and values are never
+/// inspected, so this stays O(fields) regardless of horizon. A column that
+/// claims nothing is coerced to the declared dtype at encode.
+///
+/// Free-standing so it's testable without a live `LocalParticipant`.
+fn check_chunk_dtypes(
+    fields: &[FieldSpec],
+    data: &HashMap<String, ChunkColumn>,
+) -> PortalResult<()> {
+    for field in fields {
+        // Absent fields skip the check and zero-fill, matching how the
+        // scalar path skips absent keys (there they carry forward instead).
+        if let Some(column) = data.get(&field.name)
+            && let Some(claimed) = column.dtype
+            && claimed != field.dtype
+        {
+            return Err(PortalError::DtypeMismatch {
+                field: field.name.clone(),
+                expected: field.dtype,
+                got: claimed.variant_name(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// How a column's length compares to the declared horizon, and therefore
+/// what `serialize_chunk` will do about it. Carries lengths rather than a
+/// formatted message so classification never allocates — the message is
+/// built only for a column that actually warns.
+#[derive(Debug, PartialEq)]
+enum ColumnFill {
+    Exact,
+    Missing,
+    /// Column is `n` long against a longer horizon, so the tail zero-pads.
+    Short(usize),
+    /// Column is `n` long against a shorter horizon, so the tail is dropped.
+    Long(usize),
+}
+
+fn classify_column_len(got: Option<usize>, horizon: usize) -> ColumnFill {
+    match got {
+        None => ColumnFill::Missing,
+        Some(n) if n == horizon => ColumnFill::Exact,
+        Some(n) if n < horizon => ColumnFill::Short(n),
+        Some(n) => ColumnFill::Long(n),
+    }
+}
+
 /// Update `last` in place with values from `map` for each declared field,
 /// leaving other slots untouched (carry-forward). Typed values are
 /// lossless-widened to `f64` on the way in.
@@ -384,6 +435,10 @@ pub(crate) struct ChunkPublisher {
     /// matches `serialize_chunk`'s output channel.
     warned_saturated: Mutex<HashSet<usize>>,
     warned_unknown_keys: Mutex<HashSet<String>>,
+    /// Fields already warned about a column length that isn't `horizon`.
+    /// Keyed by field name, so a caller that is consistently short warns
+    /// once rather than once per send.
+    warned_length: Mutex<HashSet<String>>,
 }
 
 impl ChunkPublisher {
@@ -414,6 +469,7 @@ impl ChunkPublisher {
             metrics,
             warned_saturated: Mutex::new(HashSet::new()),
             warned_unknown_keys: Mutex::new(HashSet::new()),
+            warned_length: Mutex::new(HashSet::new()),
         }
     }
 
@@ -422,19 +478,26 @@ impl ChunkPublisher {
     /// dtype; integer overflow saturates and warns once per
     /// `(t, field_index)`.
     ///
+    /// A column that claims a dtype (`ChunkColumn::dtype == Some`) is
+    /// checked against the declared field and a mismatch is rejected,
+    /// mirroring `DataPublisher::check_dtypes` for scalar actions.
+    ///
     /// `timestamp_us = None` resolves to `now_us()`. `in_reply_to_ts_us`
     /// links the chunk back to the observation that produced it for
     /// `metrics.policy.e2e_us_*`. Wrong-length columns are accepted and
     /// padded with `0.0` (rather than rejected) so partial fills during
     /// development don't fail noisily — production callers should always
-    /// supply the full column.
+    /// supply the full column, and a length that isn't `horizon` warns
+    /// once per field.
     pub fn send(
         &self,
-        data: &HashMap<String, Vec<f64>>,
+        data: &HashMap<String, ChunkColumn>,
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
+        self.check_dtypes(data)?;
         self.warn_unknown_keys(data);
+        self.warn_length(data);
         let ts = timestamp_us.unwrap_or_else(now_us);
         let out = serialize_chunk(self.fingerprint, ts, in_reply_to_ts_us, &self.spec, data);
         if !out.saturated_indices.is_empty() {
@@ -456,7 +519,11 @@ impl ChunkPublisher {
         Ok(())
     }
 
-    fn warn_unknown_keys(&self, data: &HashMap<String, Vec<f64>>) {
+    fn check_dtypes(&self, data: &HashMap<String, ChunkColumn>) -> PortalResult<()> {
+        check_chunk_dtypes(&self.spec.fields, data)
+    }
+
+    fn warn_unknown_keys(&self, data: &HashMap<String, ChunkColumn>) {
         for key in data.keys() {
             if self.spec.fields.iter().any(|f| &f.name == key) {
                 continue;
@@ -469,6 +536,45 @@ impl ChunkPublisher {
                     key
                 );
             }
+        }
+    }
+
+    /// Report columns that aren't exactly `horizon` long. `serialize_chunk`
+    /// pads with `0.0` and truncates the overflow, which for joint targets
+    /// means commanding zero rather than doing nothing — silent is the wrong
+    /// default even though accepting the send is.
+    fn warn_length(&self, data: &HashMap<String, ChunkColumn>) {
+        let horizon = self.spec.horizon as usize;
+        for field in &self.spec.fields {
+            let fill = classify_column_len(data.get(&field.name).map(|c| c.values.len()), horizon);
+            if fill == ColumnFill::Exact {
+                continue;
+            }
+            // Claim the warn slot before formatting. A caller that is
+            // consistently short would otherwise build a message per send
+            // for the lifetime of the publisher and throw it away.
+            {
+                let mut warned = self.warned_length.lock();
+                if !warned.insert(field.name.clone()) {
+                    continue;
+                }
+            }
+            let detail = match fill {
+                ColumnFill::Exact => unreachable!("filtered above"),
+                ColumnFill::Missing => format!("missing, padded with {horizon} zeros"),
+                ColumnFill::Short(n) => {
+                    format!("has {n} of {horizon} timesteps, padded with {} zeros", horizon - n)
+                }
+                ColumnFill::Long(n) => {
+                    format!("has {n} of {horizon} timesteps, truncated to {horizon}")
+                }
+            };
+            log::warn!(
+                "[chunk-length] chunk '{}': field '{}' {}",
+                self.spec.name,
+                field.name,
+                detail
+            );
         }
     }
 
@@ -725,6 +831,76 @@ mod tests {
         assert_eq!(err.0, "gripper");
         assert_eq!(err.1, DType::Bool);
         assert_eq!(err.2, "F32");
+    }
+
+    fn chunk_fields() -> Vec<FieldSpec> {
+        vec![
+            FieldSpec::new("joint", DType::F32),
+            FieldSpec::new("gripper", DType::Bool),
+            FieldSpec::new("mode", DType::I8),
+        ]
+    }
+
+    #[test]
+    fn chunk_claimed_dtype_matching_declaration_passes() {
+        let data: HashMap<String, ChunkColumn> = [
+            ("joint".to_string(), ChunkColumn::typed(DType::F32, vec![0.5, 0.25])),
+            ("gripper".to_string(), ChunkColumn::typed(DType::Bool, vec![1.0, 0.0])),
+        ]
+        .into_iter()
+        .collect();
+        assert!(check_chunk_dtypes(&chunk_fields(), &data).is_ok());
+    }
+
+    #[test]
+    fn chunk_claimed_dtype_mismatch_is_rejected() {
+        // An F32 column against the declared Bool gripper — the chunk
+        // equivalent of handing `send_action` a `TypedValue::F32` for a
+        // Bool field.
+        let data: HashMap<String, ChunkColumn> =
+            [("gripper".to_string(), ChunkColumn::typed(DType::F32, vec![1.0, 0.0]))]
+                .into_iter()
+                .collect();
+        let err = check_chunk_dtypes(&chunk_fields(), &data).unwrap_err();
+        match err {
+            PortalError::DtypeMismatch { field, expected, got } => {
+                assert_eq!(field, "gripper");
+                assert_eq!(expected, DType::Bool);
+                assert_eq!(got, "F32");
+            }
+            other => panic!("expected DtypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_unclaimed_dtype_waives_the_check() {
+        // The uniform-tensor path: one f32 policy output fanned across a
+        // mixed schema can't honestly claim Bool for the gripper, so it
+        // claims nothing and coerces instead of failing.
+        let data: HashMap<String, ChunkColumn> = chunk_fields()
+            .iter()
+            .map(|f| (f.name.clone(), ChunkColumn::untyped(vec![1.0, 0.0])))
+            .collect();
+        assert!(check_chunk_dtypes(&chunk_fields(), &data).is_ok());
+    }
+
+    #[test]
+    fn chunk_dtype_check_ignores_absent_and_unknown_fields() {
+        // Absent declared field: skipped here, zero-filled at encode.
+        // Unknown key: skipped here, warned separately by warn_unknown_keys.
+        let data: HashMap<String, ChunkColumn> =
+            [("extra".to_string(), ChunkColumn::typed(DType::U8, vec![1.0]))].into_iter().collect();
+        assert!(check_chunk_dtypes(&chunk_fields(), &data).is_ok());
+    }
+
+    #[test]
+    fn column_length_classification_covers_pad_truncate_and_missing() {
+        assert_eq!(classify_column_len(Some(16), 16), ColumnFill::Exact);
+        assert_eq!(classify_column_len(None, 16), ColumnFill::Missing);
+        assert_eq!(classify_column_len(Some(10), 16), ColumnFill::Short(10));
+        assert_eq!(classify_column_len(Some(20), 16), ColumnFill::Long(20));
+        // An empty column is missing data, not a zero-length exact match.
+        assert_eq!(classify_column_len(Some(0), 16), ColumnFill::Short(0));
     }
 
     #[test]

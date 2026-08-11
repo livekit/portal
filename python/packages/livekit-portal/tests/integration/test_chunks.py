@@ -157,7 +157,11 @@ async def test_nan_inf_round_trip(pair):
 
 async def test_i8_saturation_clamps(pair):
     """I8 column with out-of-range values. Encoder saturates to
-    [-128, 127] and emits a one-shot warn; decode still succeeds."""
+    [-128, 127] and emits a one-shot warn; decode still succeeds.
+
+    The column is `int`, not `float`: the send-side dtype check rejects a
+    float column for an integer field, same as `send_action` rejects a
+    float scalar. Saturation is about range, not type."""
     pair.robot_cfg.add_action_chunk(
         "ctrl", horizon=4, fields=[("mode", DType.I8)]
     )
@@ -169,9 +173,7 @@ async def test_i8_saturation_clamps(pair):
     await pair.start()
     pair.robot.on_action_chunk("ctrl", lambda c: received.append(c))
 
-    pair.operator.send_action_chunk(
-        "ctrl", {"mode": [500.0, -500.0, 42.0, 0.0]}
-    )
+    pair.operator.send_action_chunk("ctrl", {"mode": [500, -500, 42, 0]})
     await asyncio.sleep(SETTLE_S)
 
     assert len(received) == 1
@@ -179,7 +181,13 @@ async def test_i8_saturation_clamps(pair):
 
 
 async def test_bool_round_trip(pair):
-    """BOOL column: any non-zero non-NaN is truthy."""
+    """BOOL column round trips as bools.
+
+    The wire encoder's f64 rule (any non-zero non-NaN is truthy, NaN is
+    false and flags saturation) is covered by `dtype::tests::
+    bool_maps_zero_and_nonzero`. It isn't reachable from here on purpose:
+    the send-side dtype check rejects a float column for a BOOL field, the
+    same way `send_action` rejects a float scalar."""
     pair.robot_cfg.add_action_chunk(
         "grip", horizon=4, fields=[("g", DType.BOOL)]
     )
@@ -191,7 +199,7 @@ async def test_bool_round_trip(pair):
     await pair.start()
     pair.robot.on_action_chunk("grip", lambda c: received.append(c))
 
-    pair.operator.send_action_chunk("grip", {"g": [1.0, 0.0, -1.0, 0.5]})
+    pair.operator.send_action_chunk("grip", {"g": [True, False, True, True]})
     await asyncio.sleep(SETTLE_S)
 
     assert len(received) == 1

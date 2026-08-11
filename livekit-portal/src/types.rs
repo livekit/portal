@@ -76,17 +76,7 @@ impl TypedValue {
 
     /// Static name of the variant, for error messages.
     pub fn variant_name(self) -> &'static str {
-        match self {
-            TypedValue::F64(_) => "F64",
-            TypedValue::F32(_) => "F32",
-            TypedValue::I32(_) => "I32",
-            TypedValue::I16(_) => "I16",
-            TypedValue::I8(_) => "I8",
-            TypedValue::U32(_) => "U32",
-            TypedValue::U16(_) => "U16",
-            TypedValue::U8(_) => "U8",
-            TypedValue::Bool(_) => "Bool",
-        }
+        self.dtype().variant_name()
     }
 
     /// Lossless widening back to `f64`. Useful when a consumer wants to
@@ -141,6 +131,54 @@ pub struct Action {
     /// `Portal::active_operator()` to label rows so the label cannot
     /// race with a handoff.
     pub sender: String,
+}
+
+/// One column of an outgoing action chunk: `horizon` values widened to
+/// `f64`, plus the dtype the caller claims they are.
+///
+/// **Why the claim.** A scalar action crosses `Portal::send_action` as a
+/// `TypedValue`, whose variant states the caller's intent, and
+/// `check_dtypes` compares that against the declared schema. Chunk columns
+/// are `Vec<f64>` because a horizon of rows wants to stay a flat numeric
+/// buffer, so the variant tag has nowhere to live. `dtype` is that tag,
+/// hoisted to the column. It gives chunks the same send-time dtype
+/// rejection scalar actions already get.
+///
+/// Note that the check compares declarations, not values, exactly as
+/// `check_dtypes` does. Nothing here inspects the `f64`s. Out-of-range
+/// values still saturate at encode and warn once per `(t, field)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkColumn {
+    /// The column, length `horizon`. Short columns zero-pad and long ones
+    /// truncate, both with a warn-once.
+    pub values: Vec<f64>,
+    /// The dtype the caller claims this column holds. `Some(d)` is checked
+    /// against the field's declared dtype and a mismatch is rejected with
+    /// `PortalError::DtypeMismatch`. `None` waives the check and coerces to
+    /// the declared dtype, which is what a uniform policy tensor needs: a
+    /// single `f32` array fanned out across a mixed schema cannot honestly
+    /// claim `Bool` for the gripper column.
+    pub dtype: Option<DType>,
+}
+
+impl ChunkColumn {
+    /// A column that claims a dtype. Mismatches against the declared field
+    /// are rejected at send.
+    pub fn typed(dtype: DType, values: Vec<f64>) -> Self {
+        Self { values, dtype: Some(dtype) }
+    }
+
+    /// A column that claims nothing and coerces to the declared dtype.
+    pub fn untyped(values: Vec<f64>) -> Self {
+        Self { values, dtype: None }
+    }
+}
+
+impl From<Vec<f64>> for ChunkColumn {
+    /// Bare columns coerce, matching the pre-`ChunkColumn` behaviour.
+    fn from(values: Vec<f64>) -> Self {
+        Self::untyped(values)
+    }
 }
 
 /// One action chunk received from the operator. Surfaces in

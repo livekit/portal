@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::config::{ChunkSpec, FieldSpec};
 use crate::dtype::DType;
 use crate::error::PortalError;
+use crate::types::ChunkColumn;
 
 /// Plain-stream wire prefix: 4-byte schema fingerprint + 8-byte
 /// `timestamp_us`. Used by `portal_state`.
@@ -201,7 +202,8 @@ pub(crate) fn deserialize_action(
 /// `data` is `field_name -> column of length horizon`. Missing fields
 /// fill with `0.0` (caller's responsibility to provide the column —
 /// chunk schema doesn't carry-forward like scalar state/action because
-/// chunks are whole units, not partial updates).
+/// chunks are whole units, not partial updates). Each column's claimed
+/// dtype is validated upstream in `ChunkPublisher::send`, not here.
 ///
 /// `saturated_indices` returns flat `(t * fields.len() + f)` indices so
 /// the caller can map back to `(field_name, t)` for warnings.
@@ -210,7 +212,7 @@ pub(crate) fn serialize_chunk(
     timestamp_us: u64,
     in_reply_to_ts_us: Option<u64>,
     spec: &ChunkSpec,
-    data: &HashMap<String, Vec<f64>>,
+    data: &HashMap<String, ChunkColumn>,
 ) -> EncodeResult {
     let row_bytes: usize = spec.fields.iter().map(|f| f.dtype.size_bytes()).sum();
     let payload_bytes = row_bytes * spec.horizon as usize;
@@ -221,8 +223,11 @@ pub(crate) fn serialize_chunk(
     let mut saturated_indices = Vec::new();
     let n_fields = spec.fields.len();
     let empty: Vec<f64> = Vec::new();
-    let columns: Vec<&Vec<f64>> =
-        spec.fields.iter().map(|f| data.get(&f.name).unwrap_or(&empty)).collect();
+    let columns: Vec<&Vec<f64>> = spec
+        .fields
+        .iter()
+        .map(|f| data.get(&f.name).map(|c| &c.values).unwrap_or(&empty))
+        .collect();
     for t in 0..spec.horizon as usize {
         for (fi, field) in spec.fields.iter().enumerate() {
             let v = columns[fi].get(t).copied().unwrap_or(0.0);
@@ -511,8 +516,8 @@ mod tests {
         let spec = chunk_spec("act", 3, &[("j1", DType::F32), ("j2", DType::F32)]);
         let fp = chunk_fingerprint(&spec);
         let mut data = HashMap::new();
-        data.insert("j1".to_string(), vec![0.1, 0.2, 0.3]);
-        data.insert("j2".to_string(), vec![1.0, 1.5, 2.0]);
+        data.insert("j1".to_string(), vec![0.1, 0.2, 0.3].into());
+        data.insert("j2".to_string(), vec![1.0, 1.5, 2.0].into());
         let out = serialize_chunk(fp, 999, Some(500), &spec, &data);
         let (ts, reply, columns) = deserialize_chunk(&out.payload, fp, &spec).unwrap();
         assert_eq!(ts, 999);
@@ -533,9 +538,9 @@ mod tests {
         );
         let fp = chunk_fingerprint(&spec);
         let mut data = HashMap::new();
-        data.insert("joint".to_string(), vec![0.5, -0.25]);
-        data.insert("gripper".to_string(), vec![1.0, 0.0]);
-        data.insert("mode".to_string(), vec![3.0, -1.0]);
+        data.insert("joint".to_string(), vec![0.5, -0.25].into());
+        data.insert("gripper".to_string(), vec![1.0, 0.0].into());
+        data.insert("mode".to_string(), vec![3.0, -1.0].into());
         let out = serialize_chunk(fp, 1, None, &spec, &data);
         // Header (20) + 2 rows of (4 + 1 + 1) = 12 → 32 bytes total.
         assert_eq!(out.payload.len(), CORRELATED_HEADER_LEN + 2 * (4 + 1 + 1));
@@ -552,7 +557,7 @@ mod tests {
         let spec = chunk_spec("act", 2, &[("j1", DType::F64), ("j2", DType::F64)]);
         let fp = chunk_fingerprint(&spec);
         let mut data = HashMap::new();
-        data.insert("j1".to_string(), vec![1.0, 2.0]);
+        data.insert("j1".to_string(), vec![1.0, 2.0].into());
         // j2 omitted — should serialize as zeros, not panic.
         let out = serialize_chunk(fp, 0, None, &spec, &data);
         let (_, _, columns) = deserialize_chunk(&out.payload, fp, &spec).unwrap();
@@ -579,9 +584,9 @@ mod tests {
         let spec = chunk_spec("act", 3, &[("a", DType::F64), ("b", DType::I8)]);
         let fp = chunk_fingerprint(&spec);
         let mut data = HashMap::new();
-        data.insert("a".to_string(), vec![0.0, 0.0, 0.0]);
+        data.insert("a".to_string(), vec![0.0, 0.0, 0.0].into());
         // b at t=1 saturates.
-        data.insert("b".to_string(), vec![0.0, 500.0, 0.0]);
+        data.insert("b".to_string(), vec![0.0, 500.0, 0.0].into());
         let out = serialize_chunk(fp, 0, None, &spec, &data);
         // n_fields=2, t=1, fi=1 → flat = 1 * 2 + 1 = 3.
         assert_eq!(out.saturated_indices, vec![3]);

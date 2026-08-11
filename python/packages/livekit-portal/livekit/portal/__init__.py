@@ -283,11 +283,61 @@ class Observation:
     timestamp_us: int
 
 
+def _validate_chunk_column(
+    name: str, column: Any, dtype: DType
+) -> None:
+    """Reject a chunk column whose element types disagree with the declared
+    dtype. The scalar counterpart is `_validate_send_values`, and the rules
+    are identical — this is the same category check applied per element.
+
+    Like the scalar path, the claim is a *category*, not an exact dtype: a
+    Python `int` is a legitimate `I8` and `I32` both, so this cannot narrow
+    further and does not try. Out-of-range values still saturate at encode
+    and warn once per `(t, field)`, exactly as an out-of-range action does.
+
+    numpy columns are checked once via `column.dtype`, not per element, so a
+    long horizon costs the same as a short one. Only list-like columns pay
+    per-element cost, and only up to the first offender.
+    """
+    if _np is not None and isinstance(column, _np.ndarray):
+        kind = column.dtype.kind
+        if dtype == DType.BOOL:
+            ok = kind == "b"
+        elif dtype in _INT_DTYPES:
+            ok = kind in ("i", "u")
+        else:  # float dtype
+            ok = kind in ("f", "i", "u")
+        if not ok:
+            raise PortalError.DtypeMismatch(
+                f"chunk field '{name}' declared as {dtype} but sent as an "
+                f"array of {column.dtype}"
+            )
+        return
+    for value in column:
+        if dtype == DType.BOOL:
+            ok = isinstance(value, _NUMPY_BOOL_TYPES)
+        elif dtype in _INT_DTYPES:
+            ok = (
+                isinstance(value, numbers.Integral)
+                and not isinstance(value, _NUMPY_BOOL_TYPES)
+            )
+        else:  # float dtype
+            ok = (
+                isinstance(value, numbers.Real)
+                and not isinstance(value, _NUMPY_BOOL_TYPES)
+            )
+        if not ok:
+            raise PortalError.DtypeMismatch(
+                f"chunk field '{name}' declared as {dtype} but sent as "
+                f"{type(value).__name__}"
+            )
+
+
 def _normalize_chunk_data(
     data: Any, schema: List[FieldSpec]
-) -> Dict[str, List[float]]:
-    """Coerce send-side chunk data into the `Dict[str, list[float]]` the
-    FFI accepts. Two input shapes:
+) -> Dict[str, "_ffi.ChunkColumn"]:
+    """Coerce send-side chunk data into the `Dict[str, ChunkColumn]` the FFI
+    accepts. Two input shapes:
 
     * `numpy.ndarray` of shape `(horizon, len(schema))` — split into
       per-field columns in declared order. Convenient for uniform-dtype
@@ -295,26 +345,46 @@ def _normalize_chunk_data(
     * `Dict[str, ndarray | list]` — pass-through, with each column cast
       to a `list[float]`. Unknown keys go through to the core, which
       warns once each.
+
+    The dict form is dtype-checked per column (see `_validate_chunk_column`).
+    The ndarray form is **not**: one uniform tensor spread across a mixed
+    schema is the case that shape exists for, and an `f32` array is a
+    legitimate way to express a `Bool` gripper column there. It is validated
+    for shape only.
+
+    Every column crosses the FFI with `dtype=None`, waiving the core's
+    `check_chunk_dtypes`, because the category check above has already run
+    and a Python value cannot claim an exact dtype honestly. `dtype` is for
+    Rust callers, who can.
     """
     if _np is not None and isinstance(data, _np.ndarray):
         if data.ndim != 2 or data.shape[1] != len(schema):
             raise PortalError.Deserialization(
                 f"chunk ndarray must be shape (horizon, {len(schema)}); got {data.shape}"
             )
-        cols: Dict[str, List[float]] = {}
+        cols: Dict[str, "_ffi.ChunkColumn"] = {}
         for i, field in enumerate(schema):
-            cols[field.name] = data[:, i].astype(_np.float64).tolist()
+            cols[field.name] = _ffi.ChunkColumn(
+                values=data[:, i].astype(_np.float64).tolist(), dtype=None
+            )
         return cols
     if not isinstance(data, dict):
         raise PortalError.Deserialization(
             "chunk data must be a dict or 2D numpy array"
         )
+    declared: Dict[str, DType] = {f.name: f.dtype for f in schema}
     cols = {}
     for name, column in data.items():
+        dtype = declared.get(name)
+        # Unknown keys skip validation — the core warns once each, matching
+        # how `_validate_send_values` leaves them to the publisher.
+        if dtype is not None:
+            _validate_chunk_column(name, column, dtype)
         if _np is not None and isinstance(column, _np.ndarray):
-            cols[name] = column.astype(_np.float64).tolist()
+            values = column.astype(_np.float64).tolist()
         else:
-            cols[name] = [float(v) for v in column]
+            values = [float(v) for v in column]
+        cols[name] = _ffi.ChunkColumn(values=values, dtype=None)
     return cols
 
 

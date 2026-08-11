@@ -233,6 +233,10 @@ Multiple chunks are allowed. Each is dispatched to its own callback by schema
 fingerprint, and the fingerprint mixes in the name and horizon, so two chunks
 cannot collide.
 
+These dtypes do more than fix the wire width. Received columns arrive as NumPy
+arrays already in the declared dtype, and outgoing columns are type-checked
+against it. See [Action chunks](../03-portal-api.md#action-chunks).
+
 Chunks travel as byte streams rather than data packets, so a full horizon is not
 bounded by the 15 KB packet limit.
 

@@ -398,6 +398,124 @@ def test_send_action_chunk_accepts_2d_ndarray():
         pass
 
 
+# --- Chunk send-side dtype enforcement --------------------------------------
+#
+# Parity with the scalar checks above. The dict form is validated per column
+# with the same category rules `_validate_send_values` applies to a scalar.
+# The 2D ndarray form is deliberately exempt: one uniform policy tensor
+# fanned across a mixed schema is the case that shape exists for.
+
+
+def _chunk_portal():
+    cfg = PortalConfig("vla", Role.OPERATOR)
+    cfg.add_action_chunk(
+        "act",
+        horizon=2,
+        fields=[("j1", DType.F32), ("gripper", DType.BOOL), ("mode", DType.I8)],
+    )
+    return Portal(cfg)
+
+
+def test_send_chunk_rejects_float_column_for_bool_field():
+    portal = _chunk_portal()
+    with pytest.raises(PortalError.DtypeMismatch) as info:
+        portal.send_action_chunk("act", {"gripper": [0.0, 1.0]})
+    msg = str(info.value)
+    assert "gripper" in msg
+    assert "BOOL" in msg
+
+
+def test_send_chunk_rejects_float_column_for_int_field():
+    portal = _chunk_portal()
+    with pytest.raises(PortalError.DtypeMismatch):
+        portal.send_action_chunk("act", {"mode": [3.5, 1.0]})
+
+
+def test_send_chunk_rejects_bool_column_for_int_field():
+    portal = _chunk_portal()
+    with pytest.raises(PortalError.DtypeMismatch):
+        portal.send_action_chunk("act", {"mode": [True, False]})
+
+
+def test_send_chunk_rejects_float_ndarray_column_for_bool_field():
+    # The per-column ndarray check reads `column.dtype` once rather than
+    # walking `horizon` elements, so cover it separately from the list path.
+    np = pytest.importorskip("numpy")
+    portal = _chunk_portal()
+    with pytest.raises(PortalError.DtypeMismatch) as info:
+        portal.send_action_chunk(
+            "act", {"gripper": np.array([0.0, 1.0], dtype=np.float32)}
+        )
+    assert "gripper" in str(info.value)
+
+
+def test_send_chunk_accepts_correctly_typed_columns():
+    np = pytest.importorskip("numpy")
+    portal = _chunk_portal()
+    try:
+        portal.send_action_chunk(
+            "act",
+            {
+                "j1": np.array([0.5, 0.25], dtype=np.float32),
+                "gripper": np.array([True, False]),
+                "mode": [3, -1],
+            },
+        )
+    except PortalError.DtypeMismatch as e:
+        pytest.fail(f"correctly typed chunk columns rejected: {e}")
+    except PortalError:
+        # No connected peer — validation passed, which is what we test.
+        pass
+
+
+def test_send_chunk_accepts_int_column_for_float_field():
+    # Same numeric promotion the scalar path allows.
+    portal = _chunk_portal()
+    try:
+        portal.send_action_chunk("act", {"j1": [1, 2]})
+    except PortalError.DtypeMismatch:
+        pytest.fail("int column should coerce into a float-declared field")
+    except PortalError:
+        pass
+
+
+def test_send_chunk_unknown_column_is_not_blocked_by_validator():
+    portal = _chunk_portal()
+    try:
+        portal.send_action_chunk("act", {"j1": [0.5, 0.25], "nope": [1.0, 2.0]})
+    except PortalError.DtypeMismatch:
+        pytest.fail("unknown chunk columns must not trigger dtype validation")
+    except PortalError:
+        pass
+
+
+def test_send_chunk_ndarray_form_waives_the_dtype_check():
+    # A uniform f32 tensor against a schema with a BOOL and an I8 field.
+    # Per-field checking would reject this, and it is the documented shape
+    # for VLA output, so it has to pass.
+    np = pytest.importorskip("numpy")
+    portal = _chunk_portal()
+    arr = np.array([[0.5, 1.0, 3.0], [0.25, 0.0, -1.0]], dtype=np.float32)
+    try:
+        portal.send_action_chunk("act", arr)
+    except PortalError.DtypeMismatch as e:
+        pytest.fail(f"uniform ndarray form must not be dtype-checked: {e}")
+    except PortalError:
+        pass
+
+
+def test_send_chunk_short_column_still_accepted():
+    # Length is a warn-and-pad in the core, not a rejection. Only the dtype
+    # check raises.
+    portal = _chunk_portal()
+    try:
+        portal.send_action_chunk("act", {"j1": [0.5]})
+    except PortalError.DtypeMismatch:
+        pytest.fail("a short column must not raise DtypeMismatch")
+    except PortalError:
+        pass
+
+
 def test_send_action_chunk_unknown_name_raises():
     cfg = PortalConfig("vla", Role.OPERATOR)
     cfg.add_action_chunk("act", horizon=3, fields=[("j1", DType.F32)])

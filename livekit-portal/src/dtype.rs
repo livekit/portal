@@ -20,6 +20,23 @@ pub enum DType {
 }
 
 impl DType {
+    /// Stable variant name, for error messages. Matches the `TypedValue`
+    /// variant that carries this dtype so `DtypeMismatch` reads the same
+    /// whether it came from a scalar value or a chunk column.
+    pub fn variant_name(self) -> &'static str {
+        match self {
+            DType::F64 => "F64",
+            DType::F32 => "F32",
+            DType::I32 => "I32",
+            DType::I16 => "I16",
+            DType::I8 => "I8",
+            DType::U32 => "U32",
+            DType::U16 => "U16",
+            DType::U8 => "U8",
+            DType::Bool => "Bool",
+        }
+    }
+
     /// Byte width on the wire.
     pub fn size_bytes(self) -> usize {
         match self {

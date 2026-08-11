@@ -304,6 +304,27 @@ The peer receives the clamped value and never learns the original. `NaN` becomes
 
 **Fix.** Widen the dtype, or scale the value before sending.
 
+### chunk-length
+
+```
+[chunk-length] chunk 'act': field 'j3' has 10 of 16 timesteps, padded with 6 zeros
+[chunk-length] chunk 'act': field 'j4' missing, padded with 16 zeros
+[chunk-length] chunk 'act': field 'j5' has 20 of 16 timesteps, truncated to 16
+```
+
+A chunk column was not exactly `horizon` long. The send still goes out: short
+columns and missing columns zero-pad, long ones truncate. Logged once per field,
+then silent.
+
+Read the zeros literally. A chunk is a whole unit, not a partial update, so an
+omitted column does **not** carry forward the way an omitted scalar action field
+does. Zero is a real commanded value, and for a position target it means move to
+zero.
+
+**Fix.** Send the full column. If your policy emits a shorter horizon than you
+declared, redeclare the chunk at the horizon it actually produces rather than
+letting the tail pad.
+
 ### unknown-chunk
 
 ```

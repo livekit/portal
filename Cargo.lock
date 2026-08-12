@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "livekit-portal"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1723,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "livekit-portal-ffi"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "ctor",

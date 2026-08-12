@@ -88,6 +88,15 @@ struct VideoEntry {
     /// codecs. Omit to use the default ceiling.
     #[serde(default)]
     max_bitrate_kbps: Option<u32>,
+    /// Publish multiple spatial layers. WebRTC codecs only. Defaults to
+    /// `false`.
+    #[serde(default)]
+    simulcast: Option<bool>,
+    /// Treat the source as screen content, pinning resolution and dropping
+    /// frames under pressure instead of rescaling. WebRTC codecs only.
+    /// Defaults to `false`.
+    #[serde(default)]
+    screencast: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,7 +186,7 @@ impl PortalConfig {
                 Codec::Mjpeg => DEFAULT_MJPEG_QUALITY,
                 _ => 0,
             });
-            cfg.add_video(&v.name, v.codec, quality, v.max_bitrate_kbps);
+            cfg.add_video(&v.name, v.codec, quality, v.max_bitrate_kbps, v.simulcast, v.screencast);
         }
 
         if !parsed.state.is_empty() {
@@ -263,6 +272,16 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
                 return Err(ConfigFileError::Invalid(format!(
                     "video '{}': max_bitrate_kbps must be > 0",
                     v.name
+                )));
+            }
+        }
+        // Both toggles configure the WebRTC encoder, which byte-stream tracks
+        // never reach. Reject rather than silently ignore, same as bitrate.
+        for (field, set) in [("simulcast", v.simulcast), ("screencast", v.screencast)] {
+            if set.is_some() && !v.codec.is_webrtc() {
+                return Err(ConfigFileError::Invalid(format!(
+                    "video '{}': {field} applies to the WebRTC codecs only, not {:?}",
+                    v.name, v.codec
                 )));
             }
         }
@@ -410,6 +429,76 @@ videos:
         assert_eq!(cfg.frame_video_tracks().len(), 0);
         assert_eq!(cfg.video_tracks()[1].codec, Codec::Vp9);
         assert_eq!(cfg.video_tracks()[1].max_bitrate_kbps, Some(3000));
+    }
+
+    #[test]
+    fn simulcast_and_screencast_default_to_false() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: h264 }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        assert!(!cfg.video_tracks()[0].simulcast);
+        assert!(!cfg.video_tracks()[0].screencast);
+    }
+
+    #[test]
+    fn simulcast_and_screencast_parsed_per_track() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: a, codec: h264, simulcast: true }
+  - { name: b, codec: vp9, screencast: true }
+  - { name: c, codec: av1, simulcast: true, screencast: true }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        let t = cfg.video_tracks();
+        assert_eq!((t[0].simulcast, t[0].screencast), (true, false));
+        assert_eq!((t[1].simulcast, t[1].screencast), (false, true));
+        assert_eq!((t[2].simulcast, t[2].screencast), (true, true));
+    }
+
+    /// Explicit `simulcast: false` is preserved rather than being folded into
+    /// "unset", so the YAML reads the same as the resolved config.
+    #[test]
+    fn explicit_false_is_accepted() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: h264, simulcast: false, screencast: false }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        assert!(!cfg.video_tracks()[0].simulcast);
+        assert!(!cfg.video_tracks()[0].screencast);
+    }
+
+    #[test]
+    fn simulcast_on_byte_stream_codec_rejected() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: mjpeg, quality: 80, simulcast: true }
+"#;
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        match err {
+            ConfigFileError::Invalid(msg) => assert!(msg.contains("simulcast")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn screencast_on_byte_stream_codec_rejected() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: cam, codec: raw, screencast: false }
+"#;
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        match err {
+            ConfigFileError::Invalid(msg) => assert!(msg.contains("screencast")),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]

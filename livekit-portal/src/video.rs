@@ -37,6 +37,7 @@ pub(crate) struct VideoPublisher {
     fps: u32,
     codec: Codec,
     max_bitrate_kbps: Option<u32>,
+    simulcast: bool,
 }
 
 /// Map a Portal WebRTC codec to the libwebrtc codec the publish path sets.
@@ -63,12 +64,22 @@ impl VideoPublisher {
         fps: u32,
         codec: Codec,
         max_bitrate_kbps: Option<u32>,
+        simulcast: bool,
+        screencast: bool,
     ) -> Self {
         let resolution = VideoResolution { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
-        let source = NativeVideoSource::new(resolution, false);
+        // `screencast` is libwebrtc's content-type hint, and it is the only
+        // handle the SDK gives us on degradation preference (there is no
+        // `degradation_preference` field on `TrackPublishOptions`). Camera
+        // content (`false`) means `MAINTAIN_FRAMERATE`: under CPU overuse or
+        // bitrate pressure the adapter rescales frames before they reach the
+        // encoder, so subscribers see the resolution shift mid-session.
+        // Screen content (`true`) means `MAINTAIN_RESOLUTION`, which pins the
+        // geometry and sheds frames instead.
+        let source = NativeVideoSource::new(resolution, screencast);
         let rtc_source = RtcVideoSource::Native(source.clone());
         let track = LocalVideoTrack::create_video_track(name, rtc_source);
-        Self { source, track, metrics, fps, codec, max_bitrate_kbps }
+        Self { source, track, metrics, fps, codec, max_bitrate_kbps, simulcast }
     }
 
     pub async fn publish(&self, local_participant: &LocalParticipant) -> PortalResult<()> {
@@ -93,7 +104,7 @@ impl VideoPublisher {
         let max_bitrate_kbps = self.max_bitrate_kbps.unwrap_or(DEFAULT_H264_MAX_BITRATE_KBPS);
         let options = TrackPublishOptions {
             video_codec: webrtc_video_codec(self.codec),
-            simulcast: false,
+            simulcast: self.simulcast,
             packet_trailer_features: features,
             video_encoding: Some(VideoEncoding {
                 max_framerate: (self.fps as f64) * 2.0,

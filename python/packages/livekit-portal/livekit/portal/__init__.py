@@ -751,6 +751,9 @@ class PortalConfig:
         codec: VideoCodec = VideoCodec.H264,
         quality: int = DEFAULT_MJPEG_QUALITY,
         max_bitrate_kbps: Optional[int] = None,
+        *,
+        simulcast: Optional[bool] = None,
+        screencast: Optional[bool] = None,
     ) -> None:
         """Declare a video track.
 
@@ -780,6 +783,23 @@ class PortalConfig:
         WebRTC codecs (H264/VP8/VP9/AV1/H265) and ignored otherwise. Track
         names must be unique across all `add_video` calls; a duplicate raises.
 
+        `simulcast` and `screencast` are keyword-only, apply to the WebRTC
+        codecs only, and both default to `False`.
+
+          * `simulcast=True` publishes several spatial layers at once so the
+            SFU can hand each subscriber the layer their link can carry. Costs
+            encode CPU per extra layer. Worth it only when several operators
+            subscribe over links of differing quality. A single-operator
+            teleop session gains nothing.
+          * `screencast=True` marks the source as screen content. libwebrtc
+            picks its degradation preference from this flag. Camera content
+            (the default) uses MAINTAIN_FRAMERATE, which holds the frame rate
+            and **rescales the frame** whenever CPU or bandwidth gets tight,
+            so subscribers see the resolution shift mid-session. Screen
+            content uses MAINTAIN_RESOLUTION, which pins the frame geometry
+            and drops frames under the same pressure. Turn this on when a
+            policy needs a fixed frame shape more than it needs smooth motion.
+
         **Byte-stream latency** (non-H264 codecs): each frame's payload is
         fragmented at the LiveKit chunk size (15 KB) and shipped over a
         single SCTP data channel. Per-frame latency is roughly `1 ms + 2 ms
@@ -789,7 +809,9 @@ class PortalConfig:
         typical inference resolutions (224×224 to 480p) MJPEG q=80–95
         usually does.
         """
-        self._inner.add_video(name, codec, quality, max_bitrate_kbps)
+        self._inner.add_video(
+            name, codec, quality, max_bitrate_kbps, simulcast, screencast
+        )
         if codec in _WEBRTC_CODECS:
             self._video_tracks.append(name)
         else:
@@ -1312,8 +1334,13 @@ class _RoleConfigBase:
         codec: VideoCodec = VideoCodec.H264,
         quality: int = DEFAULT_MJPEG_QUALITY,
         max_bitrate_kbps: Optional[int] = None,
+        *,
+        simulcast: Optional[bool] = None,
+        screencast: Optional[bool] = None,
     ) -> None:
-        self._inner.add_video(name, codec, quality, max_bitrate_kbps)
+        self._inner.add_video(
+            name, codec, quality, max_bitrate_kbps, simulcast, screencast
+        )
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
         self._inner.add_state_typed(_to_field_specs(schema))

@@ -566,14 +566,29 @@ impl PortalConfig {
     /// `H264` / `Raw` / `Png`. `max_bitrate_kbps` caps the H264 encoder's
     /// peak rate (a ceiling, not a target); `None` uses the default 10 Mbps.
     /// It is ignored for the byte-stream codecs.
+    ///
+    /// `simulcast` publishes several spatial layers so the SFU can choose per
+    /// subscriber, at the cost of encode CPU per layer. `screencast` marks the
+    /// source as screen content, which pins the resolution and drops frames
+    /// under CPU or bandwidth pressure instead of rescaling the frame. Both
+    /// apply to the WebRTC codecs only and default to `false`.
     pub fn add_video(
         &self,
         name: String,
         codec: VideoCodec,
         quality: u8,
         max_bitrate_kbps: Option<u32>,
+        simulcast: Option<bool>,
+        screencast: Option<bool>,
     ) {
-        self.inner.lock().add_video(name, codec.into(), quality, max_bitrate_kbps);
+        self.inner.lock().add_video(
+            name,
+            codec.into(),
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+        );
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -1023,8 +1038,10 @@ impl RobotConfig {
         codec: VideoCodec,
         quality: u8,
         max_bitrate_kbps: Option<u32>,
+        simulcast: Option<bool>,
+        screencast: Option<bool>,
     ) {
-        self.inner.add_video(name, codec, quality, max_bitrate_kbps);
+        self.inner.add_video(name, codec, quality, max_bitrate_kbps, simulcast, screencast);
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -1128,8 +1145,10 @@ impl OperatorConfig {
         codec: VideoCodec,
         quality: u8,
         max_bitrate_kbps: Option<u32>,
+        simulcast: Option<bool>,
+        screencast: Option<bool>,
     ) {
-        self.inner.add_video(name, codec, quality, max_bitrate_kbps);
+        self.inner.add_video(name, codec, quality, max_bitrate_kbps, simulcast, screencast);
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {

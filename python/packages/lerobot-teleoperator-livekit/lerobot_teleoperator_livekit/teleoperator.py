@@ -57,6 +57,16 @@ class LiveKitTeleoperatorConfig(TeleoperatorConfig):
     video_quality: int = DEFAULT_MJPEG_QUALITY
     video_max_bitrate_kbps: int | None = None
 
+    # WebRTC encoder behavior. Both default to off and apply to the WebRTC
+    # codecs only. `video_simulcast` publishes several spatial layers so the
+    # SFU can choose per subscriber, at the cost of encode CPU per layer.
+    # `video_screencast` marks the source as screen content, which pins the
+    # resolution and drops frames under CPU or bandwidth pressure instead of
+    # rescaling the frame. Turn the latter on if frames arrive at a changing
+    # resolution mid-session and your policy needs a fixed frame shape.
+    video_simulcast: bool | None = None
+    video_screencast: bool | None = None
+
     # Portal tuning.
     slack: int | None = None
     tolerance: float | None = None
@@ -159,6 +169,8 @@ class LiveKitTeleoperator(Teleoperator):
                 codec=self.config.video_codec,
                 quality=self.config.video_quality,
                 max_bitrate_kbps=self.config.video_max_bitrate_kbps,
+                simulcast=self.config.video_simulcast,
+                screencast=self.config.video_screencast,
             )
         if self._state_motors:
             self._portal_cfg.add_state_typed(

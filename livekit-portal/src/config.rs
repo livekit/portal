@@ -70,8 +70,8 @@ impl FrameVideoSpec {
     }
 }
 
-/// One WebRTC video track declaration: name, WebRTC codec, and an optional
-/// encoder bitrate ceiling.
+/// One WebRTC video track declaration: name, WebRTC codec, an optional
+/// encoder bitrate ceiling, and the two encoder-behavior toggles.
 ///
 /// The WebRTC counterpart to `FrameVideoSpec`. These tracks ride the WebRTC
 /// media path (RTP/SRTP). `codec` is always a WebRTC codec (`H264` / `Vp8` /
@@ -81,16 +81,34 @@ impl FrameVideoSpec {
 /// The cap is a ceiling, not a target — libwebrtc still picks a lower
 /// operating bitrate from content. Selected at config time by passing a
 /// WebRTC codec to `PortalConfig::add_video`.
+///
+/// `simulcast` and `screencast` both default to `false`. See
+/// `PortalConfig::add_video` for what each one does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoTrackSpec {
     pub name: String,
     pub codec: Codec,
     pub max_bitrate_kbps: Option<u32>,
+    /// Publish multiple spatial layers so the SFU can pick per subscriber.
+    /// Costs encode CPU and only pays off with several subscribers on
+    /// varied networks.
+    pub simulcast: bool,
+    /// Mark the source as screen content. Flips libwebrtc's degradation
+    /// preference from `MAINTAIN_FRAMERATE` to `MAINTAIN_RESOLUTION`, so
+    /// congestion and CPU pressure drop framerate instead of rescaling the
+    /// frame.
+    pub screencast: bool,
 }
 
 impl VideoTrackSpec {
-    pub fn new(name: impl Into<String>, codec: Codec, max_bitrate_kbps: Option<u32>) -> Self {
-        Self { name: name.into(), codec, max_bitrate_kbps }
+    pub fn new(
+        name: impl Into<String>,
+        codec: Codec,
+        max_bitrate_kbps: Option<u32>,
+        simulcast: bool,
+        screencast: bool,
+    ) -> Self {
+        Self { name: name.into(), codec, max_bitrate_kbps, simulcast, screencast }
     }
 }
 
@@ -215,6 +233,24 @@ impl PortalConfig {
     /// honors bitrate and ignores quality, the byte-stream codecs honor
     /// quality and ignore bitrate.
     ///
+    /// `simulcast` and `screencast` apply to the WebRTC codecs only and are
+    /// ignored for the byte-stream codecs. Both default to `false` when
+    /// `None` is passed.
+    ///
+    /// - `simulcast` publishes several spatial layers at once so the SFU can
+    ///   hand each subscriber the layer their link can carry. This costs
+    ///   encode CPU per extra layer and only pays off when several operators
+    ///   subscribe over links of differing quality. A single-operator teleop
+    ///   session gains nothing from it.
+    /// - `screencast` marks the source as screen content. libwebrtc picks its
+    ///   degradation preference from this flag: camera content defaults to
+    ///   `MAINTAIN_FRAMERATE`, which holds the frame rate and *rescales the
+    ///   frame* whenever CPU or bandwidth gets tight. Screen content uses
+    ///   `MAINTAIN_RESOLUTION` instead, which pins the frame geometry and
+    ///   drops frames under the same pressure. Turn this on when a stable,
+    ///   unchanging resolution matters more than smooth motion. A policy
+    ///   consuming fixed-shape frames is the usual case.
+    ///
     /// Track names must be unique across all `add_video` calls regardless
     /// of codec; a duplicate panics.
     ///
@@ -230,6 +266,8 @@ impl PortalConfig {
         codec: Codec,
         quality: u8,
         max_bitrate_kbps: Option<u32>,
+        simulcast: Option<bool>,
+        screencast: Option<bool>,
     ) {
         let name = name.into();
         assert!(
@@ -247,7 +285,13 @@ impl PortalConfig {
             assert!(kbps > 0, "max_bitrate_kbps must be > 0, got {kbps}");
         }
         if codec.is_webrtc() {
-            self.video_tracks.push(VideoTrackSpec::new(name, codec, max_bitrate_kbps));
+            self.video_tracks.push(VideoTrackSpec::new(
+                name,
+                codec,
+                max_bitrate_kbps,
+                simulcast.unwrap_or(false),
+                screencast.unwrap_or(false),
+            ));
         } else {
             self.frame_video_tracks.push(FrameVideoSpec::new(name, codec, quality));
         }

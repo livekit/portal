@@ -83,12 +83,12 @@ async def ffi_pair():
     robot_cfg = ffi.RobotConfig(room)
     robot_cfg.add_state_typed([_f("j")])
     robot_cfg.add_action_typed([_f("a")])
-    robot_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None)
+    robot_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None, None, None)
 
     operator_cfg = ffi.OperatorConfig(room)
     operator_cfg.add_state_typed([_f("j")])
     operator_cfg.add_action_typed([_f("a")])
-    operator_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None)
+    operator_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None, None, None)
 
     robot_cb = _Recorder()
     operator_cb = _Recorder()

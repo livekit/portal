@@ -1210,6 +1210,8 @@ impl Portal {
                 self.config.fps,
                 spec.codec,
                 spec.max_bitrate_kbps,
+                spec.simulcast,
+                spec.screencast,
             );
             if let Err(e) = publisher.publish(&lp).await {
                 // Roll back any earlier publishers so their send tasks stop

@@ -287,10 +287,10 @@ op.send_action_chunk("act", policy_output)         # what most VLAs emit
 **The dict form is dtype-checked**, by the same rules `send_action` applies to a
 scalar. A `BOOL` field wants `bool` or `numpy.bool_`, an integer field wants an
 integer type, a float field takes any real. A mismatch raises
-`DtypeMismatch` before anything crosses the FFI boundary, so a float column
-against a `BOOL` gripper fails at your call site rather than arriving as a
-silently coerced `1.0`. numpy columns are checked once via the array's dtype,
-so the check does not scale with horizon.
+`DtypeMismatch` before the chunk is sent, so a float column against a `BOOL`
+gripper fails at your call site rather than arriving as a silently coerced
+`1.0`. numpy columns are checked once via the array's dtype, so the check does
+not scale with horizon.
 
 **The array form is not dtype-checked.** One uniform tensor spread across a
 mixed schema is exactly what that shape is for, and a `float32` array is a

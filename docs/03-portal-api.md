@@ -93,7 +93,7 @@ role-specific is a no-op on the wrong side.
 
 | Method | Default | What it does |
 |---|---|---|
-| `add_video(name, codec=..., quality=..., max_bitrate_kbps=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
 | `add_action_chunk(name, horizon, fields)` | none | Declare a fixed-horizon action batch. |
@@ -435,6 +435,41 @@ confirm before relying on either.
 
 `max_bitrate_kbps` is a ceiling, not a target. libwebrtc still picks a lower
 operating bitrate from the content. Omit it for the 10 Mbps default.
+
+#### Simulcast and screencast
+
+Two keyword-only toggles control encoder behavior. Both default to off and
+both apply to the WebRTC codecs only.
+
+```python
+cfg.add_video("front", screencast=True)   # pin the resolution
+cfg.add_video("wide", simulcast=True)     # publish several spatial layers
+```
+
+`simulcast=True` publishes several spatial layers at once. The SFU then hands
+each subscriber the layer their link can carry. This costs encode CPU for
+every extra layer. It only pays off when several operators subscribe over
+links of differing quality. A single-operator teleop session gains nothing
+from it, which is why it is off by default.
+
+`screencast=True` marks the source as screen content. libwebrtc picks its
+degradation preference from that flag, and that choice decides what gives way
+under CPU or bandwidth pressure.
+
+| Setting | libwebrtc preference | Under pressure |
+|---|---|---|
+| `screencast=False` (default) | `MAINTAIN_FRAMERATE` | Holds the frame rate, rescales the frame |
+| `screencast=True` | `MAINTAIN_RESOLUTION` | Holds the resolution, drops frames |
+
+The default is the reason a track can arrive at a resolution that shifts
+during a session. Nothing in Portal resizes the frame. libwebrtc's adapter
+scales it down before the encoder sees it, then scales back up once the
+pressure clears.
+
+Turn `screencast=True` on when a fixed frame shape matters more than smooth
+motion. A policy that consumes pixels is the usual case. Leave it off for
+human-watched teleop preview, where smooth motion is worth more than a
+constant resolution.
 
 **When a policy reads the pixels, H.264 is usually wrong.** It shifts
 colorspace, adds block artifacts, and drifts in quality as the bitrate adapts.

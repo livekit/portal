@@ -148,8 +148,8 @@ instead of silently doing nothing.
 
 ```yaml
 videos:
-  - { name: front,   codec: h264, max_bitrate_kbps: 8000 }
-  - { name: wide,    codec: vp9 }
+  - { name: front,   codec: h264, max_bitrate_kbps: 8000, screencast: true }
+  - { name: wide,    codec: vp9, simulcast: true }
   - { name: wrist,   codec: mjpeg, quality: 90 }
   - { name: depth,   codec: png }
   - { name: raw_cam, codec: raw }
@@ -161,12 +161,21 @@ videos:
 | `codec` | string | **Required.** One of `h264`, `vp8`, `vp9`, `av1`, `h265`, `mjpeg`, `png`, `raw`. Case-insensitive, and `hevc` is an alias for `h265`. |
 | `quality` | int | Optional. `1` to `100`, for `mjpeg` only. Defaults to `90`. Ignored for every other codec. |
 | `max_bitrate_kbps` | int | Optional. Encoder bitrate ceiling for the WebRTC codecs. Defaults to `10000`. Rejected on the byte-stream codecs. |
+| `simulcast` | bool | Optional. Publish several spatial layers. Defaults to `false`. Rejected on the byte-stream codecs. |
+| `screencast` | bool | Optional. Pin the resolution and drop frames under pressure instead of rescaling. Defaults to `false`. Rejected on the byte-stream codecs. |
 
 The codec picks both the encoding and the transport.
 
 **`h264`, `vp8`, `vp9`, `av1`, `h265`** use the WebRTC media path. Real-time
 RTP, lossy, best-effort delivery. libwebrtc picks the operating bitrate up to
-`max_bitrate_kbps`. Lowest end-to-end latency at scale.
+`max_bitrate_kbps`. Lowest end-to-end latency at scale. These are also the only
+codecs that honor `simulcast` and `screencast`.
+
+`screencast: true` is the setting to reach for when a track arrives at a
+resolution that changes mid-session. By default libwebrtc treats the source as
+camera content and rescales frames under CPU or bandwidth pressure. Marking it
+as screen content pins the geometry and drops frames instead. See
+[Simulcast and screencast](../03-portal-api.md#simulcast-and-screencast).
 
 **`mjpeg`** is a per-frame byte stream, lossy. Roughly 10 to 20x compression at
 q=90, with sub-millisecond decode. Each frame is independent.
@@ -275,7 +284,7 @@ The loader produces the same config you would build by hand.
 | `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` |
 | `ping_ms` | `cfg.set_ping_ms(...)` |
 | `action_subscription` | `cfg.set_action_subscription(...)` |
-| `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps)` |
+| `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=...)` |
 | `state[]` | `cfg.add_state_typed([...])` |
 | `action[]` | `cfg.add_action_typed([...])` |
 | `action_chunks[]` | `cfg.add_action_chunk(name, horizon, fields)` |
@@ -296,7 +305,8 @@ identical: same fingerprints, same registered tracks, same sync config.
 
 `Invalid` covers duplicate track names, duplicate chunk names, `horizon: 0`,
 MJPEG quality outside `1..=100`, `max_bitrate_kbps` on a byte-stream codec or set
-to zero, and `fps`, `slack`, or `tolerance` at zero or negative.
+to zero, `simulcast` or `screencast` on a byte-stream codec, and `fps`, `slack`,
+or `tolerance` at zero or negative.
 
 ```python
 from livekit.portal import ConfigFileError, RobotConfig

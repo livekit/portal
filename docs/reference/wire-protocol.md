@@ -262,9 +262,10 @@ matched. A subscribed track from a publisher that does not set it is unsupported
 Either republish it through a Portal-compatible publisher, or enable the trailer
 upstream.
 
-Portal publishes with simulcast off and `max_framerate` set to twice the
-configured fps. Neither is required for interop, but matching them avoids
-surprises.
+Portal publishes with simulcast off by default and `max_framerate` set to twice
+the configured fps. Neither is required for interop, but matching them avoids
+surprises. Simulcast is per-track configurable via `add_video(simulcast=True)`,
+as is libwebrtc's content-type hint via `screencast=True`.
 
 ## RTT
 

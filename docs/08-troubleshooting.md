@@ -147,6 +147,32 @@ is not network. Compare the remainder against your inference time. Frame video
 adds a per-chunk floor on top, covered in
 [Frame video](05-frame-video.md#the-latency-floor).
 
+### Frames arrive at a resolution that changes mid-session
+
+This is libwebrtc adapting, not Portal resizing anything. On the WebRTC codecs
+the encoder defaults to `MAINTAIN_FRAMERATE`. Under CPU overuse or bandwidth
+pressure it holds the frame rate and scales the frame down instead, then scales
+back up once the pressure clears.
+
+Confirm it by logging `frame.width` and `frame.height` in `on_video_frame`. A
+size that drifts up and down over a session is adaptation. A single change at
+startup is something else.
+
+Pin the geometry by marking the source as screen content:
+
+```python
+cfg.add_video("front", screencast=True)
+```
+
+That switches libwebrtc to `MAINTAIN_RESOLUTION`, which drops frames under
+pressure rather than rescaling. You trade smooth motion for a constant frame
+shape. See
+[Simulcast and screencast](03-portal-api.md#simulcast-and-screencast).
+
+Worth checking alongside it: sustained encoder pressure usually means the CPU
+is saturated or `max_bitrate_kbps` is set too low for the resolution and rate
+you are asking for.
+
 ### Video looks wrong after enabling E2EE
 
 If one peer has no key or a different key, decryption fails silently. Video goes

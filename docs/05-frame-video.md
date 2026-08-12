@@ -147,6 +147,9 @@ cfg.add_video(
     codec: VideoCodec = VideoCodec.H264,
     quality: int = 90,
     max_bitrate_kbps: int | None = None,
+    *,
+    simulcast: bool | None = None,
+    screencast: bool | None = None,
 ) -> None
 ```
 
@@ -157,6 +160,9 @@ cfg.add_video(
   roughly 2x more compression. Below 50 is unusable for inference.
 - **`max_bitrate_kbps`** caps the WebRTC encoder's peak rate. It is rejected on
   the byte-stream codecs, because there is no encoder to cap.
+- **`simulcast`** and **`screencast`** configure the WebRTC encoder and default
+  to off. They are rejected on the byte-stream codecs for the same reason. See
+  [Simulcast and screencast](03-portal-api.md#simulcast-and-screencast).
 
 ## Metrics
 

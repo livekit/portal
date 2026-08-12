@@ -401,7 +401,11 @@ impl Portal {
             return Err(PortalError::AlreadyConnected);
         }
 
+        static OTHER_SDKS_VALUE: &str =
+            concat!("portal:", env!("CARGO_PKG_VERSION"));
+
         let mut options = RoomOptions::default();
+        options.sdk_options.other_sdks = Some(OTHER_SDKS_VALUE.to_string());
         options.auto_subscribe = true;
         if let Some(key) = &self.config.shared_key {
             use livekit::E2eeOptions;

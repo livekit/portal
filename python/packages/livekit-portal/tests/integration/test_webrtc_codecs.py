@@ -83,3 +83,39 @@ async def test_h264_with_max_bitrate_cap_flows(pair):
     await asyncio.sleep(DRAIN_S)
 
     assert received, "no frames received for bitrate-capped H264 track"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        pytest.param({"screencast": True}, id="screencast"),
+        pytest.param({"simulcast": True}, id="simulcast"),
+        pytest.param({"simulcast": True, "screencast": True}, id="both"),
+    ],
+)
+async def test_encoder_toggles_publish_and_deliver(pair, flags):
+    """`simulcast` and `screencast` must not break publish or negotiation.
+
+    `screencast` flips the libwebrtc content-type hint, which decides the
+    degradation preference. `simulcast` changes the number of published
+    encodings. Both alter `TrackPublishOptions` and the track source, so a
+    regression in either shows up here as zero received frames.
+
+    Only the publisher sets the flags. They are encoder-side, so the
+    subscriber declares a plain track and must still decode normally.
+    """
+    pair.robot_cfg.add_video("cam", codec=VideoCodec.H264, **flags)
+    pair.operator_cfg.add_video("cam", codec=VideoCodec.H264)
+
+    received: list[VideoFrameData] = []
+    await pair.start()
+    pair.operator.on_video_frame("cam", lambda name, f: received.append(f))
+
+    await asyncio.sleep(SUBSCRIBE_SETTLE_S)
+    for i in range(15):
+        pair.robot.send_video_frame("cam", _gradient(320, 240, seed=i))
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(DRAIN_S)
+
+    assert received, f"no frames received with {flags}"
+    assert received[0].width > 0 and received[0].height > 0

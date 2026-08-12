@@ -1,7 +1,16 @@
 """Config builder smoke tests. No networking, no runtime."""
 import pytest
 
-from livekit.portal import DType, FieldSpec, Portal, PortalConfig, PortalError, Role
+from livekit.portal import (
+    DEFAULT_MJPEG_QUALITY,
+    DType,
+    FieldSpec,
+    Portal,
+    PortalConfig,
+    PortalError,
+    Role,
+    VideoCodec,
+)
 
 
 def test_new_config_constructs():
@@ -24,6 +33,32 @@ def test_config_adders_are_captured():
     ]
     assert cfg.state_schema == expected
     assert cfg.action_schema == expected
+
+
+def test_simulcast_and_screencast_are_accepted_on_webrtc_codecs():
+    cfg = PortalConfig("demo", Role.ROBOT)
+    cfg.add_video("plain")
+    cfg.add_video("pinned", screencast=True)
+    cfg.add_video("layered", simulcast=True)
+    cfg.add_video("both", simulcast=True, screencast=True)
+    assert cfg.video_tracks == ["plain", "pinned", "layered", "both"]
+
+
+def test_simulcast_and_screencast_are_keyword_only():
+    cfg = PortalConfig("demo", Role.ROBOT)
+    # Guards the signature: a fifth positional would silently land on a
+    # future parameter if these ever stopped being keyword-only.
+    with pytest.raises(TypeError):
+        cfg.add_video("cam", VideoCodec.H264, DEFAULT_MJPEG_QUALITY, None, True)
+
+
+def test_screencast_on_byte_stream_codec_is_ignored_not_rejected():
+    # The programmatic API mirrors `max_bitrate_kbps`: silently ignored on
+    # the byte-stream path. Only the YAML loader rejects it outright.
+    cfg = PortalConfig("demo", Role.ROBOT)
+    cfg.add_video("cam", codec=VideoCodec.MJPEG, quality=80, screencast=True)
+    assert cfg.video_tracks == []
+    assert [t.name for t in cfg.frame_video_tracks] == ["cam"]
 
 
 def test_mixed_dtype_schema_is_accepted():

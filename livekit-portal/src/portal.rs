@@ -1568,8 +1568,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     {
                         return;
                     }
-                    let Some(reader) = reader.take_if(|info| info.topic == ACTION_CHUNK_TOPIC)
-                    else {
+                    let Some(reader) = reader.take() else {
                         return;
                     };
                     let chunk_slots = ctx.chunk_slots.clone();
@@ -1612,8 +1611,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     if ctx.frame_video_entries.is_empty() {
                         return;
                     }
-                    let Some(reader) = reader.take_if(|info| info.topic == FRAME_VIDEO_TOPIC)
-                    else {
+                    let Some(reader) = reader.take() else {
                         return;
                     };
                     let Some(sync_buffer) = ctx.sync_buffer.clone() else {

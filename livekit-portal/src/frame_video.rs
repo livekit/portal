@@ -252,10 +252,7 @@ impl FrameVideoPublisher {
         let track_name = spec.name.clone();
         let task = tokio::spawn(async move {
             while let Some(payload) = rx.recv().await {
-                let options = StreamByteOptions {
-                    topic: FRAME_VIDEO_TOPIC.to_string(),
-                    ..Default::default()
-                };
+                let options = StreamByteOptions::new_with_topic(FRAME_VIDEO_TOPIC);
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
                     log::warn!(
                         "[publish-failed] frame_video '{track_name}' byte stream failed: {e}"

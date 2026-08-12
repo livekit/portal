@@ -396,10 +396,7 @@ impl ChunkPublisher {
         let chunk_name = spec.name.clone();
         let task = tokio::spawn(async move {
             while let Some(payload) = rx.recv().await {
-                let options = StreamByteOptions {
-                    topic: ACTION_CHUNK_TOPIC.to_string(),
-                    ..Default::default()
-                };
+                let options = StreamByteOptions::new_with_topic(ACTION_CHUNK_TOPIC);
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
                     log::warn!("[publish-failed] chunk '{chunk_name}' byte stream failed: {e}");
                 }

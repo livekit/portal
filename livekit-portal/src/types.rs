@@ -226,6 +226,17 @@ pub struct SyncConfig {
     /// emitted at least once. Default is `false`, preserving the strict
     /// drop-on-horizon behavior.
     pub reuse_stale_frames: bool,
+    /// Optional "logical" deadline, in microseconds of sender-clock time.
+    /// When set, a head state that would otherwise wait indefinitely (a
+    /// video track has stalled but not yet advanced past the match horizon)
+    /// is dropped once the fastest-advancing stream's sender timestamp has
+    /// moved at least this far past the state's timestamp. Measured purely
+    /// from sender timestamps — it never consults a wall clock, so sync
+    /// decisions stay reproducible. Always `>= search_range_us` (a shorter
+    /// deadline could drop a state a slightly-late in-range frame would
+    /// still match). `None` (the default) preserves the wait-until-eviction
+    /// behavior. Derived from the user-facing `sync_deadline_ms` knob.
+    pub sync_deadline_us: Option<u64>,
 }
 
 impl Default for SyncConfig {
@@ -235,6 +246,7 @@ impl Default for SyncConfig {
             state_buffer_size: 5,    // ~83ms at 60fps
             search_range_us: 10_000, // 10ms — half a frame interval at 60fps
             reuse_stale_frames: false,
+            sync_deadline_us: None,
         }
     }
 }

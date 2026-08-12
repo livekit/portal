@@ -34,6 +34,7 @@ YAML_FULL = textwrap.dedent(
     state_reliable: false
     action_reliable: false
     reuse_stale_frames: true
+    sync_deadline_ms: 250
     ping_ms: 500
     action_subscription: true
     videos:

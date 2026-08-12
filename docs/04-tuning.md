@@ -119,6 +119,35 @@ freeze. Any alert keyed on it needs rescoping. `last_blocker_track` only updates
 while a track is still waiting for its first frame, so it will not identify a
 freeze after startup.
 
+## Sync deadline
+
+Off by default (`0`). Set `cfg.set_sync_deadline_ms(N)` to bound how long a
+state will wait for a stalled video track before it is dropped.
+
+Without it, if a track stops sending, its head state blocks until the state
+buffer overflows (`slack`-many states later) — or forever, if state output also
+pauses. The deadline drops the stuck head once the **fastest-advancing stream's
+sender timestamp** has moved `N` ms past it, decoupling the drop from the state
+rate and from buffer size.
+
+```python
+cfg.set_sync_deadline_ms(200)   # give up on a stuck moment after 200 ms
+```
+
+The window is measured in **sender-clock time** (the robot's own timestamps),
+not wall-clock, so behavior is reproducible and testable. A value below the
+match window (`search_range`) is raised to it automatically. If *every* stream
+freezes at once there is no advancing clock, so capacity eviction remains the
+hard safety net.
+
+Deadline drops are counted in `metrics.sync.states_dropped_deadline` (a subset
+of `states_dropped`) and logged as a throttled `[sync-deadline]` line.
+
+| Use case | Pick |
+|---|---|
+| Real-time control on a flaky link | `100`–`300` ms — bound the stall, keep the loop moving. |
+| Data collection | `0` (off) or large — wait for the sample; pair with `reuse_stale_frames`. |
+
 ## Transport reliability
 
 State and actions use **reliable** delivery by default, which is lossless and

@@ -135,6 +135,11 @@ pub struct PortalConfig {
     pub(crate) tolerance: f32,
     pub(crate) ping_ms: u64,
     pub(crate) reuse_stale_frames: bool,
+    /// Sync deadline in milliseconds of sender-clock time. `0` (the default)
+    /// disables the deadline; a positive value is clamped up to at least the
+    /// match window (`search_range`) in `sync_config()`. See
+    /// `set_sync_deadline_ms`.
+    pub(crate) sync_deadline_ms: u32,
     pub(crate) shared_key: Option<Vec<u8>>,
     /// Operator-side: subscribe to executed actions. Off by default —
     /// most operators are pure controllers and do not want the bandwidth
@@ -168,6 +173,7 @@ impl PortalConfig {
             tolerance: 1.5,
             ping_ms: 1000,
             reuse_stale_frames: false,
+            sync_deadline_ms: 0,
             shared_key: None,
             action_subscription: false,
         }
@@ -386,6 +392,31 @@ impl PortalConfig {
         self.reuse_stale_frames = enable;
     }
 
+    /// Optional stream-time deadline for shedding a stuck state, in
+    /// milliseconds. Normally a head state that cannot be matched (because a
+    /// video track has stalled) waits until buffer capacity evicts it — or
+    /// forever, if state output also pauses. With a deadline set, the state
+    /// is dropped once the fastest-advancing stream's sender timestamp has
+    /// moved this many milliseconds past it, bounding the stall to a
+    /// predictable, tunable window instead of `slack`-many state intervals.
+    ///
+    /// The deadline is measured purely in sender-clock time (never
+    /// wall-clock), so sync decisions stay reproducible and testable. `0`
+    /// (the default) disables it, preserving the strict wait-until-eviction
+    /// behavior. A value below the match window (`search_range`) is raised to
+    /// it in [`sync_config`](Self::sync_config), since a shorter deadline
+    /// could drop a state that a slightly-late in-range frame would still
+    /// match.
+    ///
+    /// Complements [`set_reuse_stale_frames`](Self::set_reuse_stale_frames):
+    /// with reuse on, a track that has already emitted freezes on its last
+    /// frame instead of blocking, so the deadline mainly governs the startup
+    /// window before a track's first emission; with reuse off (the default),
+    /// it governs every stall.
+    pub fn set_sync_deadline_ms(&mut self, ms: u32) {
+        self.sync_deadline_ms = ms;
+    }
+
     /// Declared WebRTC (H264) video tracks (name + optional bitrate cap), in
     /// declaration order.
     pub fn video_tracks(&self) -> &[VideoTrackSpec] {
@@ -438,11 +469,68 @@ impl PortalConfig {
     /// Derived sync config used internally by the sync buffer. Not public.
     pub(crate) fn sync_config(&self) -> SyncConfig {
         let search_range_us = (self.tolerance * 1_000_000.0 / self.fps as f32) as u64;
+        // `0` disables the deadline. Any positive value is clamped up to at
+        // least the match window: a deadline shorter than `search_range`
+        // could drop a state that a frame arriving slightly late (but still
+        // in range) would have matched.
+        let sync_deadline_us = match self.sync_deadline_ms {
+            0 => None,
+            ms => {
+                let requested = ms as u64 * 1_000;
+                if requested < search_range_us {
+                    log::debug!(
+                        "[sync-deadline] requested deadline {ms}ms ({requested}us) is below the \
+                         match window ({search_range_us}us); raising to the match window"
+                    );
+                    Some(search_range_us)
+                } else {
+                    Some(requested)
+                }
+            }
+        };
         SyncConfig {
             video_buffer_size: self.slack,
             state_buffer_size: self.slack,
             search_range_us,
             reuse_stale_frames: self.reuse_stale_frames,
+            sync_deadline_us,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_deadline_defaults_to_disabled() {
+        let cfg = PortalConfig::new("demo", Role::Robot);
+        assert_eq!(cfg.sync_config().sync_deadline_us, None);
+    }
+
+    #[test]
+    fn sync_deadline_converts_ms_to_us() {
+        let mut cfg = PortalConfig::new("demo", Role::Robot);
+        cfg.set_fps(30);
+        cfg.set_tolerance(1.5); // search_range = 1.5 * 1e6 / 30 = 50_000us
+        cfg.set_sync_deadline_ms(200);
+        assert_eq!(cfg.sync_config().sync_deadline_us, Some(200_000));
+    }
+
+    #[test]
+    fn sync_deadline_below_match_window_is_clamped_up() {
+        let mut cfg = PortalConfig::new("demo", Role::Robot);
+        cfg.set_fps(30);
+        cfg.set_tolerance(1.5); // search_range = 50_000us (50ms)
+        cfg.set_sync_deadline_ms(10); // 10ms < 50ms window
+        let sc = cfg.sync_config();
+        assert_eq!(sc.sync_deadline_us, Some(sc.search_range_us));
+    }
+
+    #[test]
+    fn sync_deadline_zero_disables() {
+        let mut cfg = PortalConfig::new("demo", Role::Robot);
+        cfg.set_sync_deadline_ms(0);
+        assert_eq!(cfg.sync_config().sync_deadline_us, None);
     }
 }

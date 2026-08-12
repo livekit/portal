@@ -61,6 +61,8 @@ struct ConfigFileV1 {
     #[serde(default)]
     reuse_stale_frames: Option<bool>,
     #[serde(default)]
+    sync_deadline_ms: Option<u32>,
+    #[serde(default)]
     ping_ms: Option<u64>,
     #[serde(default)]
     action_subscription: Option<bool>,
@@ -212,6 +214,9 @@ impl PortalConfig {
         if let Some(v) = parsed.reuse_stale_frames {
             cfg.set_reuse_stale_frames(v);
         }
+        if let Some(v) = parsed.sync_deadline_ms {
+            cfg.set_sync_deadline_ms(v);
+        }
         if let Some(v) = parsed.ping_ms {
             cfg.set_ping_ms(v);
         }
@@ -316,6 +321,7 @@ tolerance: 1.0
 state_reliable: false
 action_reliable: false
 reuse_stale_frames: true
+sync_deadline_ms: 250
 ping_ms: 500
 action_subscription: true
 videos:
@@ -349,6 +355,9 @@ action_chunks:
         let state: Vec<&str> = cfg.state_fields().collect();
         assert_eq!(state, vec!["joint_pos", "gripper"]);
         assert_eq!(cfg.state_schema()[1].dtype, DType::Bool);
+
+        // 250ms deadline, well above the fps=60 / tolerance=1.0 match window.
+        assert_eq!(cfg.sync_config().sync_deadline_us, Some(250_000));
 
         let action: Vec<&str> = cfg.action_fields().collect();
         assert_eq!(action, vec!["joint_pos"]);

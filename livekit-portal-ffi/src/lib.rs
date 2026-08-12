@@ -267,6 +267,9 @@ pub struct SyncMetrics {
     pub observations_emitted: u64,
     pub stale_observations_emitted: u64,
     pub states_dropped: u64,
+    /// Subset of `states_dropped` shed by the optional sync deadline
+    /// (`sync_deadline_ms`). 0 when the deadline is disabled.
+    pub states_dropped_deadline: u64,
     pub match_delta_us_p50: Option<u64>,
     pub match_delta_us_p95: Option<u64>,
     pub last_blocker_track: Option<String>,
@@ -621,6 +624,13 @@ impl PortalConfig {
 
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.lock().set_reuse_stale_frames(enable);
+    }
+
+    /// Stream-time deadline (ms) for dropping a state stuck behind a stalled
+    /// video track. `0` (default) disables it. See
+    /// `livekit_portal::PortalConfig::set_sync_deadline_ms`.
+    pub fn set_sync_deadline_ms(&self, ms: u32) {
+        self.inner.lock().set_sync_deadline_ms(ms);
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -1071,6 +1081,13 @@ impl RobotConfig {
         self.inner.set_reuse_stale_frames(enable);
     }
 
+    /// Stream-time deadline (ms) for dropping a state stuck behind a stalled
+    /// video track. `0` (default) disables it. See
+    /// `PortalConfig::set_sync_deadline_ms` for full semantics.
+    pub fn set_sync_deadline_ms(&self, ms: u32) {
+        self.inner.set_sync_deadline_ms(ms);
+    }
+
     /// No-op on the Robot side — the robot always processes actions. Kept on
     /// the surface so `RobotConfig` and `OperatorConfig` stay symmetrical.
     pub fn set_action_subscription(&self, enable: bool) {
@@ -1174,6 +1191,13 @@ impl OperatorConfig {
 
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// Stream-time deadline (ms) for dropping a state stuck behind a stalled
+    /// video track. `0` (default) disables it. See
+    /// `PortalConfig::set_sync_deadline_ms` for full semantics.
+    pub fn set_sync_deadline_ms(&self, ms: u32) {
+        self.inner.set_sync_deadline_ms(ms);
     }
 
     /// Operator-side opt-in to receiving executed actions ("HITL recording").
@@ -1557,6 +1581,7 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             observations_emitted: m.sync.observations_emitted,
             stale_observations_emitted: m.sync.stale_observations_emitted,
             states_dropped: m.sync.states_dropped,
+            states_dropped_deadline: m.sync.states_dropped_deadline,
             match_delta_us_p50: m.sync.match_delta_us_p50,
             match_delta_us_p95: m.sync.match_delta_us_p95,
             last_blocker_track: m.sync.last_blocker_track,

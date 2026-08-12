@@ -878,6 +878,21 @@ class PortalConfig:
         """
         self._inner.set_reuse_stale_frames(enable)
 
+    def set_sync_deadline_ms(self, ms: int) -> None:
+        """Drop a state stuck behind a stalled video track after ``ms``
+        milliseconds of stream time, instead of waiting indefinitely.
+
+        Without this, if a video track stops sending, its head state blocks
+        until buffer capacity evicts it (or forever, if state output also
+        pauses), stalling every observation. With a deadline set, the state
+        is dropped once the fastest-advancing stream's timestamp has moved
+        ``ms`` past it — bounding the stall to a predictable window.
+
+        Measured in sender-clock time, not wall-clock. ``0`` (the default)
+        disables it. Values below the match window are raised to it.
+        """
+        self._inner.set_sync_deadline_ms(ms)
+
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions.
 
@@ -1352,6 +1367,13 @@ class _RoleConfigBase:
 
     def set_reuse_stale_frames(self, enable: bool) -> None:
         self._inner.set_reuse_stale_frames(enable)
+
+    def set_sync_deadline_ms(self, ms: int) -> None:
+        """Drop a state stuck behind a stalled video track after ``ms``
+        milliseconds of stream time. ``0`` (default) disables it. See
+        `RobotConfig.set_sync_deadline_ms` for full semantics.
+        """
+        self._inner.set_sync_deadline_ms(ms)
 
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions ("HITL

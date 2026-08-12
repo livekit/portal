@@ -1,13 +1,31 @@
 """Config builder smoke tests. No networking, no runtime."""
 import pytest
 
-from livekit.portal import DType, FieldSpec, Portal, PortalConfig, PortalError, Role
+from livekit.portal import (
+    DType,
+    FieldSpec,
+    OperatorConfig,
+    Portal,
+    PortalConfig,
+    PortalError,
+    RobotConfig,
+    Role,
+)
 
 
 def test_new_config_constructs():
     cfg = PortalConfig("demo", Role.OPERATOR)
     assert cfg.session == "demo"
     assert cfg.role == Role.OPERATOR
+
+
+def test_set_sync_deadline_ms_is_accepted():
+    # No getter is exposed for the deadline, so this is a smoke test that the
+    # setter is wired through every config type without error. 0 disables it;
+    # a positive value enables the stalled-track deadline drop.
+    PortalConfig("demo", Role.OPERATOR).set_sync_deadline_ms(200)
+    RobotConfig("demo").set_sync_deadline_ms(0)
+    OperatorConfig("demo").set_sync_deadline_ms(200)
 
 
 def test_config_adders_are_captured():

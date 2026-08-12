@@ -114,6 +114,11 @@ pub(crate) struct SyncBuffer {
     // see `DropWarn`.
     drop_warn: DropWarn,
 
+    // Rate-limiter for the deadline-drop warning. Separate from `drop_warn`
+    // so a stalled-track deadline burst and a horizon-drop burst each keep
+    // their own throttle window. Logging only.
+    deadline_warn: DropWarn,
+
     metrics: Arc<MetricsRegistry>,
 }
 
@@ -145,6 +150,7 @@ impl SyncBuffer {
             last_emitted_frames,
             in_overflow_burst: false,
             drop_warn: DropWarn::default(),
+            deadline_warn: DropWarn::default(),
             metrics,
         }
     }
@@ -189,6 +195,67 @@ impl SyncBuffer {
         self.drop_warn.last_log = Some(now);
         self.drop_warn.count = 0;
         self.drop_warn.worst_ahead_us = 0;
+    }
+
+    /// Count one deadline-driven drop and emit a throttled warning.
+    /// `waited_us` is how far the fastest-advancing stream's sender clock had
+    /// moved past the dropped state (`logical_now - state_ts`), i.e. how long
+    /// the state was stuck in stream-time. Same throttle shape as
+    /// `note_unsyncable_drop`, on its own `deadline_warn` window.
+    fn note_deadline_drop(&mut self, waited_us: u64) {
+        self.deadline_warn.count += 1;
+        self.deadline_warn.worst_ahead_us = self.deadline_warn.worst_ahead_us.max(waited_us);
+
+        let now = Instant::now();
+        let elapsed = self.deadline_warn.last_log.map(|t| now.duration_since(t));
+        let should_log = match elapsed {
+            None => true,
+            Some(d) => d >= DROP_WARN_INTERVAL,
+        };
+        if !should_log {
+            return;
+        }
+
+        let deadline_ms = self.config.sync_deadline_us.unwrap_or(0) as f64 / 1_000.0;
+        let waited_ms = self.deadline_warn.worst_ahead_us as f64 / 1_000.0;
+        match elapsed {
+            // First drop in a burst. Cause and fix live at docs/logging.md#sync-deadline.
+            None => log::warn!(
+                "[sync-deadline] dropping states: head unmatched for {waited_ms:.0}ms of stream \
+                 time (deadline {deadline_ms:.0}ms) — a video track has likely stalled. \
+                 Throttling further [sync-deadline] warnings to once per {}s.",
+                DROP_WARN_INTERVAL.as_secs(),
+            ),
+            // Sustained burst: one rolled-up summary per interval.
+            Some(d) => log::warn!(
+                "[sync-deadline] dropped {} more states in {:.0}s past the {deadline_ms:.0}ms \
+                 deadline (worst stall {waited_ms:.0}ms).",
+                self.deadline_warn.count,
+                d.as_secs_f64(),
+            ),
+        }
+        self.deadline_warn.last_log = Some(now);
+        self.deadline_warn.count = 0;
+        self.deadline_warn.worst_ahead_us = 0;
+    }
+
+    /// Largest sender timestamp currently buffered across every stream — the
+    /// newest state plus each track's newest frame. Serves as a monotonic
+    /// "logical clock" for the optional sync deadline: it advances whenever
+    /// *any* stream is still flowing, so a stalled track can be detected via
+    /// the clocks of the streams that aren't stalled. Reads only sender
+    /// timestamps (never a wall clock), keeping deadline decisions
+    /// reproducible. Always `>= self.state_buffer[0]` (the head), since the
+    /// head is the front of `state_buffer` and its back is `>=` the front.
+    /// O(tracks); only called when a state would otherwise wait.
+    fn logical_now(&self) -> u64 {
+        let mut now = self.state_buffer.back().map(|(ts, _)| *ts).unwrap_or(0);
+        for buf in &self.video_buffers {
+            if let Some(frame) = buf.back() {
+                now = now.max(frame.timestamp_us);
+            }
+        }
+        now
     }
 
     /// Build the typed state map once per emission. Separate so the two
@@ -292,6 +359,7 @@ impl SyncBuffer {
         self.blocker = None;
         self.in_overflow_burst = false;
         self.drop_warn = DropWarn::default();
+        self.deadline_warn = DropWarn::default();
     }
 
     fn try_sync(&mut self) -> SyncOutput {
@@ -464,6 +532,28 @@ impl SyncBuffer {
             }
 
             if let Some(b) = iter_blocker {
+                // Optional deadline: rather than waiting on the blocking track
+                // indefinitely, drop the head if the fastest-advancing stream
+                // has moved past it by at least the deadline (in sender-clock
+                // time). This bounds head-of-line blocking when a track stalls
+                // — without it, the head waits until state-buffer capacity
+                // evicts it, or forever if state output has also paused. The
+                // deadline never fires while every track can still match; it
+                // only converts an otherwise-indefinite wait into a timely
+                // drop. Purely sender-timestamp driven, so it stays
+                // reproducible (see `logical_now`).
+                if let Some(deadline) = self.config.sync_deadline_us {
+                    let waited = self.logical_now().saturating_sub(state_ts);
+                    if waited >= deadline {
+                        self.note_deadline_drop(waited);
+                        let (_, values) = self.state_buffer.pop_front().unwrap();
+                        output.drops.push(self.build_typed_state_map(&values));
+                        self.metrics.record_state_dropped_deadline(1);
+                        // Head changed; the blocker hint no longer applies.
+                        self.blocker = None;
+                        continue;
+                    }
+                }
                 self.blocker = Some(b);
                 self.metrics.record_blocker(b);
                 return output;
@@ -623,6 +713,89 @@ mod tests {
         assert!(buf.push_state(50_000, vec![1.0]).is_empty());
         let out = push_f(&mut buf, "cam1", 50_010);
         assert_eq!(out.observations.len(), 1);
+    }
+
+    // --- Sync deadline ----------------------------------------------------
+
+    /// With no deadline set (the default), a head state blocked by a stalled
+    /// track waits — it is not dropped even as other streams race far ahead.
+    /// Guards backward compatibility.
+    #[test]
+    fn deadline_disabled_waits_indefinitely() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let config = SyncConfig {
+            video_buffer_size: 10,
+            state_buffer_size: 10,
+            search_range_us: 1_000,
+            sync_deadline_us: None, // disabled
+            ..Default::default()
+        };
+        let mut buf = mk(&tracks, fields, config);
+
+        // cam1 has a frame at the head; cam2 never sends (stalled).
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        assert!(buf.push_state(10_000, vec![1.0]).is_empty(), "waits on cam2");
+
+        // Advance the state stream far past any deadline-sized gap. Without a
+        // deadline the head still just waits — no drop, no observation.
+        let out = buf.push_state(500_000, vec![2.0]);
+        assert!(out.observations.is_empty());
+        assert!(out.drops.is_empty(), "no deadline → head waits, never drops");
+    }
+
+    /// With a deadline set, a head state blocked by a stalled track is dropped
+    /// once the fastest-advancing stream's sender clock passes it by the
+    /// deadline — before state-buffer capacity would have evicted it.
+    #[test]
+    fn deadline_drops_stuck_head() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let config = SyncConfig {
+            video_buffer_size: 10,
+            state_buffer_size: 10, // large, so capacity is not what drops it
+            search_range_us: 1_000,
+            sync_deadline_us: Some(50_000), // 50ms of stream time
+            ..Default::default()
+        };
+        let mut buf = mk(&tracks, fields, config);
+
+        // cam1 matches the first state; cam2 stalls (never sends).
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        assert!(buf.push_state(10_000, vec![1.0]).is_empty(), "waits on cam2");
+
+        // The state clock advances 60ms past the head (10_000 → 70_000),
+        // exceeding the 50ms deadline. The head is dropped, not stalled.
+        let out = buf.push_state(70_000, vec![2.0]);
+        assert_eq!(out.drops.len(), 1, "stuck head dropped at the deadline");
+        assert_eq!(out.drops[0]["j1"], TypedValue::F64(1.0));
+        assert!(out.observations.is_empty());
+
+        let snap = buf.metrics.snapshot(HashMap::new(), 0);
+        assert_eq!(snap.sync.states_dropped_deadline, 1);
+        assert_eq!(snap.sync.states_dropped, 1, "deadline drops count in the total too");
+    }
+
+    /// A small deadline must never drop a state that actually has an in-range
+    /// match on every track — no spurious drops during normal operation.
+    #[test]
+    fn deadline_does_not_drop_matched_states() {
+        let tracks = vec!["cam1".to_string()];
+        let fields = vec!["j1".to_string()];
+        let config = SyncConfig {
+            search_range_us: 1_000,
+            sync_deadline_us: Some(5_000),
+            ..Default::default()
+        };
+        let mut buf = mk(&tracks, fields, config);
+
+        let _ = push_f(&mut buf, "cam1", 100_000);
+        let out = buf.push_state(100_000, vec![1.0]);
+        assert_eq!(out.observations.len(), 1, "aligned frame+state → observation");
+        assert!(out.drops.is_empty());
+
+        let snap = buf.metrics.snapshot(HashMap::new(), 0);
+        assert_eq!(snap.sync.states_dropped_deadline, 0);
     }
 
     #[test]
@@ -953,6 +1126,7 @@ mod tests {
             state_buffer_size: 5,
             search_range_us: 500,
             reuse_stale_frames: true,
+            sync_deadline_us: None,
         }
     }
 
@@ -1157,6 +1331,7 @@ mod tests {
             state_buffer_size: 5,
             search_range_us: 100,
             reuse_stale_frames: true,
+            sync_deadline_us: None,
         };
         let mut buf = mk(&tracks, fields, config);
 

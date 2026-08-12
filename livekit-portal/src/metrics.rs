@@ -24,6 +24,12 @@ pub struct SyncMetrics {
     /// rate signals a silently frozen video track.
     pub stale_observations_emitted: u64,
     pub states_dropped: u64,
+    /// Subset of `states_dropped` shed specifically by the optional sync
+    /// deadline (`sync_deadline_ms`) — a head state given up on because a
+    /// video track stalled past the deadline. Always 0 when the deadline is
+    /// disabled. A rising counter points at a stalled or chronically-behind
+    /// video track; pair it with `last_blocker_track`.
+    pub states_dropped_deadline: u64,
     /// Worst per-track alignment `max_t |state_ts − frame_ts|` across the
     /// tracks in each emitted observation, over a rolling 256-sample window.
     pub match_delta_us_p50: Option<u64>,
@@ -127,6 +133,7 @@ pub(crate) struct MetricsRegistry {
     observations_emitted: AtomicU64,
     stale_observations_emitted: AtomicU64,
     states_dropped: AtomicU64,
+    states_dropped_deadline: AtomicU64,
     match_deltas: Mutex<SampleRing>,
     // Index into `track_order`; `usize::MAX` means "no blocker recorded".
     // Stored as an atomic so `record_blocker` allocates nothing on the hot path.
@@ -160,6 +167,7 @@ impl MetricsRegistry {
             observations_emitted: AtomicU64::new(0),
             stale_observations_emitted: AtomicU64::new(0),
             states_dropped: AtomicU64::new(0),
+            states_dropped_deadline: AtomicU64::new(0),
             match_deltas: Mutex::new(SampleRing::new(SAMPLE_RING_CAP)),
             last_blocker_track: AtomicUsize::new(usize::MAX),
             rtt_samples: Mutex::new(SampleRing::new(SAMPLE_RING_CAP)),
@@ -228,6 +236,15 @@ impl MetricsRegistry {
         self.states_dropped.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Record a deadline-driven drop. Counts toward both `states_dropped`
+    /// (the total) and `states_dropped_deadline` (the deadline-specific
+    /// subset), so callers invoke this instead of `record_state_dropped`
+    /// for deadline drops rather than in addition to it.
+    pub fn record_state_dropped_deadline(&self, n: u64) {
+        self.states_dropped.fetch_add(n, Ordering::Relaxed);
+        self.states_dropped_deadline.fetch_add(n, Ordering::Relaxed);
+    }
+
     pub fn record_blocker(&self, track_index: usize) {
         self.last_blocker_track.store(track_index, Ordering::Relaxed);
     }
@@ -290,6 +307,7 @@ impl MetricsRegistry {
                 observations_emitted: self.observations_emitted.load(Ordering::Relaxed),
                 stale_observations_emitted: self.stale_observations_emitted.load(Ordering::Relaxed),
                 states_dropped: self.states_dropped.load(Ordering::Relaxed),
+                states_dropped_deadline: self.states_dropped_deadline.load(Ordering::Relaxed),
                 match_delta_us_p50: match_p50,
                 match_delta_us_p95: match_p95,
                 last_blocker_track,
@@ -342,6 +360,7 @@ impl MetricsRegistry {
         self.observations_emitted.store(0, Ordering::Relaxed);
         self.stale_observations_emitted.store(0, Ordering::Relaxed);
         self.states_dropped.store(0, Ordering::Relaxed);
+        self.states_dropped_deadline.store(0, Ordering::Relaxed);
         self.match_deltas.lock().clear();
         self.last_blocker_track.store(usize::MAX, Ordering::Relaxed);
         self.rtt_samples.lock().clear();

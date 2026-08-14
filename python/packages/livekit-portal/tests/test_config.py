@@ -5,9 +5,11 @@ from livekit.portal import (
     DEFAULT_MJPEG_QUALITY,
     DType,
     FieldSpec,
+    OperatorConfig,
     Portal,
     PortalConfig,
     PortalError,
+    RobotConfig,
     Role,
     VideoCodec,
 )

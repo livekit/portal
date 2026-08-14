@@ -105,7 +105,7 @@ impl VideoPublisher {
         let options = TrackPublishOptions {
             video_codec: webrtc_video_codec(self.codec),
             simulcast: self.simulcast,
-            packet_trailer_features: features,
+            frame_metadata_features: features,
             video_encoding: Some(VideoEncoding {
                 max_framerate: (self.fps as f64) * 2.0,
                 max_bitrate: (max_bitrate_kbps as u64) * 1_000,

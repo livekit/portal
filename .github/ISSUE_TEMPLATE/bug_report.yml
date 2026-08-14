@@ -1,0 +1,32 @@
+name: Bug Report
+description: File a bug report.
+labels: [triage]
+body:
+  - type: input
+    id: version
+    validations: { required: true }
+    attributes:
+      label: Version
+      description: What version of Portal are you using?
+      placeholder: "v0.1.0"
+  - type: input
+    id: platforms
+    validations: { required: true }
+    attributes:
+      label: Affected Platforms
+      description: What platforms, versions, and CPU architectures have you observed the issue on?
+      placeholder: "macOS v10.15.7 (aarch64)"
+  - type: textarea
+    id: description
+    validations: { required: true }
+    attributes:
+      label: Issue Description
+      description: |
+        Please describe the issue, providing steps to reproduce and any other relevant information.
+  - type: upload
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots to help explain the issue.
+    validations:
+      required: false

@@ -169,13 +169,13 @@ jobs:
       # Published separately so a missing pending publisher on one package
       # does not block the others. skip-existing makes re-runs safe.
       - name: Publish livekit-portal
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/livekit-portal/
           skip-existing: true
 
       - name: Publish lerobot packages
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/lerobot/
           skip-existing: true

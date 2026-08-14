@@ -1,6 +1,6 @@
 [project]
 name = "livekit-portal-workspace"
-version = "0.1.0"
+version = "0.2.4"
 description = "Workspace root for livekit-portal Python packages"
 requires-python = ">=3.12"
 # The root is a meta-project that pulls in all workspace members so a single

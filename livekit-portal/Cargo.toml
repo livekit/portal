@@ -26,4 +26,4 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # workspace's transitive deps don't conflict. Both are required: YAML
 # config-file loading is part of the public surface, not opt-in.
 serde = { version = "1", features = ["derive"] }
-serde-saphyr = "=0.0.26"
+serde-saphyr = "=1.0.1"

@@ -165,6 +165,29 @@ def test_operator_config_from_yaml_str():
     assert len(cfg.action_chunks) == 1
 
 
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT),
+        RobotConfig.from_yaml_str(YAML_FULL, "demo"),
+        OperatorConfig.from_yaml_str(YAML_FULL, "demo"),
+    ],
+    ids=["portal", "robot", "operator"],
+)
+def test_yaml_sync_knobs_are_readable(cfg):
+    # A YAML-built config is the main case where the caller doesn't already
+    # know these values — reading them back is the only way to find out.
+    assert cfg.fps == 60
+    assert cfg.slack == 8
+    assert cfg.tolerance == pytest.approx(1.0)
+    assert cfg.state_reliable is False
+    assert cfg.action_reliable is False
+    assert cfg.reuse_stale_frames is True
+    assert cfg.ping_ms == 500
+    assert cfg.action_subscription is True
+    assert cfg.has_e2ee_key is False
+
+
 def test_robot_config_from_yaml_file():
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False

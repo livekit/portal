@@ -697,6 +697,63 @@ impl PortalConfig {
     pub fn action_chunks(&self) -> Vec<ChunkSpec> {
         self.inner.lock().action_chunks().iter().map(chunkspec_from_core).collect()
     }
+
+    /// Session name this config was built for.
+    pub fn session(&self) -> String {
+        self.inner.lock().session().to_string()
+    }
+
+    /// Role this config is pinned to.
+    pub fn role(&self) -> Role {
+        self.inner.lock().role().into()
+    }
+
+    /// Unified observation rate in Hz. Defaults to 30.
+    pub fn fps(&self) -> u32 {
+        self.inner.lock().fps()
+    }
+
+    /// Ticks of pipeline headroom. Defaults to 5.
+    pub fn slack(&self) -> u32 {
+        self.inner.lock().slack()
+    }
+
+    /// Frame-match window, in tick intervals at `fps`. Defaults to 1.5.
+    pub fn tolerance(&self) -> f32 {
+        self.inner.lock().tolerance()
+    }
+
+    /// RTT ping cadence in milliseconds; `0` means active pinging is off.
+    pub fn ping_ms(&self) -> u64 {
+        self.inner.lock().ping_ms()
+    }
+
+    /// Whether state packets are published on the reliable channel.
+    pub fn state_reliable(&self) -> bool {
+        self.inner.lock().state_reliable()
+    }
+
+    /// Whether action packets are published on the reliable channel.
+    pub fn action_reliable(&self) -> bool {
+        self.inner.lock().action_reliable()
+    }
+
+    /// Whether a state past its video match window reuses the last emitted
+    /// frame instead of being dropped.
+    pub fn reuse_stale_frames(&self) -> bool {
+        self.inner.lock().reuse_stale_frames()
+    }
+
+    /// Whether action subscription is enabled (operator-side opt-in).
+    pub fn action_subscription(&self) -> bool {
+        self.inner.lock().action_subscription()
+    }
+
+    /// Whether a shared E2EE key has been set. The key bytes are not
+    /// readable back — this only reports presence.
+    pub fn has_e2ee_key(&self) -> bool {
+        self.inner.lock().has_e2ee_key()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1170,52 @@ impl RobotConfig {
     pub fn action_chunks(&self) -> Vec<ChunkSpec> {
         self.inner.action_chunks()
     }
+
+    pub fn session(&self) -> String {
+        self.inner.session()
+    }
+
+    pub fn role(&self) -> Role {
+        self.inner.role()
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.inner.fps()
+    }
+
+    pub fn slack(&self) -> u32 {
+        self.inner.slack()
+    }
+
+    pub fn tolerance(&self) -> f32 {
+        self.inner.tolerance()
+    }
+
+    pub fn ping_ms(&self) -> u64 {
+        self.inner.ping_ms()
+    }
+
+    pub fn state_reliable(&self) -> bool {
+        self.inner.state_reliable()
+    }
+
+    pub fn action_reliable(&self) -> bool {
+        self.inner.action_reliable()
+    }
+
+    pub fn reuse_stale_frames(&self) -> bool {
+        self.inner.reuse_stale_frames()
+    }
+
+    /// Always reports what was set, but the robot ignores the flag — it
+    /// always processes actions. Kept for surface symmetry.
+    pub fn action_subscription(&self) -> bool {
+        self.inner.action_subscription()
+    }
+
+    pub fn has_e2ee_key(&self) -> bool {
+        self.inner.has_e2ee_key()
+    }
 }
 
 /// Operator-side session config. Same declarative surface as `RobotConfig`;
@@ -1220,6 +1323,50 @@ impl OperatorConfig {
 
     pub fn action_chunks(&self) -> Vec<ChunkSpec> {
         self.inner.action_chunks()
+    }
+
+    pub fn session(&self) -> String {
+        self.inner.session()
+    }
+
+    pub fn role(&self) -> Role {
+        self.inner.role()
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.inner.fps()
+    }
+
+    pub fn slack(&self) -> u32 {
+        self.inner.slack()
+    }
+
+    pub fn tolerance(&self) -> f32 {
+        self.inner.tolerance()
+    }
+
+    pub fn ping_ms(&self) -> u64 {
+        self.inner.ping_ms()
+    }
+
+    pub fn state_reliable(&self) -> bool {
+        self.inner.state_reliable()
+    }
+
+    pub fn action_reliable(&self) -> bool {
+        self.inner.action_reliable()
+    }
+
+    pub fn reuse_stale_frames(&self) -> bool {
+        self.inner.reuse_stale_frames()
+    }
+
+    pub fn action_subscription(&self) -> bool {
+        self.inner.action_subscription()
+    }
+
+    pub fn has_e2ee_key(&self) -> bool {
+        self.inner.has_e2ee_key()
     }
 }
 

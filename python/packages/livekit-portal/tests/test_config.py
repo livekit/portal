@@ -80,6 +80,50 @@ def test_mixed_dtype_schema_is_accepted():
     ]
 
 
+@pytest.mark.parametrize(
+    "make_cfg",
+    [
+        lambda: PortalConfig("demo", Role.ROBOT),
+        lambda: RobotConfig("demo"),
+        lambda: OperatorConfig("demo"),
+    ],
+    ids=["portal", "robot", "operator"],
+)
+def test_config_knobs_default_and_round_trip(make_cfg):
+    cfg = make_cfg()
+    # Defaults, as documented in docs/03-portal-api.md.
+    assert cfg.fps == 30
+    assert cfg.slack == 5
+    assert cfg.tolerance == pytest.approx(1.5)
+    assert cfg.ping_ms == 1000
+    assert cfg.state_reliable is True
+    assert cfg.action_reliable is True
+    assert cfg.reuse_stale_frames is False
+    assert cfg.action_subscription is False
+    assert cfg.has_e2ee_key is False
+
+    cfg.set_fps(60)
+    cfg.set_slack(8)
+    cfg.set_tolerance(0.5)
+    cfg.set_ping_ms(0)
+    cfg.set_state_reliable(False)
+    cfg.set_action_reliable(False)
+    cfg.set_reuse_stale_frames(True)
+    cfg.set_action_subscription(True)
+    cfg.set_e2ee_key(b"0" * 32)
+
+    assert cfg.fps == 60
+    assert cfg.slack == 8
+    assert cfg.tolerance == pytest.approx(0.5)
+    assert cfg.ping_ms == 0
+    assert cfg.state_reliable is False
+    assert cfg.action_reliable is False
+    assert cfg.reuse_stale_frames is True
+    assert cfg.action_subscription is True
+    # Presence only — the key bytes are deliberately not readable back.
+    assert cfg.has_e2ee_key is True
+
+
 def test_set_fps_zero_raises():
     cfg = PortalConfig("demo", Role.ROBOT)
     # The core `set_fps(0)` asserts; UniFFI surfaces the panic as an

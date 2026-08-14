@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use livekit::options::{PacketTrailerFeatures, TrackPublishOptions, VideoCodec, VideoEncoding};
+use livekit::options::{FrameMetadataFeatures, TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
 use livekit::webrtc::prelude::{
     I420Buffer, RtcVideoSource, VideoBuffer, VideoFrame, VideoResolution, VideoRotation,
@@ -86,7 +86,7 @@ impl VideoPublisher {
         // user_timestamp is mandatory: the receive path uses it to align frames
         // with state, and panics if it is missing. Subscribed tracks produced
         // by publishers that don't set this trailer are unsupported.
-        let mut features = PacketTrailerFeatures::default();
+        let mut features = FrameMetadataFeatures::default();
         features.user_timestamp = true;
 
         // Pin encoder ceilings explicitly. Without `video_encoding`, libwebrtc's
@@ -143,7 +143,7 @@ impl VideoPublisher {
         let mut buffer = I420Buffer::new(width, height);
         rgb_to_i420(rgb_data, width, height, &mut buffer);
         let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
-        frame.frame_metadata = Some(FrameMetadata { user_timestamp: Some(ts), frame_id: None });
+        frame.frame_metadata = Some(FrameMetadata { user_timestamp: Some(ts), frame_id: None, user_data: None });
         self.source.capture_frame(&frame);
         self.metrics.record_sent();
         Ok(())
@@ -287,10 +287,11 @@ impl VideoReceiver {
                 // Portal-published tracks set this automatically; subscribed
                 // tracks from other publishers must do the same. See the
                 // "Sender requirement" note in README.md.
-                let timestamp_us = frame.frame_metadata.and_then(|m| m.user_timestamp).expect(
-                    "video frame missing user_timestamp — \
-                         sender must enable PacketTrailerFeatures.user_timestamp",
-                );
+                let timestamp_us =
+                    frame.frame_metadata.as_ref().and_then(|m| m.user_timestamp).expect(
+                        "video frame missing user_timestamp — \
+                         sender must enable FrameMetadataFeatures.user_timestamp",
+                    );
                 let frame_data = convert_frame(&frame, timestamp_us);
                 let frame_arc = Arc::new(frame_data);
 

@@ -479,6 +479,58 @@ impl PortalConfig {
         &self.action_chunks
     }
 
+    /// Session name this config was built for.
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// Role this config is pinned to.
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Unified observation rate in Hz. Defaults to 30.
+    pub fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    /// Ticks of pipeline headroom. Defaults to 5.
+    pub fn slack(&self) -> u32 {
+        self.slack
+    }
+
+    /// Frame-match window, in tick intervals at `fps`. Defaults to 1.5.
+    pub fn tolerance(&self) -> f32 {
+        self.tolerance
+    }
+
+    /// RTT ping cadence in milliseconds; `0` means active pinging is off.
+    pub fn ping_ms(&self) -> u64 {
+        self.ping_ms
+    }
+
+    /// Whether state packets are published on the reliable channel.
+    pub fn state_reliable(&self) -> bool {
+        self.state_reliable
+    }
+
+    /// Whether action packets are published on the reliable channel.
+    pub fn action_reliable(&self) -> bool {
+        self.action_reliable
+    }
+
+    /// Whether a state past its video match window reuses the last emitted
+    /// frame instead of being dropped.
+    pub fn reuse_stale_frames(&self) -> bool {
+        self.reuse_stale_frames
+    }
+
+    /// Whether a shared E2EE key has been set. The key bytes are not
+    /// readable back — this only reports presence.
+    pub fn has_e2ee_key(&self) -> bool {
+        self.shared_key.is_some()
+    }
+
     /// Derived sync config used internally by the sync buffer. Not public.
     pub(crate) fn sync_config(&self) -> SyncConfig {
         let search_range_us = (self.tolerance * 1_000_000.0 / self.fps as f32) as u64;

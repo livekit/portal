@@ -110,6 +110,32 @@ role-specific is a no-op on the wrong side.
 `set_fps`, `set_slack`, and `set_tolerance` are covered in
 [Tuning](04-tuning.md).
 
+Every field is also readable back as a property, which is how you inspect a
+config you loaded from YAML instead of building by hand:
+
+| Property | Type | Reads back |
+|---|---|---|
+| `session` | `str` | Session name. |
+| `role` | `Role` | Pinned role. |
+| `video_tracks` | `list[str]` | WebRTC track names. |
+| `frame_video_tracks` | `list[FrameVideoSpec]` | Byte-stream tracks with codec and quality. |
+| `state_schema` / `action_schema` | `list[FieldSpec]` | Declared schemas, in order. |
+| `action_chunks` | `list[ChunkSpec]` | Declared chunks. |
+| `fps` | `int` | `set_fps`. |
+| `slack` | `int` | `set_slack`. |
+| `tolerance` | `float` | `set_tolerance`. |
+| `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
+| `ping_ms` | `int` | `set_ping_ms`. |
+| `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. |
+| `action_subscription` | `bool` | `set_action_subscription`. |
+| `has_e2ee_key` | `bool` | Whether a key was set. The bytes are not readable back. |
+
+```python
+cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
+fps = cfg.fps                    # whatever the file declared
+period = 1.0 / cfg.fps
+```
+
 You can also build the whole config from a file with
 `RobotConfig.from_yaml_file("portal.yaml", "session-1")`. See
 [Config from YAML](reference/config-file.md).

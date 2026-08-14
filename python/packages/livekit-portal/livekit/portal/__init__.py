@@ -745,6 +745,60 @@ class PortalConfig:
         """All declared action chunks, in declaration order."""
         return list(self._action_chunks)
 
+    # Sync / transport knobs are not mirrored Python-side — read them back
+    # from the FFI config, which owns the authoritative value.
+
+    @property
+    def fps(self) -> int:
+        """Unified observation rate in Hz. Defaults to 30."""
+        return self._inner.fps()
+
+    @property
+    def slack(self) -> int:
+        """Ticks of pipeline headroom. Defaults to 5."""
+        return self._inner.slack()
+
+    @property
+    def tolerance(self) -> float:
+        """Frame-match window, in tick intervals at `fps`. Defaults to 1.5."""
+        return self._inner.tolerance()
+
+    @property
+    def ping_ms(self) -> int:
+        """RTT ping cadence in milliseconds; `0` means active pinging is off."""
+        return self._inner.ping_ms()
+
+    @property
+    def state_reliable(self) -> bool:
+        """Whether state packets go out on the reliable channel."""
+        return self._inner.state_reliable()
+
+    @property
+    def action_reliable(self) -> bool:
+        """Whether action packets go out on the reliable channel."""
+        return self._inner.action_reliable()
+
+    @property
+    def reuse_stale_frames(self) -> bool:
+        """Whether a state past its video match window reuses the last
+        emitted frame instead of being dropped.
+        """
+        return self._inner.reuse_stale_frames()
+
+    @property
+    def action_subscription(self) -> bool:
+        """Whether action subscription is enabled. Operator-side only —
+        the robot always processes actions.
+        """
+        return self._inner.action_subscription()
+
+    @property
+    def has_e2ee_key(self) -> bool:
+        """Whether a shared E2EE key has been set. The key bytes are not
+        readable back — this only reports presence.
+        """
+        return self._inner.has_e2ee_key()
+
     def add_video(
         self,
         name: str,
@@ -1327,6 +1381,58 @@ class _RoleConfigBase:
     @property
     def action_chunks(self) -> List[ChunkSpec]:
         return list(self._inner.action_chunks())
+
+    @property
+    def fps(self) -> int:
+        """Unified observation rate in Hz. Defaults to 30."""
+        return self._inner.fps()
+
+    @property
+    def slack(self) -> int:
+        """Ticks of pipeline headroom. Defaults to 5."""
+        return self._inner.slack()
+
+    @property
+    def tolerance(self) -> float:
+        """Frame-match window, in tick intervals at `fps`. Defaults to 1.5."""
+        return self._inner.tolerance()
+
+    @property
+    def ping_ms(self) -> int:
+        """RTT ping cadence in milliseconds; `0` means active pinging is off."""
+        return self._inner.ping_ms()
+
+    @property
+    def state_reliable(self) -> bool:
+        """Whether state packets go out on the reliable channel."""
+        return self._inner.state_reliable()
+
+    @property
+    def action_reliable(self) -> bool:
+        """Whether action packets go out on the reliable channel."""
+        return self._inner.action_reliable()
+
+    @property
+    def reuse_stale_frames(self) -> bool:
+        """Whether a state past its video match window reuses the last
+        emitted frame instead of being dropped.
+        """
+        return self._inner.reuse_stale_frames()
+
+    @property
+    def action_subscription(self) -> bool:
+        """Whether action subscription is enabled. Reports what was set;
+        on `RobotConfig` the flag has no effect — the robot always
+        processes actions.
+        """
+        return self._inner.action_subscription()
+
+    @property
+    def has_e2ee_key(self) -> bool:
+        """Whether a shared E2EE key has been set. The key bytes are not
+        readable back — this only reports presence.
+        """
+        return self._inner.has_e2ee_key()
 
     def add_video(
         self,

@@ -76,6 +76,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Ensure lockfiles are up to date
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          (cd python && uv lock --check)
+
       - name: Build FFI cdylib and generate Python bindings
         run: bash scripts/build_ffi_python.sh release
 

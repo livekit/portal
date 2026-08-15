@@ -35,7 +35,7 @@
 
 - There is currently no automatic release process in place
 - To create a release
-  - Use `scripts/update_version.sh` to bump the version
+  - Use `scripts/update_version.sh` to bump the version and update lock files
   - Open a PR (e.g, "Release v0.1.0") with the bumped version
   - Publish GitHub release with tag (e.g., v0.1.0)
     - Include automatically generated changelog

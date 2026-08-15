@@ -1,5 +1,9 @@
 #!/bin/sh
-# Set the project version in the workspace Cargo.toml and python/pyproject.toml.
+# Set the project version in the workspace Cargo.toml and python/pyproject.toml,
+# then sync Cargo.lock and uv.lock. The lockfiles must be committed with the
+# bump: a stale Cargo.lock gets rewritten by `cargo build` during the publish
+# workflow, dirtying the tree at the tag, and hatch-vcs then stamps the wheels
+# with a local dev version that PyPI rejects.
 # Usage: scripts/update_version.sh <version>
 set -eu
 
@@ -21,3 +25,10 @@ for file in "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/python/pyproject.toml"; do
     mv "$file.tmp" "$file"
     echo "updated $file"
 done
+
+# Sync lockfile entries for workspace members to the new version.
+(cd "$REPO_ROOT" && cargo update --workspace --offline)
+echo "updated $REPO_ROOT/Cargo.lock"
+
+(cd "$REPO_ROOT/python" && uv lock)
+echo "updated $REPO_ROOT/python/uv.lock"

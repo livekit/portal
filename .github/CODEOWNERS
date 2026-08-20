@@ -1,6 +1,2 @@
-# CODEOWNERS for rust-sdks
-# These owners will be requested for review on all PRs
-* @pham-tuan-binh
-
-livekit-portal/ @ladvoc
-livekit-portal-ffi/ @ladvoc
+# Specify the default code owner for all files with a wildcard:
+* @livekit/robotics-devs

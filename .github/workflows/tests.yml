@@ -48,7 +48,7 @@ jobs:
 
       # TODO: consider moving to separate job
       - name: Lint
-        uses: clechasseur/rs-clippy-check@e198ae0533dc69d707c383951d90dc356a692026 # v6.0.6
+        uses: clechasseur/rs-clippy-check@20f338ad6648dedb921c00b023bc30c971ab9ed7 # v6.0.7
 
       - name: cargo test --workspace
         run: cargo test --workspace --locked

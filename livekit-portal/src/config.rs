@@ -516,21 +516,37 @@ impl PortalConfig {
     /// Effective stall config for one track, after applying per-track
     /// overrides and the `reuse_stale_frames` alias over the defaults.
     pub fn stall_for(&self, track: &str) -> StallConfig {
-        let policy = self.track_on_stall.get(track).copied().unwrap_or_else(|| {
-            // The deprecated alias only takes effect when the modern knob is
-            // left at its default, so an explicit `set_on_stall` always wins.
-            if self.reuse_stale_frames && self.on_stall == StallPolicy::Drop {
-                StallPolicy::Freeze
-            } else {
-                self.on_stall
-            }
-        });
+        let base = self.default_stall();
+        StallConfig {
+            policy: self.track_on_stall.get(track).copied().unwrap_or(base.policy),
+            max_lag_us: self
+                .track_max_lag_ms
+                .get(track)
+                .map(|ms| Some(*ms as u64 * 1_000))
+                .unwrap_or(base.max_lag_us),
+        }
+    }
 
-        let max_lag_us = match self.track_max_lag_ms.get(track).copied().or(self.max_lag_ms) {
+    /// Stall config for a track with no override, after folding in the
+    /// deprecated `reuse_stale_frames` alias. Kept separate from
+    /// [`stall_for`](Self::stall_for) so the fallback never has to be spelled
+    /// as a lookup for a track name that cannot exist.
+    fn default_stall(&self) -> StallConfig {
+        // The alias only applies while the modern knob sits at its default,
+        // so an explicit `set_on_stall` always wins — a caller migrating one
+        // setting at a time is never silently overridden by a leftover.
+        let policy = if self.reuse_stale_frames && self.on_stall == StallPolicy::Drop {
+            StallPolicy::Freeze
+        } else {
+            self.on_stall
+        };
+
+        let max_lag_us = match self.max_lag_ms {
             Some(ms) => ms as u64 * 1_000,
-            // `reuse_stale_frames` resolved immediately, with no wait.
-            None if self.reuse_stale_frames && self.max_lag_ms.is_none() => 0,
-            // Default: the point capacity eviction would have reached anyway.
+            // `reuse_stale_frames` substituted immediately, with no wait.
+            None if self.reuse_stale_frames => 0,
+            // Otherwise: the point capacity eviction would have reached anyway,
+            // so the default timing matches earlier versions.
             None => self.slack as u64 * 1_000_000 / self.fps.max(1) as u64,
         };
 
@@ -651,7 +667,7 @@ impl PortalConfig {
             video_buffer_size: self.slack,
             state_buffer_size: self.slack,
             search_range_us,
-            default_stall: self.stall_for(""),
+            default_stall: self.default_stall(),
         }
     }
 }
@@ -740,6 +756,19 @@ mod tests {
         let other = c.stall_for("other");
         assert_eq!(other.policy, StallPolicy::Drop);
         assert_eq!(other.max_lag_us, Some(100_000));
+    }
+
+    /// A track literally named "" must resolve like any other track, not
+    /// collide with the fallback. Guards the empty-string lookup the earlier
+    /// implementation used to express "no override".
+    #[test]
+    fn empty_track_name_is_not_the_fallback() {
+        let mut c = cfg();
+        c.set_on_stall(StallPolicy::Drop);
+        c.set_track_on_stall("", StallPolicy::Omit);
+        assert_eq!(c.stall_for("").policy, StallPolicy::Omit);
+        assert_eq!(c.stall_for("cam1").policy, StallPolicy::Drop, "fallback unaffected");
+        assert_eq!(c.sync_config().default_stall.policy, StallPolicy::Drop);
     }
 
     /// `stall_configs` resolves in the order the sync buffer indexes tracks,

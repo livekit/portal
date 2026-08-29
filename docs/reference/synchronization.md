@@ -402,6 +402,11 @@ A track that stops sending would otherwise strand the head state. Two per-track
 knobs decide what happens: `max_lag` is how long to wait, `on_stall` is what to
 do when the wait is over.
 
+Both are read by the receiving side, since `SyncBuffer` lives there (it is built
+in `setup_operator` and fed from the receive paths). Nothing about a stall is
+transmitted: a silent track is sending nothing by definition, so `omit`
+synthesizes its stand-in locally rather than moving pixels over the wire.
+
 **`max_lag`** is measured against the *stream clock* — the largest sender
 timestamp buffered across every stream, states and all video tracks. It advances
 whenever any stream is still flowing, which is how a silent track is detected

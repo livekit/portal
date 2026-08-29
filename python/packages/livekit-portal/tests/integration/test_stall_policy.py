@@ -63,16 +63,19 @@ def _frame(width: int = 32, height: int = 24, seed: int = 0) -> np.ndarray:
 
 def _declare(pair, policy: StallPolicy | None = None) -> None:
     """Two cameras on the byte-stream path, so frames arrive deterministically
-    rather than through libwebrtc's rate-adapting encoder."""
+    rather than through libwebrtc's rate-adapting encoder.
+
+    The stall knobs go on the **operator only**. Observations are assembled
+    where they are received, so that is the side that reads them; leaving the
+    robot at its defaults keeps every test below an implicit check that the
+    receiver alone is in charge.
+    """
     for cfg in (pair.robot_cfg, pair.operator_cfg):
         cfg.add_video("cam1", codec=VideoCodec.RAW)
         cfg.add_video("cam2", codec=VideoCodec.RAW)
-    # Only the receiving side runs a sync buffer, but configuring both keeps
-    # the declaration symmetric the way real deployments write it.
-    for cfg in (pair.robot_cfg, pair.operator_cfg):
-        cfg.set_max_lag_ms(MAX_LAG_MS)
-        if policy is not None:
-            cfg.set_on_stall(policy)
+    pair.operator_cfg.set_max_lag_ms(MAX_LAG_MS)
+    if policy is not None:
+        pair.operator_cfg.set_on_stall(policy)
 
 
 async def _run_cam2_dies(pair, obs: list[Observation], base: int) -> None:
@@ -161,9 +164,8 @@ async def test_policy_is_per_track_over_the_wire(pair):
     """Per-track policy is the reason the knob exists: a load-bearing camera
     can stay strict while a secondary one degrades gracefully."""
     _declare(pair)
-    for cfg in (pair.robot_cfg, pair.operator_cfg):
-        cfg.set_on_stall(StallPolicy.DROP)
-        cfg.set_track_on_stall("cam2", StallPolicy.OMIT)
+    pair.operator_cfg.set_on_stall(StallPolicy.DROP)
+    pair.operator_cfg.set_track_on_stall("cam2", StallPolicy.OMIT)
 
     obs: list[Observation] = []
     await pair.start()
@@ -210,3 +212,32 @@ async def test_recovery_returns_to_live(pair):
 
     assert obs[-1].frames["cam2"].source is FrameSource.LIVE
     assert obs[-1].frames["cam1"].source is FrameSource.LIVE
+
+
+async def test_policy_is_read_on_the_receiving_side(pair):
+    """Setting the policy on the publisher must do nothing.
+
+    Nothing about a stall crosses the wire: a silent camera is by definition
+    sending nothing, so `OMIT` cannot be a message. The substitute is
+    synthesized by whoever is assembling observations, which is the operator.
+    Configuring only the robot therefore leaves the operator on its default
+    `DROP`, and the moment is discarded.
+
+    This is the mirror of `test_omit_keeps_healthy_camera_visible`: identical
+    traffic, policy on the other side, opposite outcome.
+    """
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        cfg.add_video("cam1", codec=VideoCodec.RAW)
+        cfg.add_video("cam2", codec=VideoCodec.RAW)
+    # Deliberately the wrong side.
+    pair.robot_cfg.set_max_lag_ms(MAX_LAG_MS)
+    pair.robot_cfg.set_on_stall(StallPolicy.OMIT)
+
+    obs: list[Observation] = []
+    await pair.start()
+    pair.operator.on_observation(lambda o: obs.append(o))
+
+    await _run_cam2_dies(pair, obs, base=7_000_000)
+
+    assert len(obs) == 1, "the robot-side policy must have no effect"
+    assert all(f.source is FrameSource.LIVE for f in obs[0].frames.values())

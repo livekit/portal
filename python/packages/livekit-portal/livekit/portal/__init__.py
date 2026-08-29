@@ -1055,6 +1055,12 @@ class PortalConfig:
         than its `max_lag`. Applies to every track without a per-track
         override; see `set_track_on_stall`.
 
+        **Receiving side only.** Observations are assembled where they are
+        consumed, so this is read on the `Operator` and is a no-op on
+        `RobotConfig`. Nothing about a stall crosses the wire: a silent track
+        is by definition sending nothing, so the substitute frame is
+        synthesized locally by the subscriber that noticed the gap.
+
         `StallPolicy.DROP` (the default) emits no observation — the state
         still reaches the drop callback, but the healthy tracks in that
         moment go with it, so an operator screen stays dark while one camera
@@ -1082,6 +1088,8 @@ class PortalConfig:
         Defaults to `slack / fps` — where state-buffer capacity would have
         evicted the moment anyway — so the default timing is unchanged from
         earlier versions. `0` resolves immediately, without waiting.
+
+        **Receiving side only**, like `set_on_stall`.
         """
         self._inner.set_max_lag_ms(ms)
 

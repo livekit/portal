@@ -93,6 +93,14 @@ fewer things that can fail to match.
 When a camera stops sending, two knobs decide what happens to the moments it
 can no longer cover: how long to wait, then what to do.
 
+**Set these on the side that consumes observations, normally the operator.**
+Observations are assembled where they are received, so a stall is detected and
+resolved locally by the subscriber; nothing about it crosses the wire. Setting
+them on a `RobotConfig` is a no-op. In particular, `OMIT` does not send a
+placeholder frame: a silent camera is by definition sending nothing, so the
+receiver synthesizes the stand-in itself, using the geometry of the last frame
+that track actually delivered.
+
 ```python
 cfg.set_max_lag_ms(150)                 # wait this long, in stream time
 cfg.set_on_stall(StallPolicy.OMIT)      # then resolve this way

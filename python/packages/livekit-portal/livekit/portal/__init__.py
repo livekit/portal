@@ -58,6 +58,8 @@ from ._frame import frame_bytes_to_numpy_rgb
 Role = _ffi.Role
 DType = _ffi.DType
 VideoCodec = _ffi.VideoCodec
+FrameSource = _ffi.FrameSource
+StallPolicy = _ffi.StallPolicy
 FieldSpec = _ffi.FieldSpec
 FrameVideoSpec = _ffi.FrameVideoSpec
 ChunkSpec = _ffi.ChunkSpec
@@ -289,6 +291,12 @@ class Observation:
     `state` holds Python-native types per the declared state schema;
     `raw_state` keeps the f64 dict. `frames` is unchanged from the FFI
     layer — one entry per registered video track.
+
+    Every registered track always has an entry, even when it went silent:
+    check `frames[name].source` to tell a real match (`FrameSource.LIVE`)
+    from a reused earlier frame (`FrameSource.STALE`) or a synthesized
+    placeholder (`FrameSource.OMITTED`). Only `LIVE` frames are
+    measurements of `timestamp_us`.
     """
 
     state: Dict[str, TypedScalar]
@@ -1035,8 +1043,61 @@ class PortalConfig:
         or logging where losing state is worse than a transient video freeze.
         Leave off for real-time control where a stale frame would misalign
         the perception/action loop.
+
+        .. deprecated::
+            Use ``set_on_stall(StallPolicy.FREEZE)``, which is this plus
+            ``set_max_lag_ms(0)``.
         """
         self._inner.set_reuse_stale_frames(enable)
+
+    def set_on_stall(self, policy: "StallPolicy") -> None:
+        """How a moment is resolved when a video track goes silent for longer
+        than its `max_lag`. Applies to every track without a per-track
+        override; see `set_track_on_stall`.
+
+        `StallPolicy.DROP` (the default) emits no observation — the state
+        still reaches the drop callback, but the healthy tracks in that
+        moment go with it, so an operator screen stays dark while one camera
+        is down. `StallPolicy.FREEZE` holds the silent track's last good
+        frame. `StallPolicy.OMIT` substitutes a visible placeholder, so the
+        healthy tracks keep flowing.
+
+        Whichever fires, the frame carries a `FrameSource` saying which it
+        was. Check `frames[name].source` before feeding an observation to a
+        policy or writing it to a dataset.
+        """
+        self._inner.set_on_stall(policy)
+
+    def set_max_lag_ms(self, ms: int) -> None:
+        """How far the fastest-advancing stream may run past a moment before
+        that moment resolves without a silent track — in milliseconds of
+        **sender-clock time**, not wall-clock.
+
+        This is a statement about stream position, not a stopwatch. It is
+        evaluated when a packet arrives, so a burst of buffered frames can
+        cross it in far less real time, and if every stream goes quiet
+        nothing fires at all (nothing is being emitted either). Staying on
+        sender clocks is what keeps sync decisions reproducible.
+
+        Defaults to `slack / fps` — where state-buffer capacity would have
+        evicted the moment anyway — so the default timing is unchanged from
+        earlier versions. `0` resolves immediately, without waiting.
+        """
+        self._inner.set_max_lag_ms(ms)
+
+    def set_track_on_stall(self, track: str, policy: "StallPolicy") -> None:
+        """Per-track override for `set_on_stall`.
+
+        Use it when tracks differ in how load-bearing they are: a wrist
+        camera a policy depends on may warrant `DROP` (no observation beats
+        a wrong one), while a scene camera warrants `OMIT` so its failure
+        does not take the rest of the frame set down with it.
+        """
+        self._inner.set_track_on_stall(track, policy)
+
+    def set_track_max_lag_ms(self, track: str, ms: int) -> None:
+        """Per-track override for `set_max_lag_ms`."""
+        self._inner.set_track_max_lag_ms(track, ms)
 
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions.
@@ -1570,6 +1631,18 @@ class _RoleConfigBase:
     def set_reuse_stale_frames(self, enable: bool) -> None:
         self._inner.set_reuse_stale_frames(enable)
 
+    def set_on_stall(self, policy: "StallPolicy") -> None:
+        self._inner.set_on_stall(policy)
+
+    def set_max_lag_ms(self, ms: int) -> None:
+        self._inner.set_max_lag_ms(ms)
+
+    def set_track_on_stall(self, track: str, policy: "StallPolicy") -> None:
+        self._inner.set_track_on_stall(track, policy)
+
+    def set_track_max_lag_ms(self, track: str, ms: int) -> None:
+        self._inner.set_track_max_lag_ms(track, ms)
+
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions ("HITL
         recording"). Off by default. See `PortalConfig.set_action_subscription`
@@ -1953,6 +2026,8 @@ __all__ = [
     "Role",
     "DType",
     "VideoCodec",
+    "FrameSource",
+    "StallPolicy",
     "FieldSpec",
     "FrameVideoSpec",
     "ChunkSpec",

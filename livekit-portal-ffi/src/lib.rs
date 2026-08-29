@@ -245,6 +245,70 @@ fn chunk_columns_to_core(data: HashMap<String, ChunkColumn>) -> HashMap<String, 
         .collect()
 }
 
+/// Where the pixels in a delivered frame came from. Mirrors
+/// `livekit_portal::FrameSource`.
+///
+/// Frames delivered on the raw video callbacks are always `Live`. The other
+/// variants appear only on frames inside an `Observation`, when the sync
+/// buffer had to resolve a track that went silent past its `max_lag`.
+/// Check it before feeding an observation to a policy or a dataset — `Stale`
+/// and `Omitted` frames are not measurements of the moment they hang off.
+///
+/// **Foreign binding casing**: UniFFI emits enum variants in the host
+/// language's idiomatic case. Python code uses `FrameSource.LIVE` /
+/// `FrameSource.STALE` / `FrameSource.OMITTED` (UPPER), not the Rust
+/// spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FrameSource {
+    /// A real frame matched to this state within the tolerance window.
+    Live,
+    /// A real frame from an earlier moment, reused because nothing in range
+    /// arrived (`on_stall: freeze`). Age is
+    /// `observation.timestamp_us - frame.timestamp_us`.
+    Stale,
+    /// A synthesized placeholder standing in for a silent track
+    /// (`on_stall: omit`). Not camera output.
+    Omitted,
+}
+
+impl From<core::FrameSource> for FrameSource {
+    fn from(s: core::FrameSource) -> Self {
+        match s {
+            core::FrameSource::Live => FrameSource::Live,
+            core::FrameSource::Stale => FrameSource::Stale,
+            core::FrameSource::Omitted => FrameSource::Omitted,
+        }
+    }
+}
+
+/// How a moment is resolved when a video track goes silent past its
+/// `max_lag`. Mirrors `livekit_portal::StallPolicy`.
+///
+/// **Foreign binding casing**: UniFFI emits enum variants in the host
+/// language's idiomatic case. Python code uses `StallPolicy.DROP` /
+/// `StallPolicy.FREEZE` / `StallPolicy.OMIT` (UPPER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum StallPolicy {
+    /// Emit no observation. The state still reaches the drop callback, but
+    /// the healthy tracks in that moment are discarded with it.
+    Drop,
+    /// Emit with the track's last good frame, tagged `FrameSource.STALE`.
+    Freeze,
+    /// Emit with a visible placeholder for the silent track, tagged
+    /// `FrameSource.OMITTED`. The map key is still present.
+    Omit,
+}
+
+impl From<StallPolicy> for core::StallPolicy {
+    fn from(p: StallPolicy) -> Self {
+        match p {
+            StallPolicy::Drop => core::StallPolicy::Drop,
+            StallPolicy::Freeze => core::StallPolicy::Freeze,
+            StallPolicy::Omit => core::StallPolicy::Omit,
+        }
+    }
+}
+
 /// Decoded video frame. `data` is packed RGB24 (R,G,B byte order, `W*H*3`
 /// bytes) on both sides — `send_video_frame` accepts RGB, and receive-side
 /// frames are color-converted from I420 (WebRTC) or codec-decoded (frame
@@ -255,6 +319,9 @@ pub struct VideoFrame {
     pub height: u32,
     pub data: Vec<u8>,
     pub timestamp_us: u64,
+    /// Whether these pixels are a live match, a reused earlier frame, or a
+    /// synthesized placeholder. Always `Live` outside of `Observation`.
+    pub source: FrameSource,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -671,8 +738,32 @@ impl PortalConfig {
         self.inner.lock().set_ping_ms(ms);
     }
 
+    #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.lock().set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_on_stall(&self, policy: StallPolicy) {
+        self.inner.lock().set_on_stall(policy.into());
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.lock().set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_on_stall`.
+    pub fn set_track_on_stall(&self, track: String, policy: StallPolicy) {
+        self.inner.lock().set_track_on_stall(track, policy.into());
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.lock().set_track_max_lag_ms(track, ms);
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -777,6 +868,7 @@ impl PortalConfig {
 
     /// Whether a state past its video match window reuses the last emitted
     /// frame instead of being dropped.
+    #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.lock().reuse_stale_frames()
     }
@@ -1185,8 +1277,32 @@ impl RobotConfig {
         self.inner.set_e2ee_key(key);
     }
 
+    #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_on_stall(&self, policy: StallPolicy) {
+        self.inner.set_on_stall(policy);
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_on_stall`.
+    pub fn set_track_on_stall(&self, track: String, policy: StallPolicy) {
+        self.inner.set_track_on_stall(track, policy);
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.set_track_max_lag_ms(track, ms);
     }
 
     /// No-op on the Robot side — the robot always processes actions. Kept on
@@ -1247,6 +1363,7 @@ impl RobotConfig {
         self.inner.action_reliable()
     }
 
+    #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.reuse_stale_frames()
     }
@@ -1338,8 +1455,32 @@ impl OperatorConfig {
         self.inner.set_e2ee_key(key);
     }
 
+    #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_on_stall(&self, policy: StallPolicy) {
+        self.inner.set_on_stall(policy);
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_on_stall`.
+    pub fn set_track_on_stall(&self, track: String, policy: StallPolicy) {
+        self.inner.set_track_on_stall(track, policy);
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.set_track_max_lag_ms(track, ms);
     }
 
     /// Operator-side opt-in to receiving executed actions ("HITL recording").
@@ -1401,6 +1542,7 @@ impl OperatorConfig {
         self.inner.action_reliable()
     }
 
+    #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.reuse_stale_frames()
     }
@@ -1690,6 +1832,7 @@ fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
         height: f.height,
         data: f.data.to_vec(),
         timestamp_us: f.timestamp_us,
+        source: f.source.into(),
     }
 }
 

@@ -37,7 +37,7 @@ use crate::error::{PortalError, PortalResult};
 use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
 use crate::sync_buffer::SyncBuffer;
-use crate::types::VideoFrameData;
+use crate::types::{FrameSource, VideoFrameData};
 
 const DEFAULT_WIDTH: u32 = 640;
 const DEFAULT_HEIGHT: u32 = 480;
@@ -157,7 +157,8 @@ impl VideoPublisher {
         let mut buffer = I420Buffer::new(width, height);
         rgb_to_i420(rgb_data, width, height, &mut buffer);
         let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
-        frame.frame_metadata = Some(FrameMetadata { user_timestamp: Some(ts), frame_id: None, user_data: None });
+        frame.frame_metadata =
+            Some(FrameMetadata { user_timestamp: Some(ts), frame_id: None, user_data: None });
         self.source.capture_frame(&frame);
         self.metrics.record_sent();
         Ok(())
@@ -415,7 +416,13 @@ fn convert_frame<T: AsRef<dyn VideoBuffer>>(
         );
         buf.set_len(total);
     }
-    VideoFrameData { width, height, data: Bytes::from(buf), timestamp_us }
+    VideoFrameData {
+        width,
+        height,
+        data: Bytes::from(buf),
+        timestamp_us,
+        source: FrameSource::Live,
+    }
 }
 
 // RGB24 (R,G,B byte order) -> I420 via libyuv. libyuv's `RAW` format is R,G,B;
@@ -456,6 +463,7 @@ mod tests {
             height: 2,
             data: Bytes::from_static(&[0u8; 12]),
             timestamp_us: ts,
+            source: FrameSource::Live,
         })
     }
 

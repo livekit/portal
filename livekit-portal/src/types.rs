@@ -248,6 +248,30 @@ pub struct Observation {
     pub timestamp_us: u64,
 }
 
+/// Where the pixels in a delivered frame came from. Frames arriving on the
+/// raw video callbacks are always `Live`; the other two variants only ever
+/// appear on frames inside an [`Observation`], where the sync buffer had to
+/// resolve a track that could not be matched within its `max_lag` (see
+/// `on_stall` in [`PortalConfig`](crate::PortalConfig)).
+///
+/// Check this before feeding an observation to a policy or writing it to a
+/// dataset: `Stale` and `Omitted` frames are not measurements of the moment
+/// they are attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameSource {
+    /// A real frame matched to this state within the tolerance window.
+    Live,
+    /// A real frame, but from an earlier moment — the track's last good
+    /// frame, reused because nothing in range arrived (`on_stall: freeze`).
+    /// `timestamp_us` is the frame's own, so the age is
+    /// `observation.timestamp_us - frame.timestamp_us`.
+    Stale,
+    /// Not a camera frame at all: a synthesized placeholder standing in for
+    /// a track that went silent (`on_stall: omit`). The key is still present
+    /// so `frames[name]` never fails; the pixels carry a visible pattern.
+    Omitted,
+}
+
 /// Decoded video frame. `data` is packed RGB24 (R,G,B byte order, `W*H*3`
 /// bytes) regardless of transport — WebRTC frames are color-converted from
 /// I420 on receive, frame-video frames are decoded back to RGB by the
@@ -263,6 +287,53 @@ pub struct VideoFrameData {
     pub height: u32,
     pub data: Bytes,
     pub timestamp_us: u64,
+    /// Whether these pixels are a live match, a reused earlier frame, or a
+    /// synthesized placeholder. Always `Live` outside of `Observation`.
+    pub source: FrameSource,
+}
+
+/// What to do with a moment whose video track has gone silent past its
+/// `max_lag`. Set per track via
+/// [`set_on_stall`](crate::PortalConfig::set_on_stall).
+///
+/// All three are terminal: they describe how the moment is resolved once
+/// the wait is over, not something that happens during it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StallPolicy {
+    /// Emit no observation. The state is still delivered, on the drop
+    /// callback. Nothing is fabricated — but the healthy tracks in that
+    /// moment are discarded along with the silent one.
+    #[default]
+    Drop,
+    /// Emit with the track's last good frame, tagged
+    /// [`FrameSource::Stale`]. Video freezes on that track while state
+    /// keeps flowing. Falls back to `Drop` before the track's first frame,
+    /// when there is nothing to reuse.
+    Freeze,
+    /// Emit with a synthesized placeholder for the silent track, tagged
+    /// [`FrameSource::Omitted`]. The map key is still present, so
+    /// `frames[name]` never fails. Falls back to `Drop` before the track's
+    /// first frame, when its frame geometry is not yet known.
+    Omit,
+}
+
+/// Per-track stall handling: how long to wait for a silent track, and how
+/// to resolve the moment when the wait is over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StallConfig {
+    /// How far the fastest-advancing stream may run past a moment — in
+    /// sender-clock microseconds, never wall-clock — before that moment is
+    /// resolved without this track.
+    ///
+    /// Evaluated when a packet arrives, not on a timer: if every stream
+    /// goes silent nothing fires, because nothing is being emitted anyway.
+    /// `None` (the default here) keeps the historical behavior of waiting
+    /// until state-buffer capacity evicts the moment;
+    /// [`PortalConfig`](crate::PortalConfig) derives a concrete value from
+    /// `slack` and `fps` instead. `Some(0)` resolves immediately, without
+    /// ever waiting.
+    pub max_lag_us: Option<u64>,
+    pub policy: StallPolicy,
 }
 
 /// Internal sync configuration, derived from `PortalConfig` knobs.
@@ -271,13 +342,9 @@ pub struct SyncConfig {
     pub video_buffer_size: u32,
     pub state_buffer_size: u32,
     pub search_range_us: u64,
-    /// When true, a state whose video match window has elapsed reuses the
-    /// most recently emitted frame on that track instead of being dropped.
-    /// Video effectively "freezes" during frame loss while state keeps
-    /// flowing — every state becomes an observation once every track has
-    /// emitted at least once. Default is `false`, preserving the strict
-    /// drop-on-horizon behavior.
-    pub reuse_stale_frames: bool,
+    /// Stall handling for tracks with no per-track override. Defaults to
+    /// the historical strict behavior: wait for capacity, then drop.
+    pub default_stall: StallConfig,
 }
 
 impl Default for SyncConfig {
@@ -286,7 +353,7 @@ impl Default for SyncConfig {
             video_buffer_size: 5,    // ~83ms at 60fps
             state_buffer_size: 5,    // ~83ms at 60fps
             search_range_us: 10_000, // 10ms — half a frame interval at 60fps
-            reuse_stale_frames: false,
+            default_stall: StallConfig { max_lag_us: None, policy: StallPolicy::Drop },
         }
     }
 }

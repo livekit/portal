@@ -14,7 +14,8 @@
 
 use crate::codec::Codec;
 use crate::dtype::DType;
-use crate::types::{Role, SyncConfig};
+use crate::types::{Role, StallConfig, StallPolicy, SyncConfig};
+use std::collections::HashMap;
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
 /// explicit value. Tuned for inference workloads: visually near-lossless on
@@ -166,7 +167,18 @@ pub struct PortalConfig {
     pub(crate) slack: u32,
     pub(crate) tolerance: f32,
     pub(crate) ping_ms: u64,
+    /// Deprecated alias, retained so existing callers keep working. Folded
+    /// into the stall policy in `sync_config()`; see `set_reuse_stale_frames`.
     pub(crate) reuse_stale_frames: bool,
+    /// Default stall policy for tracks with no per-track override.
+    pub(crate) on_stall: StallPolicy,
+    /// Default `max_lag` in milliseconds. `None` derives it from `slack` and
+    /// `fps`, which reproduces the historical capacity-eviction timing.
+    pub(crate) max_lag_ms: Option<u32>,
+    /// Per-track overrides, keyed by track name. Each is independent: a
+    /// track may override the policy, the lag budget, or both.
+    pub(crate) track_on_stall: HashMap<String, StallPolicy>,
+    pub(crate) track_max_lag_ms: HashMap<String, u32>,
     pub(crate) shared_key: Option<Vec<u8>>,
     /// Operator-side: subscribe to executed actions. Off by default —
     /// most operators are pure controllers and do not want the bandwidth
@@ -200,6 +212,10 @@ impl PortalConfig {
             tolerance: 1.5,
             ping_ms: 1000,
             reuse_stale_frames: false,
+            on_stall: StallPolicy::Drop,
+            max_lag_ms: None,
+            track_on_stall: HashMap::new(),
+            track_max_lag_ms: HashMap::new(),
             shared_key: None,
             action_subscription: false,
         }
@@ -440,8 +456,91 @@ impl PortalConfig {
     /// losing a state is worse than a transient video freeze; leave it
     /// off for real-time control where a stale frame would misalign the
     /// perception/action loop.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use set_on_stall(StallPolicy::Freeze) — equivalent to this plus set_max_lag_ms(0)"
+    )]
     pub fn set_reuse_stale_frames(&mut self, enable: bool) {
         self.reuse_stale_frames = enable;
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to every track without a per-track override; see
+    /// [`set_track_on_stall`](Self::set_track_on_stall).
+    ///
+    /// [`Drop`](StallPolicy::Drop) (the default) emits nothing for that
+    /// moment — the state still reaches the drop callback, but the healthy
+    /// tracks in it are discarded too, so an operator screen goes dark while
+    /// one camera is down. [`Freeze`](StallPolicy::Freeze) keeps the last
+    /// good frame on the silent track. [`Omit`](StallPolicy::Omit) emits a
+    /// visible placeholder for it, so the healthy tracks keep flowing.
+    ///
+    /// Whatever the policy, the frame carries a [`FrameSource`] saying which
+    /// of the three it was — check it before feeding an observation to a
+    /// policy or writing it to a dataset.
+    pub fn set_on_stall(&mut self, policy: StallPolicy) {
+        self.on_stall = policy;
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// is resolved without a silent track, in milliseconds of **sender-clock
+    /// time** — not wall-clock.
+    ///
+    /// This is a statement about stream position, not a stopwatch: it is
+    /// evaluated when a packet arrives, so a burst of buffered frames can
+    /// cross the threshold in far less real time, and if every stream goes
+    /// quiet nothing fires at all (nothing is being emitted either). Keeping
+    /// it on sender clocks is what makes sync decisions reproducible.
+    ///
+    /// Defaults to `slack / fps` — the point at which state-buffer capacity
+    /// would have evicted the moment anyway — so the default timing matches
+    /// the historical behavior. `0` resolves immediately, without waiting.
+    pub fn set_max_lag_ms(&mut self, ms: u32) {
+        self.max_lag_ms = Some(ms);
+    }
+
+    /// Per-track override for [`set_on_stall`](Self::set_on_stall). Use it
+    /// when tracks differ in how load-bearing they are: a wrist camera a
+    /// policy depends on may warrant `Drop` (no observation beats a wrong
+    /// one), while a scene camera warrants `Omit` so its failure does not
+    /// take the rest of the frame set down with it.
+    pub fn set_track_on_stall(&mut self, track: impl Into<String>, policy: StallPolicy) {
+        self.track_on_stall.insert(track.into(), policy);
+    }
+
+    /// Per-track override for [`set_max_lag_ms`](Self::set_max_lag_ms).
+    pub fn set_track_max_lag_ms(&mut self, track: impl Into<String>, ms: u32) {
+        self.track_max_lag_ms.insert(track.into(), ms);
+    }
+
+    /// Effective stall config for one track, after applying per-track
+    /// overrides and the `reuse_stale_frames` alias over the defaults.
+    pub fn stall_for(&self, track: &str) -> StallConfig {
+        let policy = self.track_on_stall.get(track).copied().unwrap_or_else(|| {
+            // The deprecated alias only takes effect when the modern knob is
+            // left at its default, so an explicit `set_on_stall` always wins.
+            if self.reuse_stale_frames && self.on_stall == StallPolicy::Drop {
+                StallPolicy::Freeze
+            } else {
+                self.on_stall
+            }
+        });
+
+        let max_lag_us = match self.track_max_lag_ms.get(track).copied().or(self.max_lag_ms) {
+            Some(ms) => ms as u64 * 1_000,
+            // `reuse_stale_frames` resolved immediately, with no wait.
+            None if self.reuse_stale_frames && self.max_lag_ms.is_none() => 0,
+            // Default: the point capacity eviction would have reached anyway.
+            None => self.slack as u64 * 1_000_000 / self.fps.max(1) as u64,
+        };
+
+        StallConfig { max_lag_us: Some(max_lag_us), policy }
+    }
+
+    /// Per-track stall config for every registered track, in the order the
+    /// sync buffer indexes them.
+    pub(crate) fn stall_configs(&self, track_names: &[String]) -> Vec<StallConfig> {
+        track_names.iter().map(|n| self.stall_for(n)).collect()
     }
 
     /// Declared WebRTC (H264) video tracks (name + optional bitrate cap), in
@@ -552,7 +651,107 @@ impl PortalConfig {
             video_buffer_size: self.slack,
             state_buffer_size: self.slack,
             search_range_us,
-            reuse_stale_frames: self.reuse_stale_frames,
+            default_stall: self.stall_for(""),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> PortalConfig {
+        PortalConfig::new("demo", Role::Robot)
+    }
+
+    /// The default budget is the point state-buffer capacity would have
+    /// evicted the moment anyway (`slack / fps`), so the default timing
+    /// matches the historical behavior rather than changing it.
+    #[test]
+    fn default_stall_is_drop_at_slack_over_fps() {
+        let c = cfg(); // slack 5, fps 30
+        let s = c.stall_for("cam1");
+        assert_eq!(s.policy, StallPolicy::Drop);
+        assert_eq!(s.max_lag_us, Some(5 * 1_000_000 / 30));
+    }
+
+    #[test]
+    fn default_budget_tracks_slack_and_fps() {
+        let mut c = cfg();
+        c.set_slack(10);
+        c.set_fps(50);
+        assert_eq!(c.stall_for("cam1").max_lag_us, Some(200_000));
+    }
+
+    /// `reuse_stale_frames` is exactly `Freeze` with a zero budget: resolve
+    /// immediately, substituting the last good frame.
+    #[test]
+    fn reuse_stale_frames_aliases_to_freeze_with_zero_budget() {
+        let mut c = cfg();
+        #[allow(deprecated)]
+        c.set_reuse_stale_frames(true);
+        let s = c.stall_for("cam1");
+        assert_eq!(s.policy, StallPolicy::Freeze);
+        assert_eq!(s.max_lag_us, Some(0));
+    }
+
+    /// An explicit modern knob always beats the deprecated alias, in both
+    /// directions, so a caller migrating one setting at a time is never
+    /// silently overridden by a leftover `reuse_stale_frames`.
+    #[test]
+    fn explicit_knobs_win_over_the_alias() {
+        let mut c = cfg();
+        #[allow(deprecated)]
+        c.set_reuse_stale_frames(true);
+        c.set_on_stall(StallPolicy::Omit);
+        c.set_max_lag_ms(200);
+        let s = c.stall_for("cam1");
+        assert_eq!(s.policy, StallPolicy::Omit);
+        assert_eq!(s.max_lag_us, Some(200_000));
+    }
+
+    #[test]
+    fn max_lag_ms_converts_to_micros() {
+        let mut c = cfg();
+        c.set_max_lag_ms(200);
+        assert_eq!(c.stall_for("cam1").max_lag_us, Some(200_000));
+        c.set_max_lag_ms(0);
+        assert_eq!(c.stall_for("cam1").max_lag_us, Some(0), "0 resolves immediately");
+    }
+
+    /// Per-track overrides are independent: a track may override the policy,
+    /// the budget, or both, and untouched tracks keep the defaults.
+    #[test]
+    fn per_track_overrides_apply_independently() {
+        let mut c = cfg();
+        c.set_on_stall(StallPolicy::Drop);
+        c.set_max_lag_ms(100);
+        c.set_track_on_stall("scene", StallPolicy::Omit);
+        c.set_track_max_lag_ms("wrist", 20);
+
+        let scene = c.stall_for("scene");
+        assert_eq!(scene.policy, StallPolicy::Omit, "policy overridden");
+        assert_eq!(scene.max_lag_us, Some(100_000), "budget inherited");
+
+        let wrist = c.stall_for("wrist");
+        assert_eq!(wrist.policy, StallPolicy::Drop, "policy inherited");
+        assert_eq!(wrist.max_lag_us, Some(20_000), "budget overridden");
+
+        let other = c.stall_for("other");
+        assert_eq!(other.policy, StallPolicy::Drop);
+        assert_eq!(other.max_lag_us, Some(100_000));
+    }
+
+    /// `stall_configs` resolves in the order the sync buffer indexes tracks,
+    /// since the buffer addresses them positionally.
+    #[test]
+    fn stall_configs_follow_track_order() {
+        let mut c = cfg();
+        c.set_track_on_stall("b", StallPolicy::Freeze);
+        let names = vec!["a".to_string(), "b".to_string()];
+        let got = c.stall_configs(&names);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].policy, StallPolicy::Drop);
+        assert_eq!(got[1].policy, StallPolicy::Freeze);
     }
 }

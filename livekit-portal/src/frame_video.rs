@@ -81,7 +81,7 @@ use crate::error::{PortalError, PortalResult};
 use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
 use crate::sync_buffer::SyncBuffer;
-use crate::types::VideoFrameData;
+use crate::types::{FrameSource, VideoFrameData};
 use crate::video::{VideoTrackSlots, now_us};
 
 /// Reserved Portal topic for frame-video byte streams. A single topic
@@ -402,6 +402,7 @@ pub(crate) fn dispatch_frame_payload(
         height: decoded.height,
         data: decoded.rgb,
         timestamp_us,
+        source: FrameSource::Live,
     });
 
     let track_name_for_dispatch = entry.spec.name.as_str();

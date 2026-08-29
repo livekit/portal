@@ -82,9 +82,11 @@ struct MatchSlot {
     // set `last_emitted_frames[track] = frame`. If `None`, the frame is
     // the stored last-emitted fallback — buffer and pointer stay put.
     drain_to: Option<usize>,
-    // True iff the frame's |delta| from state_ts exceeds `search_range_us`
-    // (pure reuse, or a below-horizon drain-match).
-    stale: bool,
+    // How the frame relates to the state it is being attached to. `Live`
+    // for an in-range match; `Stale` for either reuse path (pure reuse or a
+    // below-horizon drain-match). Stamped onto the emitted frame so
+    // consumers can tell a measurement from a substitute.
+    source: FrameSource,
 }
 
 pub(crate) struct SyncBuffer {
@@ -97,6 +99,14 @@ pub(crate) struct SyncBuffer {
     /// reconstruct typed values into each `Observation` emitted.
     state_schema: Vec<FieldSpec>,
     config: SyncConfig,
+
+    // Per-track stall handling, parallel to `track_names`: how long to wait
+    // for a silent track and how to resolve the moment when the wait ends.
+    stall: Vec<StallConfig>,
+
+    // True iff any track has a finite `max_lag_us`. Lets the hot path skip
+    // computing `logical_now` entirely under the default config.
+    any_max_lag: bool,
 
     // Per-track cursor: the largest index whose frame ts is <= head state ts
     // (or 0 if all frames are > head ts). Advances monotonically with state_ts
@@ -132,10 +142,15 @@ pub(crate) struct SyncBuffer {
 }
 
 impl SyncBuffer {
+    /// `stall` is the per-track stall configuration, parallel to
+    /// `video_track_names`. A length mismatch (or an empty vec) falls back to
+    /// `config.default_stall` for every track, so test and embedding callers
+    /// that do not care can pass `Vec::new()`.
     pub fn new(
         video_track_names: &[String],
         state_schema: Vec<FieldSpec>,
         config: SyncConfig,
+        stall: Vec<StallConfig>,
         metrics: Arc<MetricsRegistry>,
     ) -> Self {
         let track_names: Vec<String> = video_track_names.to_vec();
@@ -146,6 +161,12 @@ impl SyncBuffer {
         let matched_scratch: Vec<Option<MatchSlot>> =
             (0..track_names.len()).map(|_| None).collect();
         let last_emitted_frames = vec![None; track_names.len()];
+        let stall = if stall.len() == track_names.len() {
+            stall
+        } else {
+            vec![config.default_stall; track_names.len()]
+        };
+        let any_max_lag = stall.iter().any(|s| s.max_lag_us.is_some());
         Self {
             track_names,
             track_index,
@@ -153,6 +174,8 @@ impl SyncBuffer {
             state_buffer: VecDeque::new(),
             state_schema,
             config,
+            stall,
+            any_max_lag,
             cursors,
             blocker: None,
             matched_scratch,
@@ -205,6 +228,31 @@ impl SyncBuffer {
         self.drop_warn.worst_ahead_us = 0;
     }
 
+    /// Largest sender timestamp currently buffered across every stream — the
+    /// newest state plus each track's newest frame. This is the "stream
+    /// clock" `max_lag` is measured against: it advances whenever *any*
+    /// stream is still flowing, so a track that has gone silent is detected
+    /// through the clocks of the tracks that have not.
+    ///
+    /// Reads only sender timestamps, never a wall clock, so stall decisions
+    /// stay reproducible and testable — the reason a wall-clock deadline was
+    /// rejected in the first place. The corollary is that this is not a
+    /// watchdog: if every stream goes silent the clock stops and nothing
+    /// resolves, which is harmless because nothing is being emitted either.
+    ///
+    /// Always `>= state_buffer[0]`, since the head is the front of
+    /// `state_buffer` and its back is `>=` its front. O(tracks), and only
+    /// called when at least one track has a finite `max_lag`.
+    fn logical_now(&self) -> u64 {
+        let mut now = self.state_buffer.back().map(|(ts, _)| *ts).unwrap_or(0);
+        for buf in &self.video_buffers {
+            if let Some(frame) = buf.back() {
+                now = now.max(frame.timestamp_us);
+            }
+        }
+        now
+    }
+
     /// Build the typed state map once per emission. Separate so the two
     /// call sites (overflow drop and sync emit) stay in lockstep, and
     /// distinctly named to avoid shadowing the conceptual "typed state"
@@ -240,11 +288,20 @@ impl SyncBuffer {
         // Skip try_sync when this push cannot have changed head-state matchability:
         //   - another track is blocking (a push to a non-blocker doesn't unblock it), AND
         //   - no eviction happened on this track (eviction can newly-transition a track
-        //     from matching → unmatchable, which must be checked).
+        //     from matching → unmatchable, which must be checked), AND
+        //   - no track has a finite `max_lag`.
+        //
+        // That last clause is what makes a stall resolve when a healthy track
+        // is the only thing still moving: a push to a *non-blocking* track
+        // advances the stream clock, which can carry the head past its lag
+        // budget even though this track was never the blocker. Skipping here
+        // would strand the head exactly in the case the budget exists to fix.
+        // It costs the blocker short-circuit whenever a budget is set, which
+        // is an O(tracks) early-return per frame — cheap next to decoding one.
         let should_run = match self.blocker {
             None => true,
             Some(b) if b == idx => true,
-            Some(_) => evicted > 0,
+            Some(_) => evicted > 0 || self.any_max_lag,
         };
 
         if should_run { self.try_sync() } else { SyncOutput::empty() }
@@ -328,18 +385,24 @@ impl SyncBuffer {
                 *slot = None;
             }
 
+            // Stream clock for `max_lag`, computed once per candidate state
+            // rather than per track. Skipped entirely when no track has a
+            // finite `max_lag`, which is the default.
+            let logical_now = if self.any_max_lag { self.logical_now() } else { 0 };
+
             // Per-iteration status. Priority: drop > wait > emit. We scan every
             // track (even after a wait-on-earlier-track) so that a drop-eligible
             // track later in the list can override the wait — otherwise a state
             // could stall forever waiting on cam1 while cam2 has already moved
             // beyond the match horizon.
             //
-            // When `reuse_stale_frames` is enabled, any track with a
-            // last-emitted frame short-circuits to stale reuse instead of
-            // waiting or dropping. The remaining wait/drop branches cover the
-            // startup window before a track has emitted for the first time,
-            // plus state-buffer overflow (handled in `push_state`) as the
-            // hard safety net against a fully halted video stream.
+            // A track that cannot match waits until either no future frame
+            // could match it or its `max_lag` elapses, then resolves per its
+            // `on_stall` policy. `Freeze` and `Omit` still wait through the
+            // startup window before the track's first frame, when they have
+            // nothing to substitute. State-buffer overflow (handled in
+            // `push_state`) remains the hard safety net against a fully
+            // halted video stream.
             let mut should_drop = false;
             // How far the video stream had moved past `state_ts` when the drop
             // fired (`newest_frame_ts - state_ts`). Captured for the warning so
@@ -401,71 +464,101 @@ impl SyncBuffer {
                     self.matched_scratch[track_i] = Some(MatchSlot {
                         frame: self.video_buffers[track_i][idx].clone(),
                         drain_to: Some(idx),
-                        stale: false,
+                        source: FrameSource::Live,
                     });
                     continue;
                 }
 
-                // No fresh in-range match. Under reuse, prefer the newest
-                // below-horizon buffered frame (ts ≤ state_ts, |Δ| ≥ range)
-                // over the stored last-emitted fallback: it tracks forward
-                // with state_ts so match_delta stays bounded, and draining
-                // it keeps the buffer from wedging at cap while a track is
-                // systematically behind. Since state_ts advances monotonically,
-                // no future state could fresh-match a frame with ts ≤ current
-                // state_ts − range, so consuming it now is safe.
+                // No fresh in-range match on this track. Two questions, in
+                // order: can waiting still help, and — if not, or if we have
+                // already waited long enough — how does this track's policy
+                // resolve the moment?
                 //
-                // Past-horizon frames (ts > state_ts) fall through to pure
-                // reuse so a later state can still claim them.
-                if self.config.reuse_stale_frames {
-                    if !frame_buf.is_empty() {
-                        let c = self.cursors[track_i];
-                        let cand = &frame_buf[c];
-                        if cand.timestamp_us <= state_ts && state_ts - cand.timestamp_us >= range {
-                            self.matched_scratch[track_i] = Some(MatchSlot {
-                                frame: cand.clone(),
-                                drain_to: Some(c),
-                                stale: true,
-                            });
-                            continue;
-                        }
-                    }
-                    if let Some(stale) = self.last_emitted_frames[track_i].clone() {
-                        self.matched_scratch[track_i] =
-                            Some(MatchSlot { frame: stale, drain_to: None, stale: true });
-                        continue;
-                    }
-                }
+                // Waiting cannot help once the newest buffered frame is
+                // already past the horizon: frame timestamps are monotonic,
+                // so every future frame is at least that new and none of them
+                // can match. (Testing the newest rather than the front
+                // detects this immediately, instead of only after eviction
+                // drags the tail past the horizon — a latency bug of up to
+                // `video_buffer_size` frames.) `>=` matches the strict
+                // `d < range` match rule: a frame at exactly `state_ts +
+                // range` is not a match, so the state cannot match it either.
+                let newest_ts = frame_buf.back().map(|f| f.timestamp_us);
+                let unmatchable = newest_ts.is_some_and(|n| n >= state_ts.saturating_add(range));
 
-                // Startup fallback: no reuse available. Empty buffer or below
-                // the horizon → wait (future frames may still match). Newest
-                // past the horizon → permanently unmatchable, drop. The drop
-                // path here only fires before the track's first emission;
-                // after that, reuse above handles it.
-                if frame_buf.is_empty() {
+                // Otherwise a future frame could still land in range, so we
+                // wait — but only until the fastest-advancing stream's sender
+                // clock has run `max_lag` past this moment. `None` keeps the
+                // historical behavior of waiting until state-buffer capacity
+                // evicts the moment (or forever, if state output has stopped
+                // too). See `logical_now`.
+                let stall = self.stall[track_i];
+                let lagged =
+                    stall.max_lag_us.is_some_and(|max| logical_now.saturating_sub(state_ts) >= max);
+
+                if !unmatchable && !lagged {
                     if iter_blocker.is_none() {
                         iter_blocker = Some(track_i);
                     }
                     continue;
                 }
 
-                // Unmatched, buffer non-empty. The real question is whether
-                // any *future* frame could match; since frame timestamps are
-                // monotonic, future ts ≥ back_ts, so the state is permanently
-                // unmatchable iff back_ts >= state_ts + range. (Checking the
-                // front would only detect the drop after eviction has dragged
-                // the old tail past the horizon — a latency bug of up to
-                // video_buffer_size frames.) `>=` matches the strict
-                // `d < range` match rule: a frame at exactly state_ts + range
-                // is not a match, so the state can't match it either.
-                let newest_ts = frame_buf.back().unwrap().timestamp_us;
-                if newest_ts >= state_ts.saturating_add(range) {
-                    should_drop = true;
-                    drop_ahead_us = newest_ts.saturating_sub(state_ts);
-                    break;
-                } else if iter_blocker.is_none() {
-                    iter_blocker = Some(track_i);
+                // Resolve without this track.
+                match stall.policy {
+                    // Prefer the newest below-horizon buffered frame
+                    // (ts ≤ state_ts, |Δ| ≥ range) over the stored
+                    // last-emitted fallback: it tracks forward with state_ts
+                    // so match_delta stays bounded, and draining it keeps the
+                    // buffer from wedging at cap while a track is
+                    // systematically behind. Since state_ts advances
+                    // monotonically, no future state could fresh-match a
+                    // frame with ts ≤ state_ts − range, so consuming it now is
+                    // safe. Past-horizon frames (ts > state_ts) are left for a
+                    // later state to claim, and we fall back to pure reuse.
+                    StallPolicy::Freeze => {
+                        if !frame_buf.is_empty() {
+                            let c = self.cursors[track_i];
+                            let cand = &frame_buf[c];
+                            if cand.timestamp_us <= state_ts
+                                && state_ts - cand.timestamp_us >= range
+                            {
+                                self.matched_scratch[track_i] = Some(MatchSlot {
+                                    frame: cand.clone(),
+                                    drain_to: Some(c),
+                                    source: FrameSource::Stale,
+                                });
+                                continue;
+                            }
+                        }
+                        if let Some(stale) = self.last_emitted_frames[track_i].clone() {
+                            self.matched_scratch[track_i] = Some(MatchSlot {
+                                frame: stale,
+                                drain_to: None,
+                                source: FrameSource::Stale,
+                            });
+                            continue;
+                        }
+                    }
+                    StallPolicy::Omit => {}
+                    StallPolicy::Drop => {}
                 }
+
+                // `Freeze` and `Omit` land here only before the track's first
+                // frame, with nothing to stand in with and no geometry to
+                // synthesize from. If a future frame could still match, keep
+                // waiting rather than discarding a moment we may yet be able
+                // to satisfy; that startup window is exactly the historical
+                // `reuse_stale_frames` behavior. Otherwise drop.
+                if !unmatchable && stall.policy != StallPolicy::Drop {
+                    if iter_blocker.is_none() {
+                        iter_blocker = Some(track_i);
+                    }
+                    continue;
+                }
+
+                should_drop = true;
+                drop_ahead_us = newest_ts.unwrap_or(logical_now).saturating_sub(state_ts);
+                break;
             }
 
             if should_drop {
@@ -494,7 +587,7 @@ impl SyncBuffer {
             for slot in &self.matched_scratch {
                 if let Some(s) = slot.as_ref() {
                     worst_delta = worst_delta.max(state_ts.abs_diff(s.frame.timestamp_us));
-                    if s.stale {
+                    if s.source == FrameSource::Stale {
                         any_stale = true;
                     }
                 }
@@ -526,8 +619,12 @@ impl SyncBuffer {
                     // last-emitted untouched so a future in-range frame can
                     // still be claimed by a later state.
                     //
-                    // Cheap clone: VideoFrameData carries Arc<[u8]>.
-                    frames_map.insert(self.track_names[track_i].clone(), (*slot.frame).clone());
+                    // Cheap clone: VideoFrameData carries Arc<[u8]>. The
+                    // buffered frame is always stored as `Live`; stamp how it
+                    // was actually used on the copy handed to the consumer.
+                    let mut frame = (*slot.frame).clone();
+                    frame.source = slot.source;
+                    frames_map.insert(self.track_names[track_i].clone(), frame);
                 }
             }
 
@@ -566,6 +663,7 @@ mod tests {
                 height: 2,
                 data: bytes::Bytes::from(vec![0u8; 12]),
                 timestamp_us: ts,
+                source: FrameSource::Live,
             }),
         )
     }
@@ -581,7 +679,7 @@ mod tests {
         // so the internal observation builder has a dtype per position.
         let schema: Vec<FieldSpec> =
             fields.into_iter().map(|n| FieldSpec::new(n, DType::F64)).collect();
-        SyncBuffer::new(names, schema, config, metrics)
+        SyncBuffer::new(names, schema, config, Vec::new(), metrics)
     }
 
     #[test]
@@ -966,7 +1064,7 @@ mod tests {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 500,
-            reuse_stale_frames: true,
+            default_stall: StallConfig { max_lag_us: Some(0), policy: StallPolicy::Freeze },
         }
     }
 
@@ -1170,7 +1268,7 @@ mod tests {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 100,
-            reuse_stale_frames: true,
+            default_stall: StallConfig { max_lag_us: Some(0), policy: StallPolicy::Freeze },
         };
         let mut buf = mk(&tracks, fields, config);
 
@@ -1209,7 +1307,7 @@ mod tests {
         let metrics = Arc::new(MetricsRegistry::new(&tracks));
         let schema: Vec<FieldSpec> =
             fields.into_iter().map(|n| FieldSpec::new(n, DType::F64)).collect();
-        let mut buf = SyncBuffer::new(&tracks, schema, reuse_config(), metrics.clone());
+        let mut buf = SyncBuffer::new(&tracks, schema, reuse_config(), Vec::new(), metrics.clone());
 
         // Fresh emission #1.
         let _ = buf.push_frame(
@@ -1219,6 +1317,7 @@ mod tests {
                 height: 2,
                 data: bytes::Bytes::from(vec![0u8; 12]),
                 timestamp_us: 1_000,
+                source: FrameSource::Live,
             }),
         );
         let _ = buf.push_state(1_050, vec![1.0]);
@@ -1231,6 +1330,7 @@ mod tests {
                 height: 2,
                 data: bytes::Bytes::from(vec![0u8; 12]),
                 timestamp_us: 2_000,
+                source: FrameSource::Live,
             }),
         );
         let _ = buf.push_state(2_050, vec![2.0]);
@@ -1325,5 +1425,247 @@ mod tests {
             total_obs += out3.observations.len();
         }
         assert_eq!(total_obs, 100);
+    }
+
+    // --- FrameSource tagging -------------------------------------------
+    //     Every frame handed to a consumer records how it was actually
+    //     used, so a single observation is self-describing: a policy can
+    //     tell a measurement from a substitute without consulting a
+    //     process-wide metric.
+
+    /// A frame matched inside the tolerance window is tagged `Live`.
+    #[test]
+    fn fresh_match_tagged_live() {
+        let tracks = vec!["cam1".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, SyncConfig::default());
+
+        let _ = push_f(&mut buf, "cam1", 1_000);
+        let out = buf.push_state(1_000, vec![1.0]);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam1"].source, FrameSource::Live);
+    }
+
+    /// Reusing the last-emitted frame tags it `Stale`, and the frame keeps
+    /// its own timestamp so the consumer can compute the age itself.
+    #[test]
+    fn reused_last_frame_tagged_stale() {
+        let tracks = vec!["cam1".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, reuse_config());
+
+        let _ = push_f(&mut buf, "cam1", 1_000);
+        let out = buf.push_state(1_100, vec![1.0]);
+        assert_eq!(out.observations[0].frames["cam1"].source, FrameSource::Live);
+
+        // No new frame arrives; the next state reuses the 1_000 frame.
+        let out = buf.push_state(2_000, vec![2.0]);
+        assert_eq!(out.observations.len(), 1);
+        let f = &out.observations[0].frames["cam1"];
+        assert_eq!(f.source, FrameSource::Stale);
+        assert_eq!(f.timestamp_us, 1_000, "stale frame keeps its own ts");
+        assert_eq!(out.observations[0].timestamp_us, 2_000);
+    }
+
+    /// The buffered below-horizon reuse path is tagged `Stale` too, not just
+    /// the stored last-emitted fallback.
+    #[test]
+    fn below_horizon_reuse_tagged_stale() {
+        let tracks = vec!["cam1".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, reuse_config());
+
+        // Establish a last-emitted frame.
+        let _ = push_f(&mut buf, "cam1", 1_000);
+        let _ = buf.push_state(1_100, vec![1.0]);
+
+        // A frame lands far below the next state's horizon: drained and
+        // reused rather than matched.
+        let _ = push_f(&mut buf, "cam1", 2_000);
+        let out = buf.push_state(9_000, vec![2.0]);
+        assert_eq!(out.observations.len(), 1);
+        let f = &out.observations[0].frames["cam1"];
+        assert_eq!(f.source, FrameSource::Stale);
+        assert_eq!(f.timestamp_us, 2_000, "drained the below-horizon frame");
+    }
+
+    /// Tagging is per-track: a live track stays `Live` in the same
+    /// observation where another track is reusing.
+    #[test]
+    fn source_is_per_track() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, reuse_config());
+
+        let _ = push_f(&mut buf, "cam1", 1_000);
+        let _ = push_f(&mut buf, "cam2", 1_000);
+        let out = buf.push_state(1_100, vec![1.0]);
+        assert_eq!(out.observations.len(), 1);
+
+        // cam1 keeps sending, cam2 goes silent.
+        let _ = push_f(&mut buf, "cam1", 2_000);
+        let out = buf.push_state(2_050, vec![2.0]);
+        assert_eq!(out.observations.len(), 1);
+        let frames = &out.observations[0].frames;
+        assert_eq!(frames["cam1"].source, FrameSource::Live);
+        assert_eq!(frames["cam2"].source, FrameSource::Stale);
+    }
+
+    // --- max_lag / on_stall ---------------------------------------------
+
+    fn stall_config(max_lag_us: Option<u64>, policy: StallPolicy) -> SyncConfig {
+        SyncConfig {
+            // Large buffers, so capacity eviction is never what resolves a
+            // moment in these tests — the lag budget is.
+            video_buffer_size: 100,
+            state_buffer_size: 100,
+            search_range_us: 1_000,
+            default_stall: StallConfig { max_lag_us, policy },
+        }
+    }
+
+    /// With no budget (the historical default), a head blocked by a silent
+    /// track waits however far the other streams run ahead. Guards the
+    /// backward-compatible path.
+    #[test]
+    fn no_max_lag_waits_indefinitely() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(None, StallPolicy::Drop));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        assert!(buf.push_state(10_000, vec![1.0]).is_empty(), "waits on cam2");
+
+        let out = buf.push_state(500_000, vec![2.0]);
+        assert!(out.observations.is_empty());
+        assert!(out.drops.is_empty(), "no budget → the head waits, never resolves");
+    }
+
+    /// The stream clock advances on *any* stream, so a head blocked by a
+    /// silent track resolves even when state output has stopped. Capacity
+    /// eviction can never reach this case: it only runs on `push_state`.
+    ///
+    /// Regression guard for the blocker short-circuit in `push_frame` — if
+    /// pushes to a non-blocking track skip `try_sync`, the budget never gets
+    /// evaluated and the head strands forever.
+    #[test]
+    fn max_lag_resolves_when_only_video_advances() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Drop));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        assert!(buf.push_state(10_000, vec![1.0]).is_empty(), "waits on cam2");
+
+        // No further states at all. cam1 keeps sending; the stream clock
+        // crosses the 50ms budget and the head resolves on a frame push.
+        let out = push_f(&mut buf, "cam1", 70_000);
+        assert_eq!(out.drops.len(), 1, "budget resolved the stranded head");
+        assert!(out.observations.is_empty());
+        assert_eq!(buf.metrics.snapshot(HashMap::new(), 0).sync.states_dropped, 1);
+    }
+
+    /// A budget never resolves a moment that still has an in-range match on
+    /// every track — no spurious drops during normal operation.
+    #[test]
+    fn max_lag_does_not_touch_matched_states() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(1), StallPolicy::Drop));
+
+        for i in 0..20u64 {
+            let ts = 10_000 + i * 10_000;
+            let _ = push_f(&mut buf, "cam1", ts);
+            let _ = push_f(&mut buf, "cam2", ts);
+            let out = buf.push_state(ts, vec![i as f64]);
+            assert_eq!(out.observations.len(), 1, "tick {i} must emit");
+            assert!(out.drops.is_empty(), "tick {i} must not drop");
+        }
+    }
+
+    /// `Freeze` resolves a stalled track with its last good frame, so the
+    /// healthy tracks and the state keep flowing.
+    #[test]
+    fn freeze_keeps_observations_flowing() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Freeze));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let _ = push_f(&mut buf, "cam2", 10_000);
+        assert_eq!(buf.push_state(10_000, vec![1.0]).observations.len(), 1);
+
+        // cam2 goes silent. The next moment is still inside its budget — it
+        // has only just arrived — so it waits rather than resolving early.
+        let _ = push_f(&mut buf, "cam1", 70_000);
+        let out = buf.push_state(70_000, vec![2.0]);
+        assert!(out.observations.is_empty(), "still inside the budget");
+
+        // cam1 carries the stream clock 60ms past that moment, over the 50ms
+        // budget. It now resolves with cam2 frozen rather than discarded.
+        let out = push_f(&mut buf, "cam1", 130_000);
+        assert_eq!(out.observations.len(), 1, "freeze keeps the moment");
+        let frames = &out.observations[0].frames;
+        assert_eq!(frames["cam1"].source, FrameSource::Live);
+        assert_eq!(frames["cam1"].timestamp_us, 70_000);
+        assert_eq!(frames["cam2"].source, FrameSource::Stale);
+        assert_eq!(frames["cam2"].timestamp_us, 10_000, "cam2's last good frame");
+    }
+
+    /// Policies are per track: a `Drop` track and a `Freeze` track in the
+    /// same buffer resolve independently.
+    #[test]
+    fn stall_policy_is_per_track() {
+        let tracks = vec!["wrist".to_string(), "scene".to_string()];
+        let config = stall_config(Some(50_000), StallPolicy::Drop);
+        let metrics = Arc::new(MetricsRegistry::new(&tracks));
+        let schema = vec![FieldSpec::new("j1".to_string(), DType::F64)];
+        // wrist is load-bearing: no observation beats a wrong one. scene is
+        // not: freeze it rather than losing the moment.
+        let stall = vec![
+            StallConfig { max_lag_us: Some(50_000), policy: StallPolicy::Drop },
+            StallConfig { max_lag_us: Some(50_000), policy: StallPolicy::Freeze },
+        ];
+        let mut buf = SyncBuffer::new(&tracks, schema, config, stall, metrics);
+
+        let _ = push_f(&mut buf, "wrist", 10_000);
+        let _ = push_f(&mut buf, "scene", 10_000);
+        assert_eq!(buf.push_state(10_000, vec![1.0]).observations.len(), 1);
+
+        // scene stalls. wrist carries the clock past the budget, and scene's
+        // Freeze policy keeps the moment alive.
+        let _ = push_f(&mut buf, "wrist", 70_000);
+        assert!(buf.push_state(70_000, vec![2.0]).observations.is_empty());
+        let out = push_f(&mut buf, "wrist", 130_000);
+        assert_eq!(out.observations.len(), 1, "scene freezes, moment survives");
+        assert_eq!(out.observations[0].frames["scene"].source, FrameSource::Stale);
+
+        // Now the reverse: wrist stalls while scene carries the clock. Its
+        // Drop policy discards the moment rather than substituting.
+        let _ = push_f(&mut buf, "scene", 200_000);
+        assert!(buf.push_state(200_000, vec![3.0]).observations.is_empty());
+        let out = push_f(&mut buf, "scene", 260_000);
+        assert!(out.observations.is_empty(), "wrist is load-bearing");
+        assert_eq!(out.drops.len(), 1, "moment discarded rather than faked");
+    }
+
+    /// `Freeze` still waits through the startup window: before a track's
+    /// first frame there is nothing to substitute, and a future frame could
+    /// still match, so the moment is held rather than discarded.
+    #[test]
+    fn freeze_waits_before_first_frame() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallPolicy::Freeze));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let out = buf.push_state(10_000, vec![1.0]);
+        assert!(out.observations.is_empty(), "cam2 has never sent");
+        assert!(out.drops.is_empty(), "and nothing is discarded yet");
+
+        // cam2's first frame arrives in range: the held moment now emits.
+        let out = push_f(&mut buf, "cam2", 10_000);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam2"].source, FrameSource::Live);
     }
 }

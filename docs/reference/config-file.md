@@ -96,8 +96,9 @@ tolerance: 1.5               # match window, in ticks
 state_reliable: true
 action_reliable: true
 
-# Sync behavior
-reuse_stale_frames: false    # freeze video on loss instead of dropping state
+# Stalled-track handling. Both override per video track.
+stall_behavior: drop               # drop | freeze | omit
+max_lag_ms: 166              # wait this long first; default is slack / fps
 
 # Heartbeat
 ping_ms: 1000                # RTT probe cadence. 0 disables probing here.
@@ -142,7 +143,9 @@ action_chunks:
 | `tolerance` | float | `1.5` | Match window, in ticks. See [Tuning](../04-tuning.md). |
 | `state_reliable` | bool | `true` | Reliable transport for state packets. |
 | `action_reliable` | bool | `true` | Reliable transport for action packets. |
-| `reuse_stale_frames` | bool | `false` | Reuse a track's most recent frame when the current state has no in-range match. |
+| `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
+| `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |
+| `reuse_stale_frames` | bool | `false` | Deprecated. Alias for `stall_behavior: freeze` with `max_lag_ms: 0`. |
 | `ping_ms` | int | `1000` | RTT probe cadence in ms. `0` disables probing on this side. The echo path stays active. |
 | `action_subscription` | bool | `false` | Operator-side opt-in for receiving executed actions. No-op on the robot. |
 | `videos` | list | `[]` | Declared video tracks. |
@@ -171,6 +174,8 @@ videos:
 | `codec` | string | **Required.** One of `h264`, `vp8`, `vp9`, `av1`, `h265`, `mjpeg`, `png`, `raw`. Case-insensitive, and `hevc` is an alias for `h265`. |
 | `quality` | int | Optional. `1` to `100`, for `mjpeg` only. Defaults to `90`. Ignored for every other codec. |
 | `max_bitrate_kbps` | int | Optional. Encoder bitrate ceiling for the WebRTC codecs. Defaults to `10000`. Rejected on the byte-stream codecs. |
+| `stall_behavior` | string | Optional. Per-track override of the top-level `stall_behavior`. |
+| `max_lag_ms` | int | Optional. Per-track override of the top-level `max_lag_ms`. |
 | `simulcast` | bool | Optional. Publish several spatial layers. Defaults to `false`. Rejected on the byte-stream codecs. |
 | `screencast` | bool | Optional. Pin the resolution and drop frames under pressure instead of rescaling. Defaults to `false`. Rejected on the byte-stream codecs. |
 
@@ -295,7 +300,9 @@ The loader produces the same config you would build by hand.
 | `tolerance` | `cfg.set_tolerance(...)` |
 | `state_reliable` | `cfg.set_state_reliable(...)` |
 | `action_reliable` | `cfg.set_action_reliable(...)` |
-| `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` |
+| `stall_behavior` | `cfg.set_stall_behavior(...)` / `cfg.set_track_stall_behavior(...)` |
+| `max_lag_ms` | `cfg.set_max_lag_ms(...)` / `cfg.set_track_max_lag_ms(...)` |
+| `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` (deprecated) |
 | `ping_ms` | `cfg.set_ping_ms(...)` |
 | `action_subscription` | `cfg.set_action_subscription(...)` |
 | `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=...)` |

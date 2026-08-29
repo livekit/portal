@@ -204,8 +204,10 @@ match window. State kept flowing while video did not.
 
 - Raise `tolerance` to widen the window. Keep it at 1 or above.
 - Raise `slack` to buffer through longer stalls.
-- Enable `reuse_stale_frames` to freeze on the last good frame instead of
-  dropping. Good for data collection. Wrong for real-time control.
+- Set `stall_behavior` to something other than `DROP` so the moment survives:
+  `FREEZE` holds the last good frame (good for data collection, wrong for
+  real-time control), `OMIT` substitutes a visible placeholder so the healthy
+  cameras stay on screen. Both can be set per track.
 - Check `metrics.sync.last_blocker_track` to see which camera is behind.
 
 See [Choosing `tolerance`](04-tuning.md#choosing-tolerance).
@@ -220,9 +222,10 @@ The state buffer hit its cap and shed its oldest entries. States piled up with n
 frame to match against, which usually means a video track stalled completely.
 Logs once per burst.
 
-**Fix.** Raise `slack` to tolerate longer stalls. Enable `reuse_stale_frames` if a
-frozen frame is acceptable. If video stopped entirely, the fix is at the robot,
-not in the buffer.
+**Fix.** Raise `slack` to tolerate longer stalls, or lower `max_lag` so stuck
+moments resolve before they pile up. Set `stall_behavior` to `FREEZE` or `OMIT` if a
+substituted frame is acceptable. If video stopped entirely, the fix is at the
+robot, not in the buffer.
 
 ### video-overflow
 

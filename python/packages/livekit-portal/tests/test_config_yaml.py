@@ -222,11 +222,11 @@ def test_stall_policy_parses_per_track():
         textwrap.dedent(
             """
             version: 1
-            on_stall: freeze
+            stall_behavior: freeze
             max_lag_ms: 120
             videos:
               - { name: front, codec: h264 }
-              - { name: wrist, codec: h264, on_stall: drop, max_lag_ms: 20 }
+              - { name: wrist, codec: h264, stall_behavior: drop, max_lag_ms: 20 }
             """
         ),
         "demo",
@@ -245,7 +245,7 @@ def test_unknown_stall_policy_is_rejected():
                 """
                 version: 1
                 videos:
-                  - { name: front, codec: h264, on_stall: nope }
+                  - { name: front, codec: h264, stall_behavior: nope }
                 """
             ),
             "demo",

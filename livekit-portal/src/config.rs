@@ -14,7 +14,7 @@
 
 use crate::codec::Codec;
 use crate::dtype::DType;
-use crate::types::{Role, StallConfig, StallPolicy, SyncConfig};
+use crate::types::{Role, StallBehavior, StallConfig, SyncConfig};
 use std::collections::HashMap;
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
@@ -168,16 +168,16 @@ pub struct PortalConfig {
     pub(crate) tolerance: f32,
     pub(crate) ping_ms: u64,
     /// Deprecated alias, retained so existing callers keep working. Folded
-    /// into the stall policy in `sync_config()`; see `set_reuse_stale_frames`.
+    /// into the stall behavior in `sync_config()`; see `set_reuse_stale_frames`.
     pub(crate) reuse_stale_frames: bool,
-    /// Default stall policy for tracks with no per-track override.
-    pub(crate) on_stall: StallPolicy,
+    /// Default stall behavior for tracks with no per-track override.
+    pub(crate) stall_behavior: StallBehavior,
     /// Default `max_lag` in milliseconds. `None` derives it from `slack` and
     /// `fps`, which reproduces the historical capacity-eviction timing.
     pub(crate) max_lag_ms: Option<u32>,
     /// Per-track overrides, keyed by track name. Each is independent: a
     /// track may override the policy, the lag budget, or both.
-    pub(crate) track_on_stall: HashMap<String, StallPolicy>,
+    pub(crate) track_stall_behavior: HashMap<String, StallBehavior>,
     pub(crate) track_max_lag_ms: HashMap<String, u32>,
     pub(crate) shared_key: Option<Vec<u8>>,
     /// Operator-side: subscribe to executed actions. Off by default —
@@ -212,9 +212,9 @@ impl PortalConfig {
             tolerance: 1.5,
             ping_ms: 1000,
             reuse_stale_frames: false,
-            on_stall: StallPolicy::Drop,
+            stall_behavior: StallBehavior::Drop,
             max_lag_ms: None,
-            track_on_stall: HashMap::new(),
+            track_stall_behavior: HashMap::new(),
             track_max_lag_ms: HashMap::new(),
             shared_key: None,
             action_subscription: false,
@@ -458,7 +458,7 @@ impl PortalConfig {
     /// perception/action loop.
     #[deprecated(
         since = "0.3.0",
-        note = "use set_on_stall(StallPolicy::Freeze) — equivalent to this plus set_max_lag_ms(0)"
+        note = "use set_stall_behavior(StallBehavior::Freeze) — equivalent to this plus set_max_lag_ms(0)"
     )]
     pub fn set_reuse_stale_frames(&mut self, enable: bool) {
         self.reuse_stale_frames = enable;
@@ -466,7 +466,7 @@ impl PortalConfig {
 
     /// How a moment is resolved when a video track goes silent past its
     /// `max_lag`. Applies to every track without a per-track override; see
-    /// [`set_track_on_stall`](Self::set_track_on_stall).
+    /// [`set_track_stall_behavior`](Self::set_track_stall_behavior).
     ///
     /// **Receiving side only.** Observations are assembled where they are
     /// consumed, so this is read on the `Operator` and is a no-op on a
@@ -474,18 +474,18 @@ impl PortalConfig {
     /// is, by definition, sending nothing, so the substitute frame is
     /// synthesized locally by the subscriber that noticed the gap.
     ///
-    /// [`Drop`](StallPolicy::Drop) (the default) emits nothing for that
+    /// [`Drop`](StallBehavior::Drop) (the default) emits nothing for that
     /// moment — the state still reaches the drop callback, but the healthy
     /// tracks in it are discarded too, so an operator screen goes dark while
-    /// one camera is down. [`Freeze`](StallPolicy::Freeze) keeps the last
-    /// good frame on the silent track. [`Omit`](StallPolicy::Omit) emits a
+    /// one camera is down. [`Freeze`](StallBehavior::Freeze) keeps the last
+    /// good frame on the silent track. [`Omit`](StallBehavior::Omit) emits a
     /// visible placeholder for it, so the healthy tracks keep flowing.
     ///
     /// Whatever the policy, the frame carries a [`FrameSource`] saying which
     /// of the three it was — check it before feeding an observation to a
     /// policy or writing it to a dataset.
-    pub fn set_on_stall(&mut self, policy: StallPolicy) {
-        self.on_stall = policy;
+    pub fn set_stall_behavior(&mut self, behavior: StallBehavior) {
+        self.stall_behavior = behavior;
     }
 
     /// How far the fastest-advancing stream may run past a moment before it
@@ -502,18 +502,18 @@ impl PortalConfig {
     /// would have evicted the moment anyway — so the default timing matches
     /// the historical behavior. `0` resolves immediately, without waiting.
     ///
-    /// **Receiving side only**, like [`set_on_stall`](Self::set_on_stall).
+    /// **Receiving side only**, like [`set_stall_behavior`](Self::set_stall_behavior).
     pub fn set_max_lag_ms(&mut self, ms: u32) {
         self.max_lag_ms = Some(ms);
     }
 
-    /// Per-track override for [`set_on_stall`](Self::set_on_stall). Use it
+    /// Per-track override for [`set_stall_behavior`](Self::set_stall_behavior). Use it
     /// when tracks differ in how load-bearing they are: a wrist camera a
     /// policy depends on may warrant `Drop` (no observation beats a wrong
     /// one), while a scene camera warrants `Omit` so its failure does not
     /// take the rest of the frame set down with it.
-    pub fn set_track_on_stall(&mut self, track: impl Into<String>, policy: StallPolicy) {
-        self.track_on_stall.insert(track.into(), policy);
+    pub fn set_track_stall_behavior(&mut self, track: impl Into<String>, behavior: StallBehavior) {
+        self.track_stall_behavior.insert(track.into(), behavior);
     }
 
     /// Per-track override for [`set_max_lag_ms`](Self::set_max_lag_ms).
@@ -526,7 +526,7 @@ impl PortalConfig {
     pub fn stall_for(&self, track: &str) -> StallConfig {
         let base = self.default_stall();
         StallConfig {
-            policy: self.track_on_stall.get(track).copied().unwrap_or(base.policy),
+            behavior: self.track_stall_behavior.get(track).copied().unwrap_or(base.behavior),
             max_lag_us: self
                 .track_max_lag_ms
                 .get(track)
@@ -541,12 +541,12 @@ impl PortalConfig {
     /// as a lookup for a track name that cannot exist.
     fn default_stall(&self) -> StallConfig {
         // The alias only applies while the modern knob sits at its default,
-        // so an explicit `set_on_stall` always wins — a caller migrating one
+        // so an explicit `set_stall_behavior` always wins — a caller migrating one
         // setting at a time is never silently overridden by a leftover.
-        let policy = if self.reuse_stale_frames && self.on_stall == StallPolicy::Drop {
-            StallPolicy::Freeze
+        let behavior = if self.reuse_stale_frames && self.stall_behavior == StallBehavior::Drop {
+            StallBehavior::Freeze
         } else {
-            self.on_stall
+            self.stall_behavior
         };
 
         let max_lag_us = match self.max_lag_ms {
@@ -558,7 +558,7 @@ impl PortalConfig {
             None => self.slack as u64 * 1_000_000 / self.fps.max(1) as u64,
         };
 
-        StallConfig { max_lag_us: Some(max_lag_us), policy }
+        StallConfig { max_lag_us: Some(max_lag_us), behavior }
     }
 
     /// Per-track stall config for every registered track, in the order the
@@ -695,7 +695,7 @@ mod tests {
     fn default_stall_is_drop_at_slack_over_fps() {
         let c = cfg(); // slack 5, fps 30
         let s = c.stall_for("cam1");
-        assert_eq!(s.policy, StallPolicy::Drop);
+        assert_eq!(s.behavior, StallBehavior::Drop);
         assert_eq!(s.max_lag_us, Some(5 * 1_000_000 / 30));
     }
 
@@ -715,7 +715,7 @@ mod tests {
         #[allow(deprecated)]
         c.set_reuse_stale_frames(true);
         let s = c.stall_for("cam1");
-        assert_eq!(s.policy, StallPolicy::Freeze);
+        assert_eq!(s.behavior, StallBehavior::Freeze);
         assert_eq!(s.max_lag_us, Some(0));
     }
 
@@ -727,10 +727,10 @@ mod tests {
         let mut c = cfg();
         #[allow(deprecated)]
         c.set_reuse_stale_frames(true);
-        c.set_on_stall(StallPolicy::Omit);
+        c.set_stall_behavior(StallBehavior::Omit);
         c.set_max_lag_ms(200);
         let s = c.stall_for("cam1");
-        assert_eq!(s.policy, StallPolicy::Omit);
+        assert_eq!(s.behavior, StallBehavior::Omit);
         assert_eq!(s.max_lag_us, Some(200_000));
     }
 
@@ -748,21 +748,21 @@ mod tests {
     #[test]
     fn per_track_overrides_apply_independently() {
         let mut c = cfg();
-        c.set_on_stall(StallPolicy::Drop);
+        c.set_stall_behavior(StallBehavior::Drop);
         c.set_max_lag_ms(100);
-        c.set_track_on_stall("scene", StallPolicy::Omit);
+        c.set_track_stall_behavior("scene", StallBehavior::Omit);
         c.set_track_max_lag_ms("wrist", 20);
 
         let scene = c.stall_for("scene");
-        assert_eq!(scene.policy, StallPolicy::Omit, "policy overridden");
+        assert_eq!(scene.behavior, StallBehavior::Omit, "behavior overridden");
         assert_eq!(scene.max_lag_us, Some(100_000), "budget inherited");
 
         let wrist = c.stall_for("wrist");
-        assert_eq!(wrist.policy, StallPolicy::Drop, "policy inherited");
+        assert_eq!(wrist.behavior, StallBehavior::Drop, "behavior inherited");
         assert_eq!(wrist.max_lag_us, Some(20_000), "budget overridden");
 
         let other = c.stall_for("other");
-        assert_eq!(other.policy, StallPolicy::Drop);
+        assert_eq!(other.behavior, StallBehavior::Drop);
         assert_eq!(other.max_lag_us, Some(100_000));
     }
 
@@ -772,11 +772,11 @@ mod tests {
     #[test]
     fn empty_track_name_is_not_the_fallback() {
         let mut c = cfg();
-        c.set_on_stall(StallPolicy::Drop);
-        c.set_track_on_stall("", StallPolicy::Omit);
-        assert_eq!(c.stall_for("").policy, StallPolicy::Omit);
-        assert_eq!(c.stall_for("cam1").policy, StallPolicy::Drop, "fallback unaffected");
-        assert_eq!(c.sync_config().default_stall.policy, StallPolicy::Drop);
+        c.set_stall_behavior(StallBehavior::Drop);
+        c.set_track_stall_behavior("", StallBehavior::Omit);
+        assert_eq!(c.stall_for("").behavior, StallBehavior::Omit);
+        assert_eq!(c.stall_for("cam1").behavior, StallBehavior::Drop, "fallback unaffected");
+        assert_eq!(c.sync_config().default_stall.behavior, StallBehavior::Drop);
     }
 
     /// `stall_configs` resolves in the order the sync buffer indexes tracks,
@@ -784,11 +784,11 @@ mod tests {
     #[test]
     fn stall_configs_follow_track_order() {
         let mut c = cfg();
-        c.set_track_on_stall("b", StallPolicy::Freeze);
+        c.set_track_stall_behavior("b", StallBehavior::Freeze);
         let names = vec!["a".to_string(), "b".to_string()];
         let got = c.stall_configs(&names);
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].policy, StallPolicy::Drop);
-        assert_eq!(got[1].policy, StallPolicy::Freeze);
+        assert_eq!(got[0].behavior, StallBehavior::Drop);
+        assert_eq!(got[1].behavior, StallBehavior::Freeze);
     }
 }

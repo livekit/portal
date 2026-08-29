@@ -44,6 +44,6 @@ pub use metrics::{
 pub use portal::{ACTIVE_OPERATOR_ATTR_KEY, Portal, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
-    Action, ActionChunk, ChunkColumn, FrameSource, Observation, Role, StallConfig, StallPolicy,
+    Action, ActionChunk, ChunkColumn, FrameSource, Observation, Role, StallBehavior, StallConfig,
     State, SyncConfig, TypedValue, VideoFrameData,
 };

@@ -252,7 +252,7 @@ pub struct Observation {
 /// raw video callbacks are always `Live`; the other two variants only ever
 /// appear on frames inside an [`Observation`], where the sync buffer had to
 /// resolve a track that could not be matched within its `max_lag` (see
-/// `on_stall` in [`PortalConfig`](crate::PortalConfig)).
+/// `stall_behavior` in [`PortalConfig`](crate::PortalConfig)).
 ///
 /// Check this before feeding an observation to a policy or writing it to a
 /// dataset: `Stale` and `Omitted` frames are not measurements of the moment
@@ -262,12 +262,12 @@ pub enum FrameSource {
     /// A real frame matched to this state within the tolerance window.
     Live,
     /// A real frame, but from an earlier moment — the track's last good
-    /// frame, reused because nothing in range arrived (`on_stall: freeze`).
+    /// frame, reused because nothing in range arrived (`stall_behavior: freeze`).
     /// `timestamp_us` is the frame's own, so the age is
     /// `observation.timestamp_us - frame.timestamp_us`.
     Stale,
     /// Not a camera frame at all: a synthesized placeholder standing in for
-    /// a track that went silent (`on_stall: omit`). The key is still present
+    /// a track that went silent (`stall_behavior: omit`). The key is still present
     /// so `frames[name]` never fails; the pixels carry a visible pattern.
     Omitted,
 }
@@ -294,12 +294,12 @@ pub struct VideoFrameData {
 
 /// What to do with a moment whose video track has gone silent past its
 /// `max_lag`. Set per track via
-/// [`set_on_stall`](crate::PortalConfig::set_on_stall).
+/// [`set_stall_behavior`](crate::PortalConfig::set_stall_behavior).
 ///
 /// All three are terminal: they describe how the moment is resolved once
 /// the wait is over, not something that happens during it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StallPolicy {
+pub enum StallBehavior {
     /// Emit no observation. The state is still delivered, on the drop
     /// callback. Nothing is fabricated — but the healthy tracks in that
     /// moment are discarded along with the silent one.
@@ -333,7 +333,7 @@ pub struct StallConfig {
     /// `slack` and `fps` instead. `Some(0)` resolves immediately, without
     /// ever waiting.
     pub max_lag_us: Option<u64>,
-    pub policy: StallPolicy,
+    pub behavior: StallBehavior,
 }
 
 /// Internal sync configuration, derived from `PortalConfig` knobs.
@@ -353,7 +353,7 @@ impl Default for SyncConfig {
             video_buffer_size: 5,    // ~83ms at 60fps
             state_buffer_size: 5,    // ~83ms at 60fps
             search_range_us: 10_000, // 10ms — half a frame interval at 60fps
-            default_stall: StallConfig { max_lag_us: None, policy: StallPolicy::Drop },
+            default_stall: StallConfig { max_lag_us: None, behavior: StallBehavior::Drop },
         }
     }
 }

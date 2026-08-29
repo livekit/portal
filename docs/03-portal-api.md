@@ -130,11 +130,11 @@ role-specific is a no-op on the wrong side.
 | `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
 | `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
 | `set_ping_ms(int)` | 1000 | RTT probe cadence. `0` disables probing on this side. |
-| `set_on_stall(StallPolicy)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
+| `set_stall_behavior(StallBehavior)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
-| `set_track_on_stall(str, StallPolicy)` | — | Per-track override of `set_on_stall`. |
+| `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
 | `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
-| `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_on_stall(FREEZE)` with `set_max_lag_ms(0)`. |
+| `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_stall_behavior(FREEZE)` with `set_max_lag_ms(0)`. |
 | `set_action_subscription(bool)` | `False` | Operator-only. Receive executed actions. |
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
 

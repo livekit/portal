@@ -18,7 +18,7 @@ cfg.set_state_reliable(True)
 cfg.set_action_reliable(True)
 cfg.set_ping_ms(1000)                # 0 disables RTT probing on this side
 
-cfg.set_on_stall(StallPolicy.DROP)   # what to do about a silent track
+cfg.set_stall_behavior(StallBehavior.DROP)   # what to do about a silent track
 cfg.set_max_lag_ms(166)              # how long to wait first; default slack/fps
 ```
 
@@ -103,7 +103,7 @@ that track actually delivered.
 
 ```python
 cfg.set_max_lag_ms(150)                 # wait this long, in stream time
-cfg.set_on_stall(StallPolicy.OMIT)      # then resolve this way
+cfg.set_stall_behavior(StallBehavior.OMIT)      # then resolve this way
 ```
 
 `max_lag` is how far the fastest-advancing stream may run past a moment before
@@ -112,7 +112,7 @@ wall-clock** — a statement about stream position, evaluated when a packet
 arrives rather than on a timer. It defaults to `slack / fps`, which is where
 state-buffer capacity would have evicted the moment anyway.
 
-`on_stall` picks the outcome:
+`stall_behavior` picks the outcome:
 
 | | What the consumer sees |
 |---|---|
@@ -134,12 +134,34 @@ in code written before it existed.
 
 ### Per track
 
-Cameras differ in how load-bearing they are, so both knobs override per track:
+Cameras differ in how load-bearing they are, so both knobs override per track.
+In Python the override goes on the track declaration, alongside `codec` and the
+encoder settings, so everything about a track reads in one place:
 
 ```python
-cfg.set_on_stall(StallPolicy.OMIT)              # default for every track
-cfg.set_track_on_stall("wrist", StallPolicy.DROP)
+cfg.set_stall_behavior(StallBehavior.OMIT)      # defaults for every track
+cfg.set_max_lag_ms(150)
+
+cfg.add_video("wrist", stall_behavior=StallBehavior.DROP, max_lag_ms=40)
+cfg.add_video("scene")                          # inherits OMIT / 150ms
+```
+
+Both are keyword-only and `None` inherits, so a track can override the
+behavior, the budget, or both. Setters exist for the cases where the config is
+built elsewhere, such as after `from_yaml`:
+
+```python
+cfg.set_track_stall_behavior("wrist", StallBehavior.DROP)
 cfg.set_track_max_lag_ms("wrist", 40)
+```
+
+Rust uses the setters throughout, keeping `add_video` at its existing arity:
+
+```rust
+cfg.set_stall_behavior(StallBehavior::Omit);
+cfg.set_max_lag_ms(150);
+cfg.set_track_stall_behavior("wrist", StallBehavior::Drop);
+cfg.set_track_max_lag_ms("wrist", 40);
 ```
 
 | Your situation | Pick |
@@ -154,7 +176,7 @@ fall back to `DROP`. That keeps the state buffer bounded if video never starts
 at all.
 
 `set_reuse_stale_frames(True)` still works, as a deprecated alias for
-`set_on_stall(StallPolicy.FREEZE)` with `set_max_lag_ms(0)`.
+`set_stall_behavior(StallBehavior.FREEZE)` with `set_max_lag_ms(0)`.
 
 **Watch `metrics.sync.stale_observations_emitted`.** That counter rising while
 `observations_emitted` holds steady is the signal that a track is silently

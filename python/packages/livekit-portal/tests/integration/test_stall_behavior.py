@@ -35,7 +35,7 @@ import pytest
 from livekit.portal import (
     FrameSource,
     Observation,
-    StallPolicy,
+    StallBehavior,
     VideoCodec,
 )
 
@@ -61,7 +61,7 @@ def _frame(width: int = 32, height: int = 24, seed: int = 0) -> np.ndarray:
     return np.stack([r, g, b], axis=-1)
 
 
-def _declare(pair, policy: StallPolicy | None = None) -> None:
+def _declare(pair, policy: StallBehavior | None = None) -> None:
     """Two cameras on the byte-stream path, so frames arrive deterministically
     rather than through libwebrtc's rate-adapting encoder.
 
@@ -75,7 +75,7 @@ def _declare(pair, policy: StallPolicy | None = None) -> None:
         cfg.add_video("cam2", codec=VideoCodec.RAW)
     pair.operator_cfg.set_max_lag_ms(MAX_LAG_MS)
     if policy is not None:
-        pair.operator_cfg.set_on_stall(policy)
+        pair.operator_cfg.set_stall_behavior(policy)
 
 
 async def _run_cam2_dies(pair, obs: list[Observation], base: int) -> None:
@@ -104,7 +104,7 @@ async def test_omit_keeps_healthy_camera_visible(pair):
     placeholder — and the `cam2` key is still present, so consumer code
     indexing it does not start raising.
     """
-    _declare(pair, StallPolicy.OMIT)
+    _declare(pair, StallBehavior.OMIT)
     obs: list[Observation] = []
     await pair.start()
     pair.operator.on_observation(lambda o: obs.append(o))
@@ -131,7 +131,7 @@ async def test_drop_loses_the_healthy_camera_too(pair):
     the operator loses every camera because one died. Asserting it here keeps
     the two policies honest about how they differ.
     """
-    _declare(pair, StallPolicy.DROP)
+    _declare(pair, StallBehavior.DROP)
     obs: list[Observation] = []
     await pair.start()
     pair.operator.on_observation(lambda o: obs.append(o))
@@ -146,7 +146,7 @@ async def test_drop_loses_the_healthy_camera_too(pair):
 async def test_freeze_substitutes_the_last_good_frame(pair):
     """`FREEZE` keeps the moment too, but with real (older) pixels rather than
     a placeholder — tagged `STALE` so a consumer can tell the difference."""
-    _declare(pair, StallPolicy.FREEZE)
+    _declare(pair, StallBehavior.FREEZE)
     obs: list[Observation] = []
     await pair.start()
     pair.operator.on_observation(lambda o: obs.append(o))
@@ -163,9 +163,17 @@ async def test_freeze_substitutes_the_last_good_frame(pair):
 async def test_policy_is_per_track_over_the_wire(pair):
     """Per-track policy is the reason the knob exists: a load-bearing camera
     can stay strict while a secondary one degrades gracefully."""
-    _declare(pair)
-    pair.operator_cfg.set_on_stall(StallPolicy.DROP)
-    pair.operator_cfg.set_track_on_stall("cam2", StallPolicy.OMIT)
+    # Declared inline rather than through the setters: this is the form the
+    # Python docs lead with, so it needs to survive the round trip through the
+    # FFI and reach the sync buffer's per-track resolution.
+    pair.robot_cfg.add_video("cam1", codec=VideoCodec.RAW)
+    pair.robot_cfg.add_video("cam2", codec=VideoCodec.RAW)
+    pair.operator_cfg.add_video("cam1", codec=VideoCodec.RAW)
+    pair.operator_cfg.add_video(
+        "cam2", codec=VideoCodec.RAW, stall_behavior=StallBehavior.OMIT
+    )
+    pair.operator_cfg.set_stall_behavior(StallBehavior.DROP)
+    pair.operator_cfg.set_max_lag_ms(MAX_LAG_MS)
 
     obs: list[Observation] = []
     await pair.start()
@@ -179,7 +187,7 @@ async def test_policy_is_per_track_over_the_wire(pair):
 
 async def test_omission_is_counted_per_track(pair):
     """Ops need to know *which* camera is down without diffing key sets."""
-    _declare(pair, StallPolicy.OMIT)
+    _declare(pair, StallBehavior.OMIT)
     obs: list[Observation] = []
     await pair.start()
     pair.operator.on_observation(lambda o: obs.append(o))
@@ -194,7 +202,7 @@ async def test_omission_is_counted_per_track(pair):
 async def test_recovery_returns_to_live(pair):
     """A camera coming back must go straight to `LIVE`; the placeholder is not
     sticky, or a recovered session would look permanently broken."""
-    _declare(pair, StallPolicy.OMIT)
+    _declare(pair, StallBehavior.OMIT)
     obs: list[Observation] = []
     await pair.start()
     pair.operator.on_observation(lambda o: obs.append(o))
@@ -231,7 +239,7 @@ async def test_policy_is_read_on_the_receiving_side(pair):
         cfg.add_video("cam2", codec=VideoCodec.RAW)
     # Deliberately the wrong side.
     pair.robot_cfg.set_max_lag_ms(MAX_LAG_MS)
-    pair.robot_cfg.set_on_stall(StallPolicy.OMIT)
+    pair.robot_cfg.set_stall_behavior(StallBehavior.OMIT)
 
     obs: list[Observation] = []
     await pair.start()

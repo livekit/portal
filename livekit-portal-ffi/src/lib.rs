@@ -263,11 +263,11 @@ pub enum FrameSource {
     /// A real frame matched to this state within the tolerance window.
     Live,
     /// A real frame from an earlier moment, reused because nothing in range
-    /// arrived (`on_stall: freeze`). Age is
+    /// arrived (`stall_behavior: freeze`). Age is
     /// `observation.timestamp_us - frame.timestamp_us`.
     Stale,
     /// A synthesized placeholder standing in for a silent track
-    /// (`on_stall: omit`). Not camera output.
+    /// (`stall_behavior: omit`). Not camera output.
     Omitted,
 }
 
@@ -282,13 +282,13 @@ impl From<core::FrameSource> for FrameSource {
 }
 
 /// How a moment is resolved when a video track goes silent past its
-/// `max_lag`. Mirrors `livekit_portal::StallPolicy`.
+/// `max_lag`. Mirrors `livekit_portal::StallBehavior`.
 ///
 /// **Foreign binding casing**: UniFFI emits enum variants in the host
-/// language's idiomatic case. Python code uses `StallPolicy.DROP` /
-/// `StallPolicy.FREEZE` / `StallPolicy.OMIT` (UPPER).
+/// language's idiomatic case. Python code uses `StallBehavior.DROP` /
+/// `StallBehavior.FREEZE` / `StallBehavior.OMIT` (UPPER).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum StallPolicy {
+pub enum StallBehavior {
     /// Emit no observation. The state still reaches the drop callback, but
     /// the healthy tracks in that moment are discarded with it.
     Drop,
@@ -299,12 +299,12 @@ pub enum StallPolicy {
     Omit,
 }
 
-impl From<StallPolicy> for core::StallPolicy {
-    fn from(p: StallPolicy) -> Self {
+impl From<StallBehavior> for core::StallBehavior {
+    fn from(p: StallBehavior) -> Self {
         match p {
-            StallPolicy::Drop => core::StallPolicy::Drop,
-            StallPolicy::Freeze => core::StallPolicy::Freeze,
-            StallPolicy::Omit => core::StallPolicy::Omit,
+            StallBehavior::Drop => core::StallBehavior::Drop,
+            StallBehavior::Freeze => core::StallBehavior::Freeze,
+            StallBehavior::Omit => core::StallBehavior::Omit,
         }
     }
 }
@@ -372,7 +372,7 @@ pub struct SyncMetrics {
     pub stale_observations_emitted: u64,
     pub states_dropped: u64,
     /// Per-track count of synthesized placeholder frames emitted under
-    /// `on_stall: omit` — that track is silent and its moments are being kept
+    /// `stall_behavior: omit` — that track is silent and its moments are being kept
     /// alive with a stand-in. The frames carry `FrameSource.OMITTED`.
     pub frames_omitted: HashMap<String, u64>,
     pub match_delta_us_p50: Option<u64>,
@@ -680,6 +680,12 @@ impl PortalConfig {
     /// source as screen content, which pins the resolution and drops frames
     /// under CPU or bandwidth pressure instead of rescaling the frame. Both
     /// apply to the WebRTC codecs only and default to `false`.
+    /// `stall_behavior` and `max_lag_ms` are per-track overrides of
+    /// [`set_stall_behavior`] / [`set_max_lag_ms`], applied at the declaration
+    /// site so a track's whole configuration reads in one place. `None` on
+    /// either inherits the config-wide default. Both are read on the receiving
+    /// side; see `set_stall_behavior`.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_video(
         &self,
         name: String,
@@ -688,15 +694,17 @@ impl PortalConfig {
         max_bitrate_kbps: Option<u32>,
         simulcast: Option<bool>,
         screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
     ) {
-        self.inner.lock().add_video(
-            name,
-            codec.into(),
-            quality,
-            max_bitrate_kbps,
-            simulcast,
-            screencast,
-        );
+        let mut cfg = self.inner.lock();
+        cfg.add_video(name.clone(), codec.into(), quality, max_bitrate_kbps, simulcast, screencast);
+        if let Some(b) = stall_behavior {
+            cfg.set_track_stall_behavior(name.clone(), b.into());
+        }
+        if let Some(ms) = max_lag_ms {
+            cfg.set_track_max_lag_ms(name, ms);
+        }
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -749,8 +757,8 @@ impl PortalConfig {
 
     /// How a moment is resolved when a video track goes silent past its
     /// `max_lag`. Applies to tracks without a per-track override.
-    pub fn set_on_stall(&self, policy: StallPolicy) {
-        self.inner.lock().set_on_stall(policy.into());
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.lock().set_stall_behavior(behavior.into());
     }
 
     /// How far the fastest-advancing stream may run past a moment before it
@@ -760,9 +768,9 @@ impl PortalConfig {
         self.inner.lock().set_max_lag_ms(ms);
     }
 
-    /// Per-track override for `set_on_stall`.
-    pub fn set_track_on_stall(&self, track: String, policy: StallPolicy) {
-        self.inner.lock().set_track_on_stall(track, policy.into());
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.lock().set_track_stall_behavior(track, behavior.into());
     }
 
     /// Per-track override for `set_max_lag_ms`.
@@ -1229,6 +1237,7 @@ impl RobotConfig {
         Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Robot)? }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_video(
         &self,
         name: String,
@@ -1237,8 +1246,19 @@ impl RobotConfig {
         max_bitrate_kbps: Option<u32>,
         simulcast: Option<bool>,
         screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
     ) {
-        self.inner.add_video(name, codec, quality, max_bitrate_kbps, simulcast, screencast);
+        self.inner.add_video(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
+        );
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -1288,8 +1308,8 @@ impl RobotConfig {
 
     /// How a moment is resolved when a video track goes silent past its
     /// `max_lag`. Applies to tracks without a per-track override.
-    pub fn set_on_stall(&self, policy: StallPolicy) {
-        self.inner.set_on_stall(policy);
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.set_stall_behavior(behavior);
     }
 
     /// How far the fastest-advancing stream may run past a moment before it
@@ -1299,9 +1319,9 @@ impl RobotConfig {
         self.inner.set_max_lag_ms(ms);
     }
 
-    /// Per-track override for `set_on_stall`.
-    pub fn set_track_on_stall(&self, track: String, policy: StallPolicy) {
-        self.inner.set_track_on_stall(track, policy);
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.set_track_stall_behavior(track, behavior);
     }
 
     /// Per-track override for `set_max_lag_ms`.
@@ -1407,6 +1427,7 @@ impl OperatorConfig {
         Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Operator)? }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_video(
         &self,
         name: String,
@@ -1415,8 +1436,19 @@ impl OperatorConfig {
         max_bitrate_kbps: Option<u32>,
         simulcast: Option<bool>,
         screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
     ) {
-        self.inner.add_video(name, codec, quality, max_bitrate_kbps, simulcast, screencast);
+        self.inner.add_video(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
+        );
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -1466,8 +1498,8 @@ impl OperatorConfig {
 
     /// How a moment is resolved when a video track goes silent past its
     /// `max_lag`. Applies to tracks without a per-track override.
-    pub fn set_on_stall(&self, policy: StallPolicy) {
-        self.inner.set_on_stall(policy);
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.set_stall_behavior(behavior);
     }
 
     /// How far the fastest-advancing stream may run past a moment before it
@@ -1477,9 +1509,9 @@ impl OperatorConfig {
         self.inner.set_max_lag_ms(ms);
     }
 
-    /// Per-track override for `set_on_stall`.
-    pub fn set_track_on_stall(&self, track: String, policy: StallPolicy) {
-        self.inner.set_track_on_stall(track, policy);
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.set_track_stall_behavior(track, behavior);
     }
 
     /// Per-track override for `set_max_lag_ms`.

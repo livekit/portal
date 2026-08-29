@@ -25,7 +25,7 @@ from livekit.portal import (
     PortalError,
     RobotConfig,
     Role,
-    StallPolicy,
+    StallBehavior,
     VideoCodec,
 )
 
@@ -635,7 +635,7 @@ def test_send_action_passes_in_reply_to_ts_us_through_validator():
 
 
 def test_stall_policy_enum_is_exposed():
-    assert [p.name for p in StallPolicy] == ["DROP", "FREEZE", "OMIT"]
+    assert [p.name for p in StallBehavior] == ["DROP", "FREEZE", "OMIT"]
 
 
 def test_stall_setters_accept_global_and_per_track():
@@ -643,9 +643,9 @@ def test_stall_setters_accept_global_and_per_track():
     string — a typo should be a NameError at author time, not a silent
     fallback to the default at runtime."""
     for cfg in (PortalConfig("demo", Role.ROBOT), RobotConfig("demo"), OperatorConfig("demo")):
-        cfg.set_on_stall(StallPolicy.FREEZE)
+        cfg.set_stall_behavior(StallBehavior.FREEZE)
         cfg.set_max_lag_ms(200)
-        cfg.set_track_on_stall("scene", StallPolicy.OMIT)
+        cfg.set_track_stall_behavior("scene", StallBehavior.OMIT)
         cfg.set_track_max_lag_ms("wrist", 20)
 
 

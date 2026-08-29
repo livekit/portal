@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Synthesized stand-in frames for `StallPolicy::Omit`.
+//! Synthesized stand-in frames for `StallBehavior::Omit`.
 //!
 //! When a track goes silent past its lag budget, `Omit` keeps the moment
 //! alive by substituting a frame that is obviously not camera output: magenta

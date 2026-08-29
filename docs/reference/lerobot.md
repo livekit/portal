@@ -252,7 +252,7 @@ Shared by both plugin configs:
 | `tolerance` | `None` | Passed to `set_tolerance(...)`. `1.5` widens to one frame either side, `0.5` drops on loss. |
 | `state_reliable` | `True` | Reliable delivery for state. |
 | `action_reliable` | `True` | Reliable delivery for actions. |
-| `on_stall` | `DROP` | What to do with a moment a silent camera cannot cover. `FREEZE` re-emits its last matched frame instead of dropping the state. |
+| `stall_behavior` | `DROP` | What to do with a moment a silent camera cannot cover. `FREEZE` re-emits its last matched frame instead of dropping the state. |
 
 Operator-only, on `LiveKitRobotConfig`:
 

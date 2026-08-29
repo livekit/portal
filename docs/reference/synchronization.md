@@ -239,7 +239,7 @@ The test covering it is `fair_share_prevents_stealing` in `sync_buffer.rs`.
 
 ### Optional: stale-frame reuse
 
-`on_stall: freeze` turns the drop outcome into a **reuse** outcome, once a track
+`stall_behavior: freeze` turns the drop outcome into a **reuse** outcome, once a track
 has emitted at least once. Video freezes on a recent frame while state keeps
 flowing.
 
@@ -312,21 +312,21 @@ loop:
             iter_blocker ??= track_i
             continue
 
-        if on_stall[track_i] == freeze:
+        if stall_behavior[track_i] == freeze:
             if cursor frame is <= S and out of range:
                 matched[track_i] = (cursor, Stale)       # drains
                 continue
             if last_emitted[track_i]:
                 matched[track_i] = (last_emitted, Stale) # no drain
                 continue
-        elif on_stall[track_i] == omit:
+        elif stall_behavior[track_i] == omit:
             if last_emitted[track_i]:                    # geometry source
                 matched[track_i] = (placeholder, Omitted)
                 continue
 
         # freeze/omit reach here only before the track's first frame, with
         # nothing to substitute. Keep waiting if a frame could still match.
-        if not unmatchable and on_stall[track_i] != drop:
+        if not unmatchable and stall_behavior[track_i] != drop:
             iter_blocker ??= track_i
             continue
 
@@ -399,7 +399,7 @@ latest-wins observation slot and one last-emitted frame per track.
 ## Stalled tracks
 
 A track that stops sending would otherwise strand the head state. Two per-track
-knobs decide what happens: `max_lag` is how long to wait, `on_stall` is what to
+knobs decide what happens: `max_lag` is how long to wait, `stall_behavior` is what to
 do when the wait is over.
 
 Both are read by the receiving side, since `SyncBuffer` lives there (it is built
@@ -418,7 +418,7 @@ The one case that genuinely changes: capacity eviction only runs on `push_state`
 so if state output also paused, the head previously waited forever. It now
 resolves as soon as any other stream advances past the budget.
 
-**`on_stall`** picks the outcome. All three are terminal.
+**`stall_behavior`** picks the outcome. All three are terminal.
 
 | | result | frame tagged |
 |---|---|---|
@@ -447,14 +447,14 @@ warrants `omit` so its failure does not take the rest of the frame set down with
 it.
 
 ```yaml
-on_stall: omit          # default for every track
+stall_behavior: omit          # default for every track
 max_lag_ms: 150
 videos:
-  - { name: wrist, codec: h264, on_stall: drop, max_lag_ms: 40 }
+  - { name: wrist, codec: h264, stall_behavior: drop, max_lag_ms: 40 }
   - { name: scene, codec: h264 }
 ```
 
-`reuse_stale_frames` is retained as a deprecated alias for `on_stall: freeze`
+`reuse_stale_frames` is retained as a deprecated alias for `stall_behavior: freeze`
 with `max_lag_ms: 0`.
 
 ## Design choices not made
@@ -463,7 +463,7 @@ with `max_lag_ms: 0`.
 track rather than interpolating between the two frames that bracket it. Nearest
 neighbour is cheaper and matches what most policies expect. Interpolation, or its
 mirror of interpolating state to a frame timestamp, would be a further
-`on_stall` variant rather than a separate knob.
+`stall_behavior` variant rather than a separate knob.
 
 **No wall clock.** `max_lag` is measured in sender-clock time, never wall-clock,
 so a given packet sequence always produces the same sync decisions regardless of
@@ -492,7 +492,7 @@ user-facing knobs.
 | `state_buffer_size` | `slack` | 5 | States buffered awaiting a match. Larger tolerates longer video stalls before eviction. |
 | `search_range_us` | `tolerance / fps` | 50 000 | Match window half-width. Wider means fewer drops under jitter and looser alignment. |
 | `default_stall.max_lag_us` | `slack / fps` | 166 666 | How far the stream clock may run past a moment before it resolves without a silent track. |
-| `default_stall.policy` | `on_stall` | `drop` | How that moment resolves: `drop`, `freeze`, or `omit`. |
+| `default_stall.behavior` | `stall_behavior` | `drop` | How that moment resolves: `drop`, `freeze`, or `omit`. |
 
 Keep `tolerance` at 1 or above so the window covers at least one inter-frame
 interval. Tighter than that and ordinary jitter starts producing drops.

@@ -103,7 +103,7 @@ pub(crate) struct SyncBuffer {
     state_schema: Vec<FieldSpec>,
     config: SyncConfig,
 
-    // Per-track cached placeholder pixels for `on_stall: omit`, with the
+    // Per-track cached placeholder pixels for `stall_behavior: omit`, with the
     // geometry they were rendered for. Rebuilt only when a track's frame
     // size changes, so a silent track costs one render rather than one per
     // observation — the buffer is `W*H*3` and would otherwise be re-synthesized
@@ -436,7 +436,7 @@ impl SyncBuffer {
             //
             // A track that cannot match waits until either no future frame
             // could match it or its `max_lag` elapses, then resolves per its
-            // `on_stall` policy. `Freeze` and `Omit` still wait through the
+            // `stall_behavior` policy. `Freeze` and `Omit` still wait through the
             // startup window before the track's first frame, when they have
             // nothing to substitute. State-buffer overflow (handled in
             // `push_state`) remains the hard safety net against a fully
@@ -542,7 +542,7 @@ impl SyncBuffer {
                 }
 
                 // Resolve without this track.
-                match stall.policy {
+                match stall.behavior {
                     // Prefer the newest below-horizon buffered frame
                     // (ts ≤ state_ts, |Δ| ≥ range) over the stored
                     // last-emitted fallback: it tracks forward with state_ts
@@ -553,7 +553,7 @@ impl SyncBuffer {
                     // frame with ts ≤ state_ts − range, so consuming it now is
                     // safe. Past-horizon frames (ts > state_ts) are left for a
                     // later state to claim, and we fall back to pure reuse.
-                    StallPolicy::Freeze => {
+                    StallBehavior::Freeze => {
                         if !frame_buf.is_empty() {
                             let c = self.cursors[track_i];
                             let cand = &frame_buf[c];
@@ -584,7 +584,7 @@ impl SyncBuffer {
                     // from, and reusing its timestamp keeps `match_delta`
                     // reporting the true age of the newest real pixels rather
                     // than a flattering zero.
-                    StallPolicy::Omit => {
+                    StallBehavior::Omit => {
                         if let Some(last) = self.last_emitted_frames[track_i].clone() {
                             let data = Self::placeholder_pixels(
                                 &mut self.placeholders[track_i],
@@ -609,7 +609,7 @@ impl SyncBuffer {
                             continue;
                         }
                     }
-                    StallPolicy::Drop => {}
+                    StallBehavior::Drop => {}
                 }
 
                 // `Freeze` and `Omit` land here only before the track's first
@@ -618,7 +618,7 @@ impl SyncBuffer {
                 // waiting rather than discarding a moment we may yet be able
                 // to satisfy; that startup window is exactly the historical
                 // `reuse_stale_frames` behavior. Otherwise drop.
-                if !unmatchable && stall.policy != StallPolicy::Drop {
+                if !unmatchable && stall.behavior != StallBehavior::Drop {
                     if iter_blocker.is_none() {
                         iter_blocker = Some(track_i);
                     }
@@ -1133,7 +1133,7 @@ mod tests {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 500,
-            default_stall: StallConfig { max_lag_us: Some(0), policy: StallPolicy::Freeze },
+            default_stall: StallConfig { max_lag_us: Some(0), behavior: StallBehavior::Freeze },
         }
     }
 
@@ -1337,7 +1337,7 @@ mod tests {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 100,
-            default_stall: StallConfig { max_lag_us: Some(0), policy: StallPolicy::Freeze },
+            default_stall: StallConfig { max_lag_us: Some(0), behavior: StallBehavior::Freeze },
         };
         let mut buf = mk(&tracks, fields, config);
 
@@ -1582,14 +1582,14 @@ mod tests {
 
     // --- max_lag / on_stall ---------------------------------------------
 
-    fn stall_config(max_lag_us: Option<u64>, policy: StallPolicy) -> SyncConfig {
+    fn stall_config(max_lag_us: Option<u64>, behavior: StallBehavior) -> SyncConfig {
         SyncConfig {
             // Large buffers, so capacity eviction is never what resolves a
             // moment in these tests — the lag budget is.
             video_buffer_size: 100,
             state_buffer_size: 100,
             search_range_us: 1_000,
-            default_stall: StallConfig { max_lag_us, policy },
+            default_stall: StallConfig { max_lag_us, behavior },
         }
     }
 
@@ -1600,7 +1600,7 @@ mod tests {
     fn no_max_lag_waits_indefinitely() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(None, StallPolicy::Drop));
+        let mut buf = mk(&tracks, fields, stall_config(None, StallBehavior::Drop));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         assert!(buf.push_state(10_000, vec![1.0]).is_empty(), "waits on cam2");
@@ -1621,7 +1621,7 @@ mod tests {
     fn max_lag_resolves_when_only_video_advances() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Drop));
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallBehavior::Drop));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         assert!(buf.push_state(10_000, vec![1.0]).is_empty(), "waits on cam2");
@@ -1640,7 +1640,7 @@ mod tests {
     fn max_lag_does_not_touch_matched_states() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(1), StallPolicy::Drop));
+        let mut buf = mk(&tracks, fields, stall_config(Some(1), StallBehavior::Drop));
 
         for i in 0..20u64 {
             let ts = 10_000 + i * 10_000;
@@ -1658,7 +1658,7 @@ mod tests {
     fn freeze_keeps_observations_flowing() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Freeze));
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallBehavior::Freeze));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let _ = push_f(&mut buf, "cam2", 10_000);
@@ -1684,16 +1684,16 @@ mod tests {
     /// Policies are per track: a `Drop` track and a `Freeze` track in the
     /// same buffer resolve independently.
     #[test]
-    fn stall_policy_is_per_track() {
+    fn stall_behavior_is_per_track() {
         let tracks = vec!["wrist".to_string(), "scene".to_string()];
-        let config = stall_config(Some(50_000), StallPolicy::Drop);
+        let config = stall_config(Some(50_000), StallBehavior::Drop);
         let metrics = Arc::new(MetricsRegistry::new(&tracks));
         let schema = vec![FieldSpec::new("j1".to_string(), DType::F64)];
         // wrist is load-bearing: no observation beats a wrong one. scene is
         // not: freeze it rather than losing the moment.
         let stall = vec![
-            StallConfig { max_lag_us: Some(50_000), policy: StallPolicy::Drop },
-            StallConfig { max_lag_us: Some(50_000), policy: StallPolicy::Freeze },
+            StallConfig { max_lag_us: Some(50_000), behavior: StallBehavior::Drop },
+            StallConfig { max_lag_us: Some(50_000), behavior: StallBehavior::Freeze },
         ];
         let mut buf = SyncBuffer::new(&tracks, schema, config, stall, metrics);
 
@@ -1725,7 +1725,7 @@ mod tests {
     fn freeze_waits_before_first_frame() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallPolicy::Freeze));
+        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallBehavior::Freeze));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let out = buf.push_state(10_000, vec![1.0]);
@@ -1738,7 +1738,7 @@ mod tests {
         assert_eq!(out.observations[0].frames["cam2"].source, FrameSource::Live);
     }
 
-    // --- on_stall: omit --------------------------------------------------
+    // --- stall_behavior: omit --------------------------------------------------
 
     /// The point of `Omit`: one silent camera must not blank the others.
     /// Under `Drop` this same sequence yields no observation at all, so the
@@ -1747,7 +1747,7 @@ mod tests {
     fn omit_keeps_healthy_tracks_visible() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallBehavior::Omit));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let _ = push_f(&mut buf, "cam2", 10_000);
@@ -1772,7 +1772,7 @@ mod tests {
     fn omit_never_removes_the_key() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallPolicy::Omit));
+        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallBehavior::Omit));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let _ = push_f(&mut buf, "cam2", 10_000);
@@ -1796,7 +1796,7 @@ mod tests {
     fn omit_frame_reports_real_recency() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallBehavior::Omit));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let _ = push_f(&mut buf, "cam2", 10_000);
@@ -1817,7 +1817,7 @@ mod tests {
     fn omit_is_counted_per_track() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallBehavior::Omit));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let _ = push_f(&mut buf, "cam2", 10_000);
@@ -1837,7 +1837,7 @@ mod tests {
     fn omit_waits_before_first_frame() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallPolicy::Omit));
+        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallBehavior::Omit));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let out = buf.push_state(10_000, vec![1.0]);
@@ -1855,7 +1855,7 @@ mod tests {
     fn omit_recovers_when_the_track_returns() {
         let tracks = vec!["cam1".to_string(), "cam2".to_string()];
         let fields = vec!["j1".to_string()];
-        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallBehavior::Omit));
 
         let _ = push_f(&mut buf, "cam1", 10_000);
         let _ = push_f(&mut buf, "cam2", 10_000);

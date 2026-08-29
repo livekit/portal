@@ -462,8 +462,8 @@ with `max_lag_ms: 0`.
 **No interpolation.** For each head state, Portal picks the nearest frame per
 track rather than interpolating between the two frames that bracket it. Nearest
 neighbour is cheaper and matches what most policies expect. Interpolation, or its
-mirror of interpolating state to a frame timestamp, would be a further
-`stall_behavior` variant rather than a separate knob.
+mirror of interpolating state to a frame timestamp, would be a separate opt-in
+mode.
 
 **No wall clock.** `max_lag` is measured in sender-clock time, never wall-clock,
 so a given packet sequence always produces the same sync decisions regardless of

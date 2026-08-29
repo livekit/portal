@@ -413,13 +413,16 @@ action_chunks:
     #[test]
     fn full_config_round_trip() {
         let cfg = PortalConfig::from_yaml_str(yaml_full(), "demo", Role::Robot).unwrap();
-        assert_eq!(cfg.video_track_names().collect::<Vec<_>>(), ["front"]);
+        // Every declared track, in declaration order, whatever its codec.
+        assert_eq!(cfg.video_track_names().collect::<Vec<_>>(), ["front", "wrist", "depth"]);
         assert_eq!(cfg.video_tracks()[0].max_bitrate_kbps, Some(4000));
-        assert_eq!(cfg.frame_video_tracks().len(), 2);
-        assert_eq!(cfg.frame_video_tracks()[0].name, "wrist");
-        assert_eq!(cfg.frame_video_tracks()[0].codec, Codec::Mjpeg);
-        assert_eq!(cfg.frame_video_tracks()[0].quality, 80);
-        assert_eq!(cfg.frame_video_tracks()[1].codec, Codec::Png);
+        assert_eq!(cfg.video_tracks()[1].codec, Codec::Mjpeg);
+        assert_eq!(cfg.video_tracks()[1].quality, 80);
+        assert_eq!(cfg.video_tracks()[2].codec, Codec::Png);
+
+        // The byte-stream filter is a view over that same list.
+        let frame: Vec<&str> = cfg.frame_video_tracks().map(|s| s.name.as_str()).collect();
+        assert_eq!(frame, ["wrist", "depth"]);
 
         let state: Vec<&str> = cfg.state_fields().collect();
         assert_eq!(state, vec!["joint_pos", "gripper"]);
@@ -450,7 +453,7 @@ action_chunks:
         let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
         // Same defaults as `PortalConfig::new`.
         assert_eq!(cfg.video_tracks().len(), 0);
-        assert_eq!(cfg.frame_video_tracks().len(), 0);
+        assert_eq!(cfg.frame_video_tracks().count(), 0);
         assert_eq!(cfg.state_schema().len(), 0);
         assert_eq!(cfg.action_schema().len(), 0);
         assert_eq!(cfg.action_chunks().len(), 0);
@@ -472,7 +475,7 @@ videos:
   - { name: cam, codec: mjpeg }
 "#;
         let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
-        assert_eq!(cfg.frame_video_tracks()[0].quality, DEFAULT_MJPEG_QUALITY);
+        assert_eq!(cfg.video_tracks()[0].quality, DEFAULT_MJPEG_QUALITY);
     }
 
     #[test]
@@ -499,7 +502,7 @@ videos:
         let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
         assert_eq!(cfg.video_track_names().collect::<Vec<_>>(), ["a", "b", "c", "d"]);
         // No byte-stream tracks: every codec here rides the WebRTC path.
-        assert_eq!(cfg.frame_video_tracks().len(), 0);
+        assert_eq!(cfg.frame_video_tracks().count(), 0);
         assert_eq!(cfg.video_tracks()[1].codec, Codec::Vp9);
         assert_eq!(cfg.video_tracks()[1].max_bitrate_kbps, Some(3000));
     }

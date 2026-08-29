@@ -74,8 +74,48 @@ def test_screencast_on_byte_stream_codec_is_ignored_not_rejected():
     # the byte-stream path. Only the YAML loader rejects it outright.
     cfg = PortalConfig("demo", Role.ROBOT)
     cfg.add_video("cam", codec=VideoCodec.MJPEG, quality=80, screencast=True)
-    assert cfg.video_tracks == []
+    assert cfg.video_tracks == ["cam"]
     assert [t.name for t in cfg.frame_video_tracks] == ["cam"]
+
+
+def test_video_tracks_is_codec_independent():
+    # The bug this list shape exists to prevent: swapping one documented
+    # codec for another is a transport change, and must not make a declared
+    # track vanish from the obvious accessor.
+    for codec in (
+        VideoCodec.H264,
+        VideoCodec.VP8,
+        VideoCodec.VP9,
+        VideoCodec.AV1,
+        VideoCodec.H265,
+        VideoCodec.RAW,
+        VideoCodec.PNG,
+        VideoCodec.MJPEG,
+    ):
+        cfg = PortalConfig("demo", Role.ROBOT)
+        cfg.add_video("cam", codec=codec)
+        assert cfg.video_tracks == ["cam"], codec
+        assert [s.name for s in cfg.video_track_specs] == ["cam"], codec
+
+
+def test_video_tracks_keeps_declaration_order_across_transports():
+    cfg = PortalConfig("demo", Role.ROBOT)
+    cfg.add_video("a", codec=VideoCodec.MJPEG, quality=80)
+    cfg.add_video("b")
+    cfg.add_video("c", codec=VideoCodec.PNG)
+    assert cfg.video_tracks == ["a", "b", "c"]
+    # frame_video_tracks is a filter over that same list, not a rival to it.
+    assert [s.name for s in cfg.frame_video_tracks] == ["a", "c"]
+
+
+def test_video_track_specs_read_back_webrtc_options():
+    cfg = PortalConfig("demo", Role.ROBOT)
+    cfg.add_video("cam", max_bitrate_kbps=4000, simulcast=True)
+    (spec,) = cfg.video_track_specs
+    assert spec.codec == VideoCodec.H264
+    assert spec.max_bitrate_kbps == 4000
+    assert spec.simulcast is True
+    assert spec.screencast is False
 
 
 def test_mixed_dtype_schema_is_accepted():

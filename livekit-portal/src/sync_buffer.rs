@@ -16,8 +16,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+
 use crate::config::FieldSpec;
 use crate::metrics::MetricsRegistry;
+use crate::placeholder;
 use crate::types::*;
 
 #[cfg(test)]
@@ -100,6 +103,13 @@ pub(crate) struct SyncBuffer {
     state_schema: Vec<FieldSpec>,
     config: SyncConfig,
 
+    // Per-track cached placeholder pixels for `on_stall: omit`, with the
+    // geometry they were rendered for. Rebuilt only when a track's frame
+    // size changes, so a silent track costs one render rather than one per
+    // observation — the buffer is `W*H*3` and would otherwise be re-synthesized
+    // at the state rate for as long as the track stays down.
+    placeholders: Vec<Option<(u32, u32, Bytes)>>,
+
     // Per-track stall handling, parallel to `track_names`: how long to wait
     // for a silent track and how to resolve the moment when the wait ends.
     stall: Vec<StallConfig>,
@@ -167,6 +177,7 @@ impl SyncBuffer {
             vec![config.default_stall; track_names.len()]
         };
         let any_max_lag = stall.iter().any(|s| s.max_lag_us.is_some());
+        let placeholders = vec![None; track_names.len()];
         Self {
             track_names,
             track_index,
@@ -174,6 +185,7 @@ impl SyncBuffer {
             state_buffer: VecDeque::new(),
             state_schema,
             config,
+            placeholders,
             stall,
             any_max_lag,
             cursors,
@@ -251,6 +263,29 @@ impl SyncBuffer {
             }
         }
         now
+    }
+
+    /// Cached placeholder pixels for one track at one geometry.
+    ///
+    /// Free function over the cache slot rather than a `&mut self` method so
+    /// it can be called while the track's frame buffer is borrowed. Rendering
+    /// is deterministic, so caching on `(width, height)` is sound; a track
+    /// that renegotiates resolution simply re-renders once.
+    fn placeholder_pixels(
+        slot: &mut Option<(u32, u32, Bytes)>,
+        track_name: &str,
+        width: u32,
+        height: u32,
+    ) -> Bytes {
+        if let Some((w, h, data)) = slot
+            && *w == width
+            && *h == height
+        {
+            return data.clone();
+        }
+        let data = placeholder::render(width, height, track_name);
+        *slot = Some((width, height, data.clone()));
+        data
     }
 
     /// Build the typed state map once per emission. Separate so the two
@@ -358,6 +393,9 @@ impl SyncBuffer {
             *c = 0;
         }
         for slot in &mut self.last_emitted_frames {
+            *slot = None;
+        }
+        for slot in &mut self.placeholders {
             *slot = None;
         }
         self.blocker = None;
@@ -539,7 +577,38 @@ impl SyncBuffer {
                             continue;
                         }
                     }
-                    StallPolicy::Omit => {}
+                    // Keep the moment alive with a stand-in, so the healthy
+                    // tracks and the state still reach the consumer. Geometry
+                    // and recency both come from the track's last real frame:
+                    // without one there is nothing to size a placeholder
+                    // from, and reusing its timestamp keeps `match_delta`
+                    // reporting the true age of the newest real pixels rather
+                    // than a flattering zero.
+                    StallPolicy::Omit => {
+                        if let Some(last) = self.last_emitted_frames[track_i].clone() {
+                            let data = Self::placeholder_pixels(
+                                &mut self.placeholders[track_i],
+                                &self.track_names[track_i],
+                                last.width,
+                                last.height,
+                            );
+                            self.matched_scratch[track_i] = Some(MatchSlot {
+                                frame: Arc::new(VideoFrameData {
+                                    width: last.width,
+                                    height: last.height,
+                                    data,
+                                    timestamp_us: last.timestamp_us,
+                                    source: FrameSource::Omitted,
+                                }),
+                                drain_to: None,
+                                source: FrameSource::Omitted,
+                            });
+                            if let Some(tm) = self.metrics.track(&self.track_names[track_i]) {
+                                tm.record_frame_omitted();
+                            }
+                            continue;
+                        }
+                    }
                     StallPolicy::Drop => {}
                 }
 
@@ -1665,6 +1734,142 @@ mod tests {
 
         // cam2's first frame arrives in range: the held moment now emits.
         let out = push_f(&mut buf, "cam2", 10_000);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam2"].source, FrameSource::Live);
+    }
+
+    // --- on_stall: omit --------------------------------------------------
+
+    /// The point of `Omit`: one silent camera must not blank the others.
+    /// Under `Drop` this same sequence yields no observation at all, so the
+    /// operator loses every camera because one died.
+    #[test]
+    fn omit_keeps_healthy_tracks_visible() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let _ = push_f(&mut buf, "cam2", 10_000);
+        assert_eq!(buf.push_state(10_000, vec![1.0]).observations.len(), 1);
+
+        // cam2 dies. cam1 carries the clock past the budget.
+        let _ = push_f(&mut buf, "cam1", 70_000);
+        assert!(buf.push_state(70_000, vec![2.0]).observations.is_empty());
+        let out = push_f(&mut buf, "cam1", 130_000);
+
+        assert_eq!(out.observations.len(), 1, "the moment survives");
+        let frames = &out.observations[0].frames;
+        assert_eq!(frames["cam1"].source, FrameSource::Live, "healthy camera still live");
+        assert_eq!(frames["cam2"].source, FrameSource::Omitted);
+        assert_eq!(frames.len(), 2, "every declared track still has a key");
+    }
+
+    /// The key is never removed, so `frames[name]` cannot start failing when
+    /// a camera dies — the reason a placeholder is substituted rather than
+    /// the entry dropped.
+    #[test]
+    fn omit_never_removes_the_key() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallPolicy::Omit));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let _ = push_f(&mut buf, "cam2", 10_000);
+        assert_eq!(buf.push_state(10_000, vec![1.0]).observations.len(), 1);
+
+        for i in 1..5u64 {
+            let ts = 10_000 + i * 60_000;
+            let _ = push_f(&mut buf, "cam1", ts);
+            let _ = buf.push_state(ts, vec![i as f64]);
+            let out = push_f(&mut buf, "cam1", ts + 60_000);
+            for obs in &out.observations {
+                assert!(obs.frames.contains_key("cam2"), "cam2 key present at tick {i}");
+            }
+        }
+    }
+
+    /// A placeholder carries the last real frame's timestamp, not the
+    /// state's: `match_delta` must report how stale the newest real pixels
+    /// are, not a flattering zero.
+    #[test]
+    fn omit_frame_reports_real_recency() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let _ = push_f(&mut buf, "cam2", 10_000);
+        let _ = buf.push_state(10_000, vec![1.0]);
+
+        let _ = push_f(&mut buf, "cam1", 70_000);
+        assert!(buf.push_state(70_000, vec![2.0]).observations.is_empty());
+        let out = push_f(&mut buf, "cam1", 130_000);
+        let f = &out.observations[0].frames["cam2"];
+        assert_eq!(f.timestamp_us, 10_000, "last real frame's ts, not the state's");
+        assert_eq!(f.width, 2, "geometry inherited from the real frame");
+        assert_eq!(f.height, 2);
+    }
+
+    /// Omission is counted per track, so ops can tell which camera is down
+    /// without diffing key sets.
+    #[test]
+    fn omit_is_counted_per_track() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let _ = push_f(&mut buf, "cam2", 10_000);
+        let _ = buf.push_state(10_000, vec![1.0]);
+        let _ = push_f(&mut buf, "cam1", 70_000);
+        let _ = buf.push_state(70_000, vec![2.0]);
+        let _ = push_f(&mut buf, "cam1", 130_000);
+
+        let snap = buf.metrics.snapshot(HashMap::new(), 0);
+        assert_eq!(snap.sync.frames_omitted.get("cam2"), Some(&1));
+        assert_eq!(snap.sync.frames_omitted.get("cam1"), Some(&0), "healthy track untouched");
+    }
+
+    /// Before a track's first frame there is no geometry to synthesize from,
+    /// so `Omit` waits like the others rather than inventing a size.
+    #[test]
+    fn omit_waits_before_first_frame() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(0), StallPolicy::Omit));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let out = buf.push_state(10_000, vec![1.0]);
+        assert!(out.observations.is_empty(), "cam2 has never sent");
+        assert!(out.drops.is_empty(), "and nothing is discarded yet");
+
+        let out = push_f(&mut buf, "cam2", 10_000);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam2"].source, FrameSource::Live);
+    }
+
+    /// A recovering track goes straight back to `Live` — the placeholder is
+    /// not sticky.
+    #[test]
+    fn omit_recovers_when_the_track_returns() {
+        let tracks = vec!["cam1".to_string(), "cam2".to_string()];
+        let fields = vec!["j1".to_string()];
+        let mut buf = mk(&tracks, fields, stall_config(Some(50_000), StallPolicy::Omit));
+
+        let _ = push_f(&mut buf, "cam1", 10_000);
+        let _ = push_f(&mut buf, "cam2", 10_000);
+        let _ = buf.push_state(10_000, vec![1.0]);
+
+        let _ = push_f(&mut buf, "cam1", 70_000);
+        assert!(buf.push_state(70_000, vec![2.0]).observations.is_empty());
+        let out = push_f(&mut buf, "cam1", 130_000);
+        assert_eq!(out.observations[0].frames["cam2"].source, FrameSource::Omitted);
+
+        // cam2 comes back in range of the next moment.
+        let _ = push_f(&mut buf, "cam1", 200_000);
+        let _ = push_f(&mut buf, "cam2", 200_000);
+        let out = buf.push_state(200_000, vec![3.0]);
         assert_eq!(out.observations.len(), 1);
         assert_eq!(out.observations[0].frames["cam2"].source, FrameSource::Live);
     }

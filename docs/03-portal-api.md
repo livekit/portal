@@ -130,7 +130,11 @@ role-specific is a no-op on the wrong side.
 | `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
 | `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
 | `set_ping_ms(int)` | 1000 | RTT probe cadence. `0` disables probing on this side. |
-| `set_reuse_stale_frames(bool)` | `False` | Freeze video on loss instead of dropping state. |
+| `set_on_stall(StallPolicy)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
+| `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
+| `set_track_on_stall(str, StallPolicy)` | — | Per-track override of `set_on_stall`. |
+| `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
+| `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_on_stall(FREEZE)` with `set_max_lag_ms(0)`. |
 | `set_action_subscription(bool)` | `False` | Operator-only. Receive executed actions. |
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
 
@@ -153,7 +157,7 @@ config you loaded from YAML instead of building by hand:
 | `tolerance` | `float` | `set_tolerance`. |
 | `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
 | `ping_ms` | `int` | `set_ping_ms`. |
-| `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. |
+| `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. Deprecated. |
 | `action_subscription` | `bool` | `set_action_subscription`. |
 | `has_e2ee_key` | `bool` | Whether a key was set. The bytes are not readable back. |
 

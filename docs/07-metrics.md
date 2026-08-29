@@ -49,7 +49,8 @@ Operator side. Everything about turning separate streams into observations.
 | Field | Type | Meaning |
 |---|---|---|
 | `observations_emitted` | `int` | Total observations handed to your callback. |
-| `stale_observations_emitted` | `int` | Subset of the above where at least one track contributed a reused frame. Always `0` unless `reuse_stale_frames` is on. |
+| `stale_observations_emitted` | `int` | Subset of the above where at least one track contributed a reused frame. Always `0` unless some track uses `on_stall: freeze`. |
+| `frames_omitted` | `dict[str, int]` | Per track: synthesized placeholder frames emitted under `on_stall: omit`. Rising means that camera is silent and its moments are being kept alive with a stand-in. |
 | `states_dropped` | `int` | States that never found a matching frame. |
 | `match_delta_us_p50` | `int \| None` | Median worst-track alignment per observation. |
 | `match_delta_us_p95` | `int \| None` | 95th percentile of the same. |
@@ -65,14 +66,14 @@ of 8 000 means you are using a sixth of the window and could tighten
 jitter will start dropping.
 
 **`stale_observations_emitted` is your freeze detector.** With
-`reuse_stale_frames` on, a frozen camera produces observations exactly like a
+`on_stall: freeze`, a frozen camera produces observations exactly like a
 healthy one. This counter is the only thing that distinguishes them. Rising here
 while `observations_emitted` holds steady means video is frozen and state is
 still flowing.
 
 **`last_blocker_track` is sticky and startup-biased.** It updates when a new
 block occurs, which is useful for post-hoc diagnosis. Under
-`reuse_stale_frames`, it stops updating once every track has emitted once, so do
+`on_stall: freeze`, it stops updating once every track has emitted once, so do
 not use it to detect a freeze. Use `stale_observations_emitted`.
 
 ```python

@@ -17,7 +17,9 @@ cfg.set_tolerance(1.5)               # match window, in ticks
 cfg.set_state_reliable(True)
 cfg.set_action_reliable(True)
 cfg.set_ping_ms(1000)                # 0 disables RTT probing on this side
-cfg.set_reuse_stale_frames(False)
+
+cfg.set_on_stall(StallPolicy.DROP)   # what to do about a silent track
+cfg.set_max_lag_ms(166)              # how long to wait first; default slack/fps
 ```
 
 ## The three matching knobs
@@ -86,28 +88,65 @@ Under asymmetric rates the overall drop rate scales with
 `state_rate x video_loss_rate`, not with the video rate. Fewer states means
 fewer things that can fail to match.
 
-## Reusing stale frames
+## Stalled tracks
 
-Off by default. Turn it on when your application would rather see a frozen frame
-than lose a state entirely.
+When a camera stops sending, two knobs decide what happens to the moments it
+can no longer cover: how long to wait, then what to do.
 
 ```python
-cfg.set_reuse_stale_frames(True)
+cfg.set_max_lag_ms(150)                 # wait this long, in stream time
+cfg.set_on_stall(StallPolicy.OMIT)      # then resolve this way
 ```
 
-With it on, a state whose match window has elapsed falls back to the most recent
-frame that track already emitted. Video freezes on the last good frame while
-state keeps flowing. Every state becomes an observation, once every track has
-emitted at least once.
+`max_lag` is how far the fastest-advancing stream may run past a moment before
+that moment resolves without the silent track. It is **sender-clock time, not
+wall-clock** — a statement about stream position, evaluated when a packet
+arrives rather than on a timer. It defaults to `slack / fps`, which is where
+state-buffer capacity would have evicted the moment anyway.
 
-Before that first emission there is no fallback, so the strict drop rule still
-applies. That keeps the state buffer bounded if video never starts at all.
+`on_stall` picks the outcome:
+
+| | What the consumer sees |
+|---|---|
+| `DROP` (default) | No observation at all. The state still reaches the drop callback, but the healthy cameras in that moment go with it. |
+| `FREEZE` | The silent track's last good frame. Video freezes, state keeps flowing. |
+| `OMIT` | A magenta "NO SIGNAL" placeholder naming the track, so the healthy cameras stay visible. |
+
+Every frame carries a `FrameSource` saying which of the three it is:
+
+```python
+def on_observation(obs):
+    wrist = obs.frames["wrist"]          # always present, whatever happened
+    if wrist.source is not FrameSource.LIVE:
+        return                            # not a measurement of this moment
+```
+
+`OMIT` never removes the key, so turning it on cannot start raising `KeyError`
+in code written before it existed.
+
+### Per track
+
+Cameras differ in how load-bearing they are, so both knobs override per track:
+
+```python
+cfg.set_on_stall(StallPolicy.OMIT)              # default for every track
+cfg.set_track_on_stall("wrist", StallPolicy.DROP)
+cfg.set_track_max_lag_ms("wrist", 40)
+```
 
 | Your situation | Pick |
 |---|---|
-| Real-time inference or control | `False`. A stale frame silently misaligns the perception and action loop. |
-| Data collection or logging | `True`. A dropped state is lost data. A brief video freeze is recoverable. |
-| Teleop viewer | `True`. Continuity beats exact pairing. |
+| Real-time inference or control | `DROP` on the tracks the policy depends on. A substituted frame silently misaligns the perception and action loop, and no observation beats a confidently wrong one. |
+| Data collection or logging | `FREEZE`. A dropped state is lost data; a brief video freeze is recoverable, and `FrameSource.STALE` marks it in the recording. |
+| Teleop viewer | `OMIT`. One dead camera should not blank the other three, and the operator can see which one died. |
+
+Before a track's first frame, `FREEZE` has nothing to reuse and `OMIT` has no
+geometry to synthesize from, so both wait through that startup window and then
+fall back to `DROP`. That keeps the state buffer bounded if video never starts
+at all.
+
+`set_reuse_stale_frames(True)` still works, as a deprecated alias for
+`set_on_stall(StallPolicy.FREEZE)` with `set_max_lag_ms(0)`.
 
 **Watch `metrics.sync.stale_observations_emitted`.** That counter rising while
 `observations_emitted` holds steady is the signal that a track is silently

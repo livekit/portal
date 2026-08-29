@@ -213,3 +213,42 @@ def test_robot_config_from_yaml_file():
         assert cfg.role == Role.ROBOT
     finally:
         os.unlink(path)
+
+
+def test_stall_policy_parses_per_track():
+    """Both knobs parse at either level, and a per-track value overrides the
+    default without disturbing tracks that did not set one."""
+    cfg = PortalConfig.from_yaml_str(
+        textwrap.dedent(
+            """
+            version: 1
+            on_stall: freeze
+            max_lag_ms: 120
+            videos:
+              - { name: front, codec: h264 }
+              - { name: wrist, codec: h264, on_stall: drop, max_lag_ms: 20 }
+            """
+        ),
+        "demo",
+        Role.ROBOT,
+    )
+    assert list(cfg.video_tracks) == ["front", "wrist"]
+
+
+def test_unknown_stall_policy_is_rejected():
+    """A typo must fail loudly rather than silently falling back to the
+    default — a stall policy that quietly reverts is one you cannot trust in
+    an incident."""
+    with pytest.raises(ConfigFileError) as e:
+        PortalConfig.from_yaml_str(
+            textwrap.dedent(
+                """
+                version: 1
+                videos:
+                  - { name: front, codec: h264, on_stall: nope }
+                """
+            ),
+            "demo",
+            Role.ROBOT,
+        )
+    assert "nope" in str(e.value)

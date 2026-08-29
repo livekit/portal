@@ -371,6 +371,10 @@ pub struct SyncMetrics {
     pub observations_emitted: u64,
     pub stale_observations_emitted: u64,
     pub states_dropped: u64,
+    /// Per-track count of synthesized placeholder frames emitted under
+    /// `on_stall: omit` — that track is silent and its moments are being kept
+    /// alive with a stand-in. The frames carry `FrameSource.OMITTED`.
+    pub frames_omitted: HashMap<String, u64>,
     pub match_delta_us_p50: Option<u64>,
     pub match_delta_us_p95: Option<u64>,
     pub last_blocker_track: Option<String>,
@@ -1910,6 +1914,7 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             observations_emitted: m.sync.observations_emitted,
             stale_observations_emitted: m.sync.stale_observations_emitted,
             states_dropped: m.sync.states_dropped,
+            frames_omitted: m.sync.frames_omitted.clone(),
             match_delta_us_p50: m.sync.match_delta_us_p50,
             match_delta_us_p95: m.sync.match_delta_us_p95,
             last_blocker_track: m.sync.last_blocker_track,

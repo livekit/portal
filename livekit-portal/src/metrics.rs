@@ -38,6 +38,11 @@ pub struct SyncMetrics {
     /// rate signals a silently frozen video track.
     pub stale_observations_emitted: u64,
     pub states_dropped: u64,
+    /// Per-track count of synthesized placeholder frames emitted under
+    /// `on_stall: omit`. A rising counter means that track is silent and its
+    /// moments are being kept alive with a stand-in rather than discarded;
+    /// the matching frames carry `FrameSource::Omitted`.
+    pub frames_omitted: HashMap<String, u64>,
     /// Worst per-track alignment `max_t |state_ts − frame_ts|` across the
     /// tracks in each emitted observation, over a rolling 256-sample window.
     pub match_delta_us_p50: Option<u64>,
@@ -262,6 +267,7 @@ impl MetricsRegistry {
         let mut frames_received = HashMap::with_capacity(n);
         let mut frame_jitter_us = HashMap::with_capacity(n);
         let mut evictions = HashMap::with_capacity(n);
+        let mut frames_omitted = HashMap::with_capacity(n);
         let mut frames_dropped_publisher_full = HashMap::with_capacity(n);
         let mut bytes_sent = HashMap::with_capacity(n);
         let mut bytes_received = HashMap::with_capacity(n);
@@ -271,6 +277,7 @@ impl MetricsRegistry {
                 frames_received.insert(name.clone(), t.frames_received.load(Ordering::Relaxed));
                 frame_jitter_us.insert(name.clone(), t.jitter.lock().jitter_us);
                 evictions.insert(name.clone(), t.evictions.load(Ordering::Relaxed));
+                frames_omitted.insert(name.clone(), t.frames_omitted.load(Ordering::Relaxed));
                 frames_dropped_publisher_full
                     .insert(name.clone(), t.frames_dropped_publisher_full.load(Ordering::Relaxed));
                 bytes_sent.insert(name.clone(), t.bytes_sent.load(Ordering::Relaxed));
@@ -304,6 +311,7 @@ impl MetricsRegistry {
                 observations_emitted: self.observations_emitted.load(Ordering::Relaxed),
                 stale_observations_emitted: self.stale_observations_emitted.load(Ordering::Relaxed),
                 states_dropped: self.states_dropped.load(Ordering::Relaxed),
+                frames_omitted,
                 match_delta_us_p50: match_p50,
                 match_delta_us_p95: match_p95,
                 last_blocker_track,
@@ -372,6 +380,7 @@ pub(crate) struct TrackMetrics {
     pub frames_sent: AtomicU64,
     pub frames_received: AtomicU64,
     pub evictions: AtomicU64,
+    pub frames_omitted: AtomicU64,
     pub frames_dropped_publisher_full: AtomicU64,
     pub bytes_sent: AtomicU64,
     pub bytes_received: AtomicU64,
@@ -384,6 +393,7 @@ impl TrackMetrics {
             frames_sent: AtomicU64::new(0),
             frames_received: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
+            frames_omitted: AtomicU64::new(0),
             frames_dropped_publisher_full: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
@@ -420,6 +430,10 @@ impl TrackMetrics {
         self.evictions.fetch_add(n, Ordering::Relaxed);
     }
 
+    pub fn record_frame_omitted(&self) {
+        self.frames_omitted.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_dropped_publisher_full(&self) {
         self.frames_dropped_publisher_full.fetch_add(1, Ordering::Relaxed);
     }
@@ -428,6 +442,7 @@ impl TrackMetrics {
         self.frames_sent.store(0, Ordering::Relaxed);
         self.frames_received.store(0, Ordering::Relaxed);
         self.evictions.store(0, Ordering::Relaxed);
+        self.frames_omitted.store(0, Ordering::Relaxed);
         self.frames_dropped_publisher_full.store(0, Ordering::Relaxed);
         self.bytes_sent.store(0, Ordering::Relaxed);
         self.bytes_received.store(0, Ordering::Relaxed);

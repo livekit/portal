@@ -20,6 +20,7 @@ pub mod dtype;
 pub mod error;
 mod frame_video;
 pub mod metrics;
+mod placeholder;
 mod portal;
 pub mod rpc;
 mod rtt;

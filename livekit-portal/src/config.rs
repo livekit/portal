@@ -60,49 +60,38 @@ impl From<FieldSpec> for (String, DType) {
     }
 }
 
-/// One byte-stream video track declaration: name, codec, and per-codec
-/// quality.
+/// One declared video track: name, codec, and the per-codec options.
 ///
-/// These tracks bypass the WebRTC media path and ride a reliable byte-stream
-/// channel instead. Each frame is encoded once on the sender (Raw / PNG /
-/// MJPEG) and decoded back to RGB on the receiver. The user-facing API is
-/// identical to WebRTC video — `send_video_frame` / `on_video_frame` /
-/// `get_video_frame` — only the wire transport differs. Selected at config
-/// time by passing a non-`H264` codec to `PortalConfig::add_video`.
+/// One type for every track regardless of transport, because `add_video` is
+/// one method regardless of transport. `codec` is the discriminant: a WebRTC
+/// codec (`H264` / `Vp8` / `Vp9` / `Av1` / `H265`) rides the WebRTC media
+/// path (RTP/SRTP), and a byte-stream codec (`Raw` / `Png` / `Mjpeg`) is
+/// encoded per frame and shipped over a reliable byte stream. The
+/// user-facing API is identical either way — `send_video_frame` /
+/// `on_video_frame` / `get_video_frame` all speak RGB — only the wire
+/// transport differs.
 ///
-/// `quality` is honored for `Mjpeg` (1..=100) and ignored for `Raw` and
-/// `Png`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameVideoSpec {
-    pub name: String,
-    pub codec: Codec,
-    pub quality: u8,
-}
-
-impl FrameVideoSpec {
-    pub fn new(name: impl Into<String>, codec: Codec, quality: u8) -> Self {
-        Self { name: name.into(), codec, quality }
-    }
-}
-
-/// One WebRTC video track declaration: name, WebRTC codec, an optional
-/// encoder bitrate ceiling, and the two encoder-behavior toggles.
+/// Each option is honored by the transport its codec selects and ignored by
+/// the other, exactly as `PortalConfig::add_video` documents:
 ///
-/// The WebRTC counterpart to `FrameVideoSpec`. These tracks ride the WebRTC
-/// media path (RTP/SRTP). `codec` is always a WebRTC codec (`H264` / `Vp8` /
-/// `Vp9` / `Av1` / `H265`) — `add_video` routes byte-stream codecs to
-/// `FrameVideoSpec` instead. `max_bitrate_kbps` caps the encoder's peak rate
-/// in kilobits per second; `None` means use `DEFAULT_H264_MAX_BITRATE_KBPS`.
-/// The cap is a ceiling, not a target — libwebrtc still picks a lower
-/// operating bitrate from content. Selected at config time by passing a
-/// WebRTC codec to `PortalConfig::add_video`.
+///   * `quality` — `Mjpeg` only, 1..=100.
+///   * `max_bitrate_kbps` — WebRTC only. Caps the encoder's peak rate in
+///     kilobits per second; a ceiling, not a target. `None` means
+///     `DEFAULT_H264_MAX_BITRATE_KBPS`.
+///   * `simulcast` / `screencast` — WebRTC only, both `false` by default.
+///     See `PortalConfig::add_video` for what each one does.
 ///
-/// `simulcast` and `screencast` both default to `false`. See
-/// `PortalConfig::add_video` for what each one does.
+/// An option set against the wrong transport is rejected by the YAML loader
+/// and ignored by `add_video`, so a spec may carry a value its own codec
+/// never reads. `quality` is the one that is normalized rather than left
+/// dangling, since it is the only option with no natural "unset".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoTrackSpec {
     pub name: String,
     pub codec: Codec,
+    /// JPEG quality (1..=100) for `Mjpeg`, and `0` for every other codec —
+    /// nothing else reads it. See `PortalConfig::add_video`.
+    pub quality: u8,
     pub max_bitrate_kbps: Option<u32>,
     /// Publish multiple spatial layers so the SFU can pick per subscriber.
     /// Costs encode CPU and only pays off with several subscribers on
@@ -119,11 +108,19 @@ impl VideoTrackSpec {
     pub fn new(
         name: impl Into<String>,
         codec: Codec,
+        quality: u8,
         max_bitrate_kbps: Option<u32>,
         simulcast: bool,
         screencast: bool,
     ) -> Self {
-        Self { name: name.into(), codec, max_bitrate_kbps, simulcast, screencast }
+        Self { name: name.into(), codec, quality, max_bitrate_kbps, simulcast, screencast }
+    }
+
+    /// Whether this track rides the WebRTC media path. The one question the
+    /// transport-specific code paths ask; everything else treats the list as
+    /// undifferentiated.
+    pub fn is_webrtc(&self) -> bool {
+        self.codec.is_webrtc()
     }
 }
 
@@ -156,8 +153,10 @@ impl ChunkSpec {
 pub struct PortalConfig {
     pub(crate) session: String,
     pub(crate) role: Role,
+    /// Every declared video track, in declaration order, regardless of
+    /// transport. `add_video` is one method, so this is one list; the
+    /// transport-specific paths filter on `VideoTrackSpec::is_webrtc`.
     pub(crate) video_tracks: Vec<VideoTrackSpec>,
-    pub(crate) frame_video_tracks: Vec<FrameVideoSpec>,
     pub(crate) state_schema: Vec<FieldSpec>,
     pub(crate) action_schema: Vec<FieldSpec>,
     pub(crate) action_chunks: Vec<ChunkSpec>,
@@ -201,7 +200,6 @@ impl PortalConfig {
             session: session.into(),
             role,
             video_tracks: Vec::new(),
-            frame_video_tracks: Vec::new(),
             state_schema: Vec::new(),
             action_schema: Vec::new(),
             action_chunks: Vec::new(),
@@ -314,22 +312,23 @@ impl PortalConfig {
         if let Some(kbps) = max_bitrate_kbps {
             assert!(kbps > 0, "max_bitrate_kbps must be > 0, got {kbps}");
         }
-        if codec.is_webrtc() {
-            self.video_tracks.push(VideoTrackSpec::new(
-                name,
-                codec,
-                max_bitrate_kbps,
-                simulcast.unwrap_or(false),
-                screencast.unwrap_or(false),
-            ));
-        } else {
-            self.frame_video_tracks.push(FrameVideoSpec::new(name, codec, quality));
-        }
+        // Only the MJPEG encoder reads `quality`. Canonicalize it to 0
+        // everywhere else so a spec never reports a JPEG quality nothing will
+        // use, and so a YAML-built config compares equal to the same config
+        // built programmatically — the loader already passes 0 here.
+        let quality = if codec == Codec::Mjpeg { quality } else { 0 };
+        self.video_tracks.push(VideoTrackSpec::new(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast.unwrap_or(false),
+            screencast.unwrap_or(false),
+        ));
     }
 
     fn has_track(&self, name: &str) -> bool {
         self.video_tracks.iter().any(|s| s.name == name)
-            || self.frame_video_tracks.iter().any(|s| s.name == name)
     }
 
     /// Declare state fields with per-field dtype. Order is significant and
@@ -567,26 +566,27 @@ impl PortalConfig {
         track_names.iter().map(|n| self.stall_for(n)).collect()
     }
 
-    /// Declared WebRTC (H264) video tracks (name + optional bitrate cap), in
-    /// declaration order.
+    /// Every declared video track, in declaration order, whatever transport
+    /// it rides. A name passed to `add_video` is in here — there is no
+    /// second list, and no codec that opts a track out of this answer.
     pub fn video_tracks(&self) -> &[VideoTrackSpec] {
         &self.video_tracks
     }
 
-    /// WebRTC (H264) video track names, derived from `video_tracks`.
+    /// Names of every declared video track, derived from `video_tracks`.
+    /// Does not allocate.
     pub fn video_track_names(&self) -> impl Iterator<Item = &str> {
         self.video_tracks.iter().map(|s| s.name.as_str())
     }
 
-    /// Declared frame-video tracks (name + codec + quality), in declaration
-    /// order.
-    pub fn frame_video_tracks(&self) -> &[FrameVideoSpec] {
-        &self.frame_video_tracks
-    }
-
-    /// Frame-video track names, derived from `frame_video_tracks`.
-    pub fn frame_video_track_names(&self) -> impl Iterator<Item = &str> {
-        self.frame_video_tracks.iter().map(|s| s.name.as_str())
+    /// The byte-stream subset of `video_tracks` — the tracks that ride a
+    /// per-frame byte stream rather than the WebRTC media path.
+    ///
+    /// A convenience filter for the encode paths, not a second source of
+    /// truth: it can only ever return specs that `video_tracks` also
+    /// returns.
+    pub fn frame_video_tracks(&self) -> impl Iterator<Item = &VideoTrackSpec> {
+        self.video_tracks.iter().filter(|s| !s.is_webrtc())
     }
 
     /// Ordered state field names. Derived from `state_schema`; does not

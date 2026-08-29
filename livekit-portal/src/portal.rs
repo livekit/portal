@@ -331,7 +331,7 @@ impl Portal {
         // Slots and metrics cover both transports. Frame-video and WebRTC
         // tracks share the same VideoFrameData / VideoTrackSlots / sync
         // buffer, so the consumer-facing API is identical.
-        let all_track_names = combined_track_names(&config);
+        let all_track_names: Vec<String> = config.video_track_names().map(String::from).collect();
         let video_tracks: HashMap<String, Arc<VideoTrackSlots>> = all_track_names
             .iter()
             .map(|name| (name.clone(), Arc::new(VideoTrackSlots::new())))
@@ -357,8 +357,7 @@ impl Portal {
         // rather than a `String`-cloning map clone.
         let frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>> = Arc::new(
             config
-                .frame_video_tracks
-                .iter()
+                .frame_video_tracks()
                 .map(|spec| {
                     let slots = video_tracks
                         .get(&spec.name)
@@ -604,8 +603,7 @@ impl Portal {
         // no publisher means "wrong role" — same shape as `send_state` /
         // `send_action_chunk`.
         if self.config.role != Role::Robot
-            && (self.config.video_tracks.iter().any(|s| s.name == track_name)
-                || self.config.frame_video_tracks.iter().any(|s| s.name == track_name))
+            && self.config.video_tracks.iter().any(|s| s.name == track_name)
         {
             return Err(PortalError::WrongRole(self.config.role));
         }
@@ -1224,7 +1222,7 @@ impl Portal {
     async fn setup_robot(&self, room: &Room) -> PortalResult<()> {
         let lp = room.local_participant();
 
-        for spec in &self.config.video_tracks {
+        for spec in self.config.video_tracks.iter().filter(|s| s.is_webrtc()) {
             let track_name = &spec.name;
             let track_metrics =
                 self.metrics.track(track_name).expect("track metrics registered at construction");
@@ -1250,7 +1248,7 @@ impl Portal {
         // Frame-video publishers don't go through `LocalParticipant.publish_track`
         // — they emit one byte stream per frame instead. So no async setup
         // here, just spawn the per-track drainer task.
-        for spec in &self.config.frame_video_tracks {
+        for spec in self.config.frame_video_tracks() {
             let track_metrics =
                 self.metrics.track(&spec.name).expect("track metrics registered at construction");
             let publisher = FrameVideoPublisher::new(spec.clone(), lp.clone(), track_metrics);
@@ -1355,15 +1353,6 @@ impl Portal {
 /// it on the given LocalParticipant. Payload types are converted at the
 /// boundary — the SDK's `RpcInvocationData` / `RpcError` never leak into
 /// caller-facing code.
-/// Names of every video track on a config, regardless of transport. Used
-/// when registering metrics and sync-buffer slots, since the consumer-facing
-/// API doesn't distinguish WebRTC and frame-video tracks.
-fn combined_track_names(config: &PortalConfig) -> Vec<String> {
-    let mut names: Vec<String> = config.video_tracks.iter().map(|s| s.name.clone()).collect();
-    names.extend(config.frame_video_tracks.iter().map(|s| s.name.clone()));
-    names
-}
-
 fn register_handler_on(lp: &LocalParticipant, method: String, handler: RpcHandler) {
     lp.register_rpc_method(method, move |data| {
         let handler = handler.clone();

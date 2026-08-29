@@ -31,8 +31,7 @@ mod video;
 
 pub use codec::Codec;
 pub use config::{
-    ChunkSpec, DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, FrameVideoSpec, PortalConfig,
-    VideoTrackSpec,
+    ChunkSpec, DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, VideoTrackSpec,
 };
 pub use config_file::ConfigFileError;
 pub use dtype::DType;

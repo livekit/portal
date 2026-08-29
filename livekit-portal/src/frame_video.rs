@@ -76,7 +76,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::codec::{Codec, decode_frame, encode_frame_into, estimated_encoded_size};
-use crate::config::FrameVideoSpec;
+use crate::config::VideoTrackSpec;
 use crate::error::{PortalError, PortalResult};
 use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
@@ -236,7 +236,7 @@ pub(crate) fn deserialize_frame(bytes: &[u8]) -> Result<DeserializedHeader<'_>, 
 /// the dispatcher needs, so each received frame does one HashMap lookup
 /// instead of three. Built once at `Portal::new` and never mutated.
 pub(crate) struct FrameVideoTrackEntry {
-    pub spec: FrameVideoSpec,
+    pub spec: VideoTrackSpec,
     pub metrics: Arc<TrackMetrics>,
     pub slots: Arc<VideoTrackSlots>,
 }
@@ -250,7 +250,7 @@ pub(crate) struct FrameVideoTrackEntry {
 /// `try_send` boundary (video tolerates loss; latency under load is more
 /// important than fidelity).
 pub(crate) struct FrameVideoPublisher {
-    spec: FrameVideoSpec,
+    spec: VideoTrackSpec,
     tx: mpsc::Sender<Vec<u8>>,
     task: Option<JoinHandle<()>>,
     metrics: Arc<TrackMetrics>,
@@ -258,7 +258,7 @@ pub(crate) struct FrameVideoPublisher {
 
 impl FrameVideoPublisher {
     pub fn new(
-        spec: FrameVideoSpec,
+        spec: VideoTrackSpec,
         local_participant: LocalParticipant,
         metrics: Arc<TrackMetrics>,
     ) -> Self {

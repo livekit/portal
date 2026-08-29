@@ -200,16 +200,36 @@ pub struct FieldSpec {
     pub dtype: DType,
 }
 
-/// One declared byte-stream video track: name, codec, and per-codec
-/// quality. Crosses the FFI boundary so bindings can introspect tracks
-/// declared via `PortalConfig.add_video` with a non-`H264` codec.
-/// `quality` is meaningful for `VideoCodec.Mjpeg` (1..=100) and ignored for
-/// `Raw` / `Png`.
+/// One declared video track: name, codec, and the per-codec options.
+///
+/// One record for every track regardless of transport, mirroring the core
+/// `VideoTrackSpec` — `codec` says which transport it rides and therefore
+/// which options apply. `quality` is meaningful for `VideoCodec.Mjpeg`
+/// (1..=100); `max_bitrate_kbps`, `simulcast` and `screencast` are
+/// meaningful for the WebRTC codecs. Each is ignored by the other transport
+/// — the YAML loader rejects a mismatched option outright, while `add_video`
+/// accepts and ignores it, so a spec may carry a value its codec never
+/// reads. `quality` is the exception: it reads back as `0` on every codec
+/// but `Mjpeg`.
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct FrameVideoSpec {
+pub struct VideoTrackSpec {
     pub name: String,
     pub codec: VideoCodec,
     pub quality: u8,
+    pub max_bitrate_kbps: Option<u32>,
+    pub simulcast: bool,
+    pub screencast: bool,
+}
+
+fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
+    VideoTrackSpec {
+        name: s.name.clone(),
+        codec: s.codec.into(),
+        quality: s.quality,
+        max_bitrate_kbps: s.max_bitrate_kbps,
+        simulcast: s.simulcast,
+        screencast: s.screencast,
+    }
 }
 
 /// A declared action chunk: name, fixed horizon, ordered field list. The
@@ -791,24 +811,21 @@ impl PortalConfig {
         self.inner.lock().set_action_subscription(enable);
     }
 
-    /// Declared WebRTC video track names (H264).
+    /// Names of every declared video track, in declaration order, whatever
+    /// transport its codec selects.
     pub fn video_tracks(&self) -> Vec<String> {
         self.inner.lock().video_track_names().map(String::from).collect()
     }
 
-    /// Declared byte-stream video tracks (Raw / Png / Mjpeg) with codec
-    /// and per-codec quality.
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
-        self.inner
-            .lock()
-            .frame_video_tracks()
-            .iter()
-            .map(|s| FrameVideoSpec {
-                name: s.name.clone(),
-                codec: s.codec.into(),
-                quality: s.quality,
-            })
-            .collect()
+    /// Every declared video track with its codec and options, in declaration
+    /// order. The full readback of what `add_video` was given.
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.lock().video_tracks().iter().map(videotrackspec_from_core).collect()
+    }
+
+    /// The byte-stream subset (Raw / Png / Mjpeg) of `video_track_specs`.
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.inner.lock().frame_video_tracks().map(videotrackspec_from_core).collect()
     }
 
     /// Declared state schema, in declaration order.
@@ -910,7 +927,7 @@ pub struct Portal {
     state_fields: Vec<String>,
     action_fields: Vec<String>,
     video_tracks: Vec<String>,
-    frame_video_tracks: Vec<FrameVideoSpec>,
+    video_track_specs: Vec<VideoTrackSpec>,
     action_chunks: Vec<ChunkSpec>,
 }
 
@@ -925,15 +942,8 @@ impl Portal {
         let state_fields: Vec<String> = cfg.state_fields().map(String::from).collect();
         let action_fields: Vec<String> = cfg.action_fields().map(String::from).collect();
         let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
-        let frame_video_tracks: Vec<FrameVideoSpec> = cfg
-            .frame_video_tracks()
-            .iter()
-            .map(|s| FrameVideoSpec {
-                name: s.name.clone(),
-                codec: s.codec.into(),
-                quality: s.quality,
-            })
-            .collect();
+        let video_track_specs: Vec<VideoTrackSpec> =
+            cfg.video_tracks().iter().map(videotrackspec_from_core).collect();
         let action_chunks: Vec<ChunkSpec> =
             cfg.action_chunks().iter().map(chunkspec_from_core).collect();
 
@@ -976,7 +986,7 @@ impl Portal {
         // with WebRTC tracks on the core side, so a single registration
         // surface works for both — the foreign side only sees one
         // `on_video_frame(track, frame)` event stream per Portal.
-        for track in video_tracks.iter().chain(frame_video_tracks.iter().map(|s| &s.name)) {
+        for track in &video_tracks {
             let cb = callbacks.clone();
             let track_name = track.clone();
             inner.on_video_frame(track, move |_name, frame| {
@@ -1010,7 +1020,7 @@ impl Portal {
             state_fields,
             action_fields,
             video_tracks,
-            frame_video_tracks,
+            video_track_specs,
             action_chunks,
         })
     }
@@ -1120,15 +1130,27 @@ impl Portal {
         self.action_fields.clone()
     }
 
+    /// Names of every declared video track, in declaration order, whatever
+    /// transport its codec selects.
     pub fn video_tracks(&self) -> Vec<String> {
         self.video_tracks.clone()
     }
 
-    /// Declared frame-video tracks (name + codec + quality), in declaration
-    /// order. Frame-video tracks ride a byte-stream channel rather than the
-    /// WebRTC media path; the user-facing send/receive API is the same.
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
-        self.frame_video_tracks.clone()
+    /// Every declared video track with its codec and options, in declaration
+    /// order.
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.video_track_specs.clone()
+    }
+
+    /// The byte-stream subset (Raw / Png / Mjpeg) of `video_track_specs`.
+    /// These ride a byte-stream channel rather than the WebRTC media path;
+    /// the user-facing send/receive API is the same either way.
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.video_track_specs
+            .iter()
+            .filter(|s| !core::Codec::from(s.codec).is_webrtc())
+            .cloned()
+            .collect()
     }
 
     pub fn action_chunks(&self) -> Vec<ChunkSpec> {
@@ -1339,7 +1361,11 @@ impl RobotConfig {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1530,7 +1556,11 @@ impl OperatorConfig {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1660,7 +1690,11 @@ impl Robot {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1800,7 +1834,11 @@ impl Operator {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 

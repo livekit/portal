@@ -148,8 +148,9 @@ config you loaded from YAML instead of building by hand:
 |---|---|---|
 | `session` | `str` | Session name. |
 | `role` | `Role` | Pinned role. |
-| `video_tracks` | `list[str]` | WebRTC track names. |
-| `frame_video_tracks` | `list[FrameVideoSpec]` | Byte-stream tracks with codec and quality. |
+| `video_tracks` | `list[str]` | Names of every declared track, in declaration order, whatever the codec. |
+| `video_track_specs` | `list[VideoTrackSpec]` | Those same tracks with codec, quality, and encoder options. |
+| `frame_video_tracks` | `list[VideoTrackSpec]` | The byte-stream subset of `video_track_specs`. A filter, not a rival list. |
 | `state_schema` / `action_schema` | `list[FieldSpec]` | Declared schemas, in order. |
 | `action_chunks` | `list[ChunkSpec]` | Declared chunks. |
 | `fps` | `int` | `set_fps`. |

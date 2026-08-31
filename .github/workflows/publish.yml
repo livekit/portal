@@ -64,6 +64,23 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y $LINUX_SYSTEM_DEPS
 
+      # NVENC has no cargo feature: webrtc-sys compiles its NVIDIA encoder only
+      # when cuda.h is on disk, so every wheel published before this shipped
+      # software-only H264. cuda.h is all it needs — the NVENC headers are
+      # vendored and the NVIDIA libraries are dlopened, so the wheel still runs
+      # with no GPU. Has to land before the first cargo build.
+      - name: Install CUDA headers for NVENC (Linux x86_64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          . /etc/os-release
+          repo="ubuntu${VERSION_ID//./}"  # NVIDIA's naming: ubuntu2204, ubuntu2404
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            "https://developer.download.nvidia.com/compute/cuda/repos/$repo/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update -y
+          sudo apt-get install -y cuda-cudart-dev-12-6
+          test -f /usr/local/cuda/include/cuda.h
+
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 

@@ -3903,9 +3903,9 @@ dependencies = [
 
 [[package]]
 name = "yuv-sys"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca2dff057a9c81f3db631701d1c0a0530ef7aa349e2f49e76595c7a5d1b5082f"
+checksum = "769d9a5cace19cbafd5cde04054c0bbaaf948dea1fc317121919bac791b1b53d"
 dependencies = [
  "bindgen",
  "cc",

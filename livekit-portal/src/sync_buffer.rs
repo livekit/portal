@@ -213,6 +213,30 @@ impl SyncBuffer {
         to_value_maps(&self.state_schema, values).0
     }
 
+    /// Insert a frame by sender timestamp rather than arrival order. A late
+    /// frame can repair a pending match, so the caller must rerun sync when it
+    /// lands before the current tail.
+    fn insert_frame_sorted(
+        buffer: &mut VecDeque<Arc<VideoFrameData>>,
+        frame: Arc<VideoFrameData>,
+    ) -> bool {
+        let timestamp_us = frame.timestamp_us;
+        let mut low = 0;
+        let mut high = buffer.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if buffer[middle].timestamp_us <= timestamp_us {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+
+        let was_late = low < buffer.len();
+        buffer.insert(low, frame);
+        was_late
+    }
+
     pub fn push_frame(&mut self, track_name: &str, frame: Arc<VideoFrameData>) -> SyncOutput {
         let idx = match self.track_index.get(track_name) {
             Some(&i) => i,
@@ -220,12 +244,17 @@ impl SyncBuffer {
         };
 
         let cap = self.config.video_buffer_size as usize;
-        let buf = &mut self.video_buffers[idx];
-        buf.push_back(frame);
+        let was_late = Self::insert_frame_sorted(&mut self.video_buffers[idx], frame);
+        if was_late {
+            // The cursor points into the old ordering. Rebuilding it is cheap
+            // because the frame buffer is bounded, and avoids indexing the
+            // wrong frame after an insertion before the cursor.
+            self.cursors[idx] = 0;
+        }
 
         let mut evicted = 0usize;
-        while buf.len() > cap {
-            buf.pop_front();
+        while self.video_buffers[idx].len() > cap {
+            self.video_buffers[idx].pop_front();
             evicted += 1;
         }
         if evicted > 0 {
@@ -239,12 +268,13 @@ impl SyncBuffer {
 
         // Skip try_sync when this push cannot have changed head-state matchability:
         //   - another track is blocking (a push to a non-blocker doesn't unblock it), AND
+        //   - this was an append (a late frame can repair a match on any track), AND
         //   - no eviction happened on this track (eviction can newly-transition a track
         //     from matching → unmatchable, which must be checked).
         let should_run = match self.blocker {
             None => true,
             Some(b) if b == idx => true,
-            Some(_) => evicted > 0,
+            Some(_) => was_late || evicted > 0,
         };
 
         if should_run { self.try_sync() } else { SyncOutput::empty() }
@@ -655,6 +685,45 @@ mod tests {
         assert_eq!(cam_buf.len(), 2);
         assert_eq!(cam_buf[0].timestamp_us, 200);
         assert_eq!(cam_buf[1].timestamp_us, 300);
+    }
+
+    #[test]
+    fn late_frames_are_matched_by_timestamp() {
+        let tracks = vec!["cam1".to_string()];
+        let fields = vec!["j1".to_string()];
+        let config =
+            SyncConfig { video_buffer_size: 5, search_range_us: 1_000, ..Default::default() };
+        let mut buf = mk(&tracks, fields, config);
+
+        // The 3_000us frame arrives after 5_000us. Arrival order is not
+        // sender-time order on a real network.
+        for ts in [1_000, 5_000, 3_000] {
+            let _ = push_f(&mut buf, "cam1", ts);
+        }
+
+        let out = buf.push_state(3_500, vec![1.0]);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam1"].timestamp_us, 3_000);
+        assert_eq!(buf.video_buffers[0][0].timestamp_us, 5_000);
+    }
+
+    #[test]
+    fn late_frames_keep_horizon_drop_correct() {
+        let tracks = vec!["cam1".to_string()];
+        let fields = vec!["j1".to_string()];
+        let config =
+            SyncConfig { video_buffer_size: 5, search_range_us: 1_000, ..Default::default() };
+        let mut buf = mk(&tracks, fields, config);
+
+        // The newest sender timestamp is 5_000 even though the last frame to
+        // arrive is 1_000. A state at 3_500 is permanently out of range.
+        for ts in [5_000, 1_000] {
+            let _ = push_f(&mut buf, "cam1", ts);
+        }
+
+        let out = buf.push_state(3_500, vec![1.0]);
+        assert!(out.observations.is_empty());
+        assert_eq!(out.drops.len(), 1);
     }
 
     #[test]

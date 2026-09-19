@@ -70,8 +70,10 @@ You do not set the buffer sizes directly. Both come from `slack`, which defaults
 to 5. `search_range_us` comes from `tolerance / fps`, which is 50 ms at the
 defaults.
 
-Both deques are time-sorted in the common case, because the sender's clock is
-monotonic. The algorithm leans on that throughout.
+The state deque follows the sender's publishing order. Each video deque is
+kept sorted by sender timestamp even when frames arrive late or out of order.
+The algorithm leans on that ordering for matching and for deciding when a
+state has moved past its search horizon.
 
 ## The matching rule
 
@@ -96,6 +98,11 @@ that old frame out.
 The `>=` is deliberate. It mirrors the strict `<` in the match rule. A frame
 landing exactly at `S + R` is not a match, and no future frame can be either, so
 the state drops.
+
+Late video frames are inserted into the bounded per-track deque by timestamp.
+This lets a frame that arrived behind newer video repair a state that is still
+buffered. If the deque is already full, the oldest sender-time frame is evicted
+as usual; a frame that arrives after that point cannot be recovered by Portal.
 
 Those three outcomes are the state machine the algorithm runs per head state on
 every push.

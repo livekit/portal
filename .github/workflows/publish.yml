@@ -81,6 +81,13 @@ jobs:
           sudo apt-get install -y cuda-cudart-dev-12-6
           test -f /usr/local/cuda/include/cuda.h
 
+      # webrtc-sys 0.3.44+ needs clang 21+ for libwebrtc's hermetic libc++;
+      # the runner ships clang 18. Sets CC/CXX for the steps below. macOS
+      # builds with Apple clang and is unaffected.
+      - name: Install clang for webrtc-sys (Linux)
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-clang.sh
+
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
 

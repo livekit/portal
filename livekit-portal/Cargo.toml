@@ -9,7 +9,7 @@ license = { workspace = true }
 # TLS backend (its comment: "By default ws TLS is not enabled"). Without this
 # the signal client's HTTPS requests (/settings/regions, the WSS upgrade) fail
 # against LiveKit Cloud. Matches livekit-ffi's default.
-livekit = { version = "0.8.3", features = ["rustls-tls-native-roots"] }
+livekit = { version = "0.9.1", features = ["rustls-tls-native-roots"] }
 yuv-sys = "0.3.14"
 thiserror = { workspace = true }
 parking_lot = { workspace = true }

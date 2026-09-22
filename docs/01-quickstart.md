@@ -34,8 +34,8 @@ uv add livekit-portal livekit-api numpy
 `livekit-portal` is the library. `livekit-api` is only used here to mint
 access tokens, which is normally a server-side job. `numpy` carries the frames.
 
-Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc 2.35 and newer),
-Linux aarch64 (glibc 2.39 and newer), and macOS Apple Silicon. Anything else
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 and aarch64 (glibc 2.35 and
+newer) and macOS Apple Silicon. Anything else
 needs a [source build](#build-from-source).
 
 ## 2. Set your credentials

@@ -122,8 +122,8 @@ payloads. RPC for one-shots. Rust core, Python bindings via UniFFI.
 pip install livekit-portal      # or: uv add livekit-portal
 ```
 
-Prebuilt wheels cover CPython 3.12 on Linux x86_64 (glibc 2.35 and newer), Linux
-aarch64 (glibc 2.39 and newer), and macOS Apple Silicon. On anything else, build
+Prebuilt wheels cover CPython 3.12 on Linux x86_64 and aarch64 (glibc 2.35 and
+newer) and macOS Apple Silicon. On anything else, build
 from source. The library itself supports Python 3.10 and up.
 
 Already on lerobot? `pip install lerobot-robot-livekit` and

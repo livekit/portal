@@ -389,9 +389,7 @@ impl SyncBuffer {
             buf.clear();
         }
         self.state_buffer.clear();
-        for c in &mut self.cursors {
-            *c = 0;
-        }
+        self.cursors.fill(0);
         for slot in &mut self.last_emitted_frames {
             *slot = None;
         }

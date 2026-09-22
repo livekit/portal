@@ -61,7 +61,10 @@ VideoCodec = _ffi.VideoCodec
 FrameSource = _ffi.FrameSource
 StallBehavior = _ffi.StallBehavior
 FieldSpec = _ffi.FieldSpec
-FrameVideoSpec = _ffi.FrameVideoSpec
+VideoTrackSpec = _ffi.VideoTrackSpec
+# Deprecated alias. `FrameVideoSpec` was the byte-stream-only record; there is
+# now one spec type for every track, and `frame_video_tracks` returns it.
+FrameVideoSpec = VideoTrackSpec
 ChunkSpec = _ffi.ChunkSpec
 VideoFrameData = _ffi.VideoFrame
 PortalMetrics = _ffi.PortalMetrics
@@ -78,19 +81,6 @@ RpcError = _ffi.RpcError
 # Default JPEG quality for `add_video` with `VideoCodec.MJPEG` when no
 # explicit value is given. Mirrors the Rust core's `DEFAULT_MJPEG_QUALITY`.
 DEFAULT_MJPEG_QUALITY: int = 90
-
-# Codecs that ride the WebRTC media path. The rest ride the per-frame
-# byte-stream channel. Mirrors the Rust core's `Codec::is_webrtc`; used to
-# route `add_video` declarations into the right Python-side mirror list.
-_WEBRTC_CODECS = frozenset(
-    {
-        VideoCodec.H264,
-        VideoCodec.VP8,
-        VideoCodec.VP9,
-        VideoCodec.AV1,
-        VideoCodec.H265,
-    }
-)
 
 # A schema entry accepted by add_state_typed/add_action_typed. Either a
 # FieldSpec (record passthrough) or a (name, dtype) tuple — the latter is
@@ -715,8 +705,8 @@ class _RpcHandlerAdapter(_ffi.RpcHandler):
 class PortalConfig:
     """Builder for a Portal session.
 
-    State (`video_tracks`, `state_schema`, `action_schema`) is mirrored in
-    Python for fast lookup — the Rust side owns the authoritative copy.
+    State (`video_track_specs`, `state_schema`, `action_schema`) is mirrored
+    in Python for fast lookup — the Rust side owns the authoritative copy.
     Use `add_state_typed` / `add_action_typed` with `(name, DType)` pairs to
     declare fields.
     """
@@ -725,8 +715,7 @@ class PortalConfig:
         "_inner",
         "_session",
         "_role",
-        "_video_tracks",
-        "_frame_video_tracks",
+        "_video_track_specs",
         "_state_schema",
         "_action_schema",
         "_action_chunks",
@@ -736,8 +725,7 @@ class PortalConfig:
         self._inner = _ffi.PortalConfig(session, role)
         self._session = session
         self._role = role
-        self._video_tracks: List[str] = []
-        self._frame_video_tracks: List[FrameVideoSpec] = []
+        self._video_track_specs: List[VideoTrackSpec] = []
         self._state_schema: List[FieldSpec] = []
         self._action_schema: List[FieldSpec] = []
         self._action_chunks: List[ChunkSpec] = []
@@ -793,8 +781,7 @@ class PortalConfig:
         instance._inner = inner
         instance._session = session
         instance._role = role
-        instance._video_tracks = list(inner.video_tracks())
-        instance._frame_video_tracks = list(inner.frame_video_tracks())
+        instance._video_track_specs = list(inner.video_track_specs())
         instance._state_schema = list(inner.state_schema())
         instance._action_schema = list(inner.action_schema())
         instance._action_chunks = list(inner.action_chunks())
@@ -810,11 +797,33 @@ class PortalConfig:
 
     @property
     def video_tracks(self) -> List[str]:
-        return list(self._video_tracks)
+        """Names of every declared video track, in declaration order.
+
+        Every name passed to `add_video` is here, whatever codec it was
+        given — the codec picks the wire transport, not whether the track
+        counts as declared. For the codecs and encoder options too, see
+        `video_track_specs`.
+        """
+        return [s.name for s in self._video_track_specs]
 
     @property
-    def frame_video_tracks(self) -> List[FrameVideoSpec]:
-        return list(self._frame_video_tracks)
+    def video_track_specs(self) -> List[VideoTrackSpec]:
+        """Every declared video track with its codec and options, in
+        declaration order. The full readback of what `add_video` was given.
+        """
+        return list(self._video_track_specs)
+
+    @property
+    def frame_video_tracks(self) -> List[VideoTrackSpec]:
+        """The byte-stream subset of `video_track_specs` — the tracks whose
+        codec (`RAW` / `PNG` / `MJPEG`) rides a per-frame byte stream rather
+        than the WebRTC media path.
+
+        A filtered view, not a second list: everything here is also in
+        `video_tracks`. Callers that only want to know what was declared
+        want `video_tracks`.
+        """
+        return list(self._inner.frame_video_tracks())
 
     @property
     def state_fields(self) -> List[str]:
@@ -905,6 +914,9 @@ class PortalConfig:
     ) -> None:
         """Declare a video track.
 
+        Every declared track — whatever its codec — comes back from
+        `video_tracks`, `video_track_specs`, and `on_video_frame`.
+
         `codec` picks both the encoding and the wire transport. The
         user-facing send/receive API is identical regardless of codec —
         `send_video_frame` accepts RGB and `on_video_frame` /
@@ -973,12 +985,7 @@ class PortalConfig:
             stall_behavior,
             max_lag_ms,
         )
-        if codec in _WEBRTC_CODECS:
-            self._video_tracks.append(name)
-        else:
-            self._frame_video_tracks.append(
-                FrameVideoSpec(name=name, codec=codec, quality=quality)
-            )
+        self._video_track_specs = list(self._inner.video_track_specs())
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
         """Declare state fields with per-field dtype.
@@ -1532,10 +1539,32 @@ class _RoleConfigBase:
 
     @property
     def video_tracks(self) -> List[str]:
+        """Names of every declared video track, in declaration order.
+
+        Every name passed to `add_video` is here, whatever codec it was
+        given — the codec picks the wire transport, not whether the track
+        counts as declared. For the codecs and encoder options too, see
+        `video_track_specs`.
+        """
         return list(self._inner.video_tracks())
 
     @property
-    def frame_video_tracks(self) -> List[FrameVideoSpec]:
+    def video_track_specs(self) -> List[VideoTrackSpec]:
+        """Every declared video track with its codec and options, in
+        declaration order. The full readback of what `add_video` was given.
+        """
+        return list(self._inner.video_track_specs())
+
+    @property
+    def frame_video_tracks(self) -> List[VideoTrackSpec]:
+        """The byte-stream subset of `video_track_specs` — the tracks whose
+        codec (`RAW` / `PNG` / `MJPEG`) rides a per-frame byte stream rather
+        than the WebRTC media path.
+
+        A filtered view, not a second list: everything here is also in
+        `video_tracks`. Callers that only want to know what was declared
+        want `video_tracks`.
+        """
         return list(self._inner.frame_video_tracks())
 
     @property
@@ -2061,6 +2090,7 @@ __all__ = [
     "FrameSource",
     "StallBehavior",
     "FieldSpec",
+    "VideoTrackSpec",
     "FrameVideoSpec",
     "ChunkSpec",
     "TypedScalar",

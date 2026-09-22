@@ -239,9 +239,9 @@ The test covering it is `fair_share_prevents_stealing` in `sync_buffer.rs`.
 
 ### Optional: stale-frame reuse
 
-Enabling `reuse_stale_frames` turns the drop outcome into a **reuse** outcome,
-once a track has emitted at least once. Video freezes on a recent frame while
-state keeps flowing.
+`stall_behavior: freeze` turns the drop outcome into a **reuse** outcome, once a track
+has emitted at least once. Video freezes on a recent frame while state keeps
+flowing.
 
 There are two distinct fallbacks, and Portal prefers the first.
 
@@ -304,15 +304,29 @@ loop:
             matched[track_i] = best
             continue
 
-        if reuse_stale_frames:
+        # Waiting cannot help once the newest buffered frame is past the
+        # horizon; otherwise wait until the stream clock passes max_lag.
+        unmatchable = buf and buf.back().ts >= S + R
+        lagged = logical_now() - S >= max_lag[track_i]
+        if not unmatchable and not lagged:
+            iter_blocker ??= track_i
+            continue
+
+        if stall_behavior[track_i] == freeze:
             if cursor frame is <= S and out of range:
-                matched[track_i] = (cursor, stale)      # drains
+                matched[track_i] = (cursor, Stale)       # drains
                 continue
             if last_emitted[track_i]:
-                matched[track_i] = (last_emitted, stale) # no drain
+                matched[track_i] = (last_emitted, Stale) # no drain
+                continue
+        elif stall_behavior[track_i] == omit:
+            if last_emitted[track_i]:                    # geometry source
+                matched[track_i] = (placeholder, Omitted)
                 continue
 
-        if buf.empty():
+        # freeze/omit reach here only before the track's first frame, with
+        # nothing to substitute. Keep waiting if a frame could still match.
+        if not unmatchable and stall_behavior[track_i] != drop:
             iter_blocker ??= track_i
             continue
 
@@ -382,20 +396,82 @@ in `[S - R, S + R]`, or dropped once any track's newest frame passes `S + R`.
 **Memory.** Bounded by `video_buffer_size × tracks + state_buffer_size`, plus one
 latest-wins observation slot and one last-emitted frame per track.
 
-## Design choices not made
+## Stalled tracks
 
-**No deadline-based drop.** A state waits indefinitely while an older frame sits
-in the buffer, because a newer matching frame could still arrive. If the track
-stalls permanently, the state blocks the head until capacity-driven eviction
-resolves it. A wall-clock deadline would be more aggressive. It is not
-implemented, because eviction plus the drop rule already covers the failure modes
-and a deadline would add a time-source dependency.
+A track that stops sending would otherwise strand the head state. Two per-track
+knobs decide what happens: `max_lag` is how long to wait, `stall_behavior` is what to
+do when the wait is over.
+
+Both are read by the receiving side, since `SyncBuffer` lives there (it is built
+in `setup_operator` and fed from the receive paths). Nothing about a stall is
+transmitted: a silent track is sending nothing by definition, so `omit`
+synthesizes its stand-in locally rather than moving pixels over the wire.
+
+**`max_lag`** is measured against the *stream clock* — the largest sender
+timestamp buffered across every stream, states and all video tracks. It advances
+whenever any stream is still flowing, which is how a silent track is detected
+through the clocks of the tracks that are not silent. It defaults to
+`slack / fps`, the point at which state-buffer capacity would have evicted the
+moment anyway, so the default timing matches earlier versions.
+
+The one case that genuinely changes: capacity eviction only runs on `push_state`,
+so if state output also paused, the head previously waited forever. It now
+resolves as soon as any other stream advances past the budget.
+
+**`stall_behavior`** picks the outcome. All three are terminal.
+
+| | result | frame tagged |
+|---|---|---|
+| `drop` | No observation. The state still reaches the drop callback, but the healthy tracks in that moment are discarded with it. | — |
+| `freeze` | That track's last good frame. Video freezes while state keeps flowing. | `Stale` |
+| `omit` | A synthesized placeholder — magenta diagonals with the track name — so the healthy tracks stay visible. | `Omitted` |
+
+`omit` does **not** remove the map key. `frames[name]` is still present for every
+declared track, which is why enabling it cannot start raising `KeyError` in code
+that was written before it existed.
+
+Before a track's first frame, `freeze` has nothing to reuse and `omit` has no
+geometry to synthesize from, so both wait through that startup window and then
+fall back to `drop`.
+
+**Tell the three apart at the frame.** Every frame in an observation carries a
+`FrameSource` of `Live`, `Stale`, or `Omitted`. Only `Live` is a measurement of
+the observation's timestamp; the other two are substitutes attached to it. Check
+it before feeding an observation to a policy or writing it to a dataset. `Stale`
+and `Omitted` frames keep the *real* frame's timestamp, so the true age is
+`observation.timestamp_us - frame.timestamp_us`.
+
+Per-track policies are the point: a wrist camera a policy depends on may warrant
+`drop`, since no observation beats a confidently wrong one, while a scene camera
+warrants `omit` so its failure does not take the rest of the frame set down with
+it.
+
+```yaml
+stall_behavior: omit          # default for every track
+max_lag_ms: 150
+videos:
+  - { name: wrist, codec: h264, stall_behavior: drop, max_lag_ms: 40 }
+  - { name: scene, codec: h264 }
+```
+
+`reuse_stale_frames` is retained as a deprecated alias for `stall_behavior: freeze`
+with `max_lag_ms: 0`.
+
+## Design choices not made
 
 **No interpolation.** For each head state, Portal picks the nearest frame per
 track rather than interpolating between the two frames that bracket it. Nearest
 neighbour is cheaper and matches what most policies expect. Interpolation, or its
 mirror of interpolating state to a frame timestamp, would be a separate opt-in
 mode.
+
+**No wall clock.** `max_lag` is measured in sender-clock time, never wall-clock,
+so a given packet sequence always produces the same sync decisions regardless of
+machine or scheduling. The consequence is that it is not a watchdog: it is
+evaluated when a packet arrives, so a burst of buffered frames can cross the
+budget in far less real time than the number suggests, and if *every* stream goes
+silent nothing resolves at all. That last case is harmless — with no stream
+advancing there is nothing to emit either.
 
 **No coalescing of state callbacks.** Every state packet fires `on_state` even if
 the consumer cannot keep up. The observation path is where synced and paced data
@@ -415,7 +491,8 @@ user-facing knobs.
 | `video_buffer_size` | `slack` | 5 | Frames buffered per track. Larger tolerates more jitter and longer stalls, at the cost of staleness. |
 | `state_buffer_size` | `slack` | 5 | States buffered awaiting a match. Larger tolerates longer video stalls before eviction. |
 | `search_range_us` | `tolerance / fps` | 50 000 | Match window half-width. Wider means fewer drops under jitter and looser alignment. |
-| `reuse_stale_frames` | `reuse_stale_frames` | `false` | Whether the drop outcome becomes a reuse outcome. |
+| `default_stall.max_lag_us` | `slack / fps` | 166 666 | How far the stream clock may run past a moment before it resolves without a silent track. |
+| `default_stall.behavior` | `stall_behavior` | `drop` | How that moment resolves: `drop`, `freeze`, or `omit`. |
 
 Keep `tolerance` at 1 or above so the window covers at least one inter-frame
 interval. Tighter than that and ordinary jitter starts producing drops.

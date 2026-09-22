@@ -25,6 +25,7 @@ from livekit.portal import (
     PortalError,
     RobotConfig,
     Role,
+    StallBehavior,
     VideoCodec,
 )
 
@@ -631,3 +632,31 @@ def test_send_action_passes_in_reply_to_ts_us_through_validator():
         pytest.fail("in_reply_to_ts_us must not affect dtype validation")
     except PortalError:
         pass
+
+
+def test_stall_policy_enum_is_exposed():
+    assert [p.name for p in StallBehavior] == ["DROP", "FREEZE", "OMIT"]
+
+
+def test_stall_setters_accept_global_and_per_track():
+    """The knobs exist on every config wrapper and take the enum, not a
+    string — a typo should be a NameError at author time, not a silent
+    fallback to the default at runtime."""
+    for cfg in (PortalConfig("demo", Role.ROBOT), RobotConfig("demo"), OperatorConfig("demo")):
+        cfg.set_stall_behavior(StallBehavior.FREEZE)
+        cfg.set_max_lag_ms(200)
+        cfg.set_track_stall_behavior("scene", StallBehavior.OMIT)
+        cfg.set_track_max_lag_ms("wrist", 20)
+
+
+def test_max_lag_zero_is_accepted():
+    """0 means resolve immediately; it must not be mistaken for unset."""
+    cfg = RobotConfig("demo")
+    cfg.set_max_lag_ms(0)
+
+
+def test_reuse_stale_frames_still_works():
+    """The deprecated alias keeps working for existing callers."""
+    cfg = RobotConfig("demo")
+    cfg.set_reuse_stale_frames(True)
+    assert cfg.reuse_stale_frames is True

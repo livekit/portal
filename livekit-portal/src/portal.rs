@@ -415,8 +415,7 @@ impl Portal {
             return Err(PortalError::AlreadyConnected);
         }
 
-        static OTHER_SDKS_VALUE: &str =
-            concat!("portal:", env!("CARGO_PKG_VERSION"));
+        static OTHER_SDKS_VALUE: &str = concat!("portal:", env!("CARGO_PKG_VERSION"));
 
         let mut options = RoomOptions::default();
         options.sdk_options.other_sdks = Some(OTHER_SDKS_VALUE.to_string());
@@ -1297,6 +1296,7 @@ impl Portal {
             &self.all_track_names,
             self.config.state_schema.clone(),
             self.config.sync_config(),
+            self.config.stall_configs(&self.all_track_names),
             self.metrics.clone(),
         )));
         *self.sync_buffer.lock() = Some(sync_buffer);

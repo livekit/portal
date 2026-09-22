@@ -35,7 +35,7 @@ use serde::Deserialize;
 use crate::codec::Codec;
 use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig};
 use crate::dtype::DType;
-use crate::types::Role;
+use crate::types::{Role, StallBehavior};
 
 /// Errors raised by `PortalConfig::from_yaml_*`.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +57,19 @@ pub enum ConfigFileError {
 /// lands.
 const SUPPORTED_VERSION: u32 = 1;
 
+/// Parse an `stall_behavior` value. Spelled in lowercase in YAML to match the rest
+/// of the file's vocabulary; `context` names the key for the error message.
+fn parse_stall_behavior(s: &str, context: &str) -> Result<StallBehavior, ConfigFileError> {
+    match s {
+        "drop" => Ok(StallBehavior::Drop),
+        "freeze" => Ok(StallBehavior::Freeze),
+        "omit" => Ok(StallBehavior::Omit),
+        other => Err(ConfigFileError::Invalid(format!(
+            "{context}: expected one of drop, freeze, omit — got '{other}'"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFileV1 {
@@ -74,6 +87,13 @@ struct ConfigFileV1 {
     action_reliable: Option<bool>,
     #[serde(default)]
     reuse_stale_frames: Option<bool>,
+    /// Default stall behavior: `drop` (default), `freeze`, or `omit`.
+    #[serde(default)]
+    stall_behavior: Option<String>,
+    /// Default lag budget in milliseconds of sender-clock time. Omit to
+    /// derive it from `slack` and `fps`.
+    #[serde(default)]
+    max_lag_ms: Option<u32>,
     #[serde(default)]
     ping_ms: Option<u64>,
     #[serde(default)]
@@ -102,6 +122,12 @@ struct VideoEntry {
     /// codecs. Omit to use the default ceiling.
     #[serde(default)]
     max_bitrate_kbps: Option<u32>,
+    /// Per-track override of the top-level `stall_behavior`.
+    #[serde(default)]
+    stall_behavior: Option<String>,
+    /// Per-track override of the top-level `max_lag_ms`.
+    #[serde(default)]
+    max_lag_ms: Option<u32>,
     /// Publish multiple spatial layers. WebRTC codecs only. Defaults to
     /// `false`.
     #[serde(default)]
@@ -233,7 +259,23 @@ impl PortalConfig {
             cfg.set_action_reliable(v);
         }
         if let Some(v) = parsed.reuse_stale_frames {
-            cfg.set_reuse_stale_frames(v);
+            // Deprecated alias; `stall_for` folds it into the stall behavior.
+            cfg.reuse_stale_frames = v;
+        }
+        if let Some(v) = &parsed.stall_behavior {
+            cfg.set_stall_behavior(parse_stall_behavior(v, "stall_behavior")?);
+        }
+        if let Some(v) = parsed.max_lag_ms {
+            cfg.set_max_lag_ms(v);
+        }
+        for v in &parsed.videos {
+            if let Some(p) = &v.stall_behavior {
+                let ctx = format!("video '{}': stall_behavior", v.name);
+                cfg.set_track_stall_behavior(v.name.clone(), parse_stall_behavior(p, &ctx)?);
+            }
+            if let Some(ms) = v.max_lag_ms {
+                cfg.set_track_max_lag_ms(v.name.clone(), ms);
+            }
         }
         if let Some(v) = parsed.ping_ms {
             cfg.set_ping_ms(v);
@@ -678,5 +720,63 @@ state:
         let operator = PortalConfig::from_yaml_str(yaml_full(), "demo", Role::Operator).unwrap();
         assert_eq!(robot.state_schema(), operator.state_schema());
         assert_eq!(robot.action_schema(), operator.action_schema());
+    }
+
+    /// Stall knobs parse at both levels, with per-track overriding the
+    /// default and untouched tracks inheriting it.
+    #[test]
+    fn stall_policy_parses_per_track() {
+        let yaml = r#"
+version: 1
+stall_behavior: freeze
+max_lag_ms: 120
+videos:
+  - { name: front, codec: h264 }
+  - { name: wrist, codec: h264, stall_behavior: drop, max_lag_ms: 20 }
+  - { name: scene, codec: h264, stall_behavior: omit }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+
+        let front = cfg.stall_for("front");
+        assert_eq!(front.behavior, StallBehavior::Freeze, "inherits the default");
+        assert_eq!(front.max_lag_us, Some(120_000));
+
+        let wrist = cfg.stall_for("wrist");
+        assert_eq!(wrist.behavior, StallBehavior::Drop);
+        assert_eq!(wrist.max_lag_us, Some(20_000));
+
+        let scene = cfg.stall_for("scene");
+        assert_eq!(scene.behavior, StallBehavior::Omit);
+        assert_eq!(scene.max_lag_us, Some(120_000), "budget still inherited");
+    }
+
+    /// An unknown policy is rejected by name rather than silently ignored,
+    /// and the message says which key was wrong.
+    #[test]
+    fn unknown_stall_policy_is_rejected() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: front, codec: h264, stall_behavior: nope }
+"#;
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("front"), "names the offending track: {msg}");
+        assert!(msg.contains("stall_behavior"), "names the key: {msg}");
+        assert!(msg.contains("nope"), "quotes the bad value: {msg}");
+    }
+
+    /// Omitting both keys leaves the derived default in place.
+    #[test]
+    fn stall_defaults_when_absent() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: front, codec: h264 }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        let s = cfg.stall_for("front");
+        assert_eq!(s.behavior, StallBehavior::Drop);
+        assert_eq!(s.max_lag_us, Some(5 * 1_000_000 / 30), "slack / fps");
     }
 }

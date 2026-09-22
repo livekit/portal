@@ -20,6 +20,7 @@ pub mod dtype;
 pub mod error;
 mod frame_video;
 pub mod metrics;
+mod placeholder;
 mod portal;
 pub mod rpc;
 mod rtt;
@@ -43,6 +44,6 @@ pub use metrics::{
 pub use portal::{ACTIVE_OPERATOR_ATTR_KEY, Portal, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
-    Action, ActionChunk, ChunkColumn, Observation, Role, State, SyncConfig, TypedValue,
-    VideoFrameData,
+    Action, ActionChunk, ChunkColumn, FrameSource, Observation, Role, StallBehavior, StallConfig,
+    State, SyncConfig, TypedValue, VideoFrameData,
 };

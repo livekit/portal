@@ -58,6 +58,8 @@ from ._frame import frame_bytes_to_numpy_rgb
 Role = _ffi.Role
 DType = _ffi.DType
 VideoCodec = _ffi.VideoCodec
+FrameSource = _ffi.FrameSource
+StallBehavior = _ffi.StallBehavior
 FieldSpec = _ffi.FieldSpec
 FrameVideoSpec = _ffi.FrameVideoSpec
 ChunkSpec = _ffi.ChunkSpec
@@ -289,6 +291,12 @@ class Observation:
     `state` holds Python-native types per the declared state schema;
     `raw_state` keeps the f64 dict. `frames` is unchanged from the FFI
     layer — one entry per registered video track.
+
+    Every registered track always has an entry, even when it went silent:
+    check `frames[name].source` to tell a real match (`FrameSource.LIVE`)
+    from a reused earlier frame (`FrameSource.STALE`) or a synthesized
+    placeholder (`FrameSource.OMITTED`). Only `LIVE` frames are
+    measurements of `timestamp_us`.
     """
 
     state: Dict[str, TypedScalar]
@@ -892,6 +900,8 @@ class PortalConfig:
         *,
         simulcast: Optional[bool] = None,
         screencast: Optional[bool] = None,
+        stall_behavior: Optional["StallBehavior"] = None,
+        max_lag_ms: Optional[int] = None,
     ) -> None:
         """Declare a video track.
 
@@ -924,6 +934,12 @@ class PortalConfig:
         `simulcast` and `screencast` are keyword-only, apply to the WebRTC
         codecs only, and both default to `False`.
 
+        `stall_behavior` and `max_lag_ms` are keyword-only per-track overrides
+        of `set_stall_behavior` / `set_max_lag_ms`, given here so a track's
+        whole configuration reads in one place. `None` on either inherits the
+        config-wide default. Both are read on the receiving side, so they have
+        no effect in a `RobotConfig`.
+
           * `simulcast=True` publishes several spatial layers at once so the
             SFU can hand each subscriber the layer their link can carry. Costs
             encode CPU per extra layer. Worth it only when several operators
@@ -948,7 +964,14 @@ class PortalConfig:
         usually does.
         """
         self._inner.add_video(
-            name, codec, quality, max_bitrate_kbps, simulcast, screencast
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
         )
         if codec in _WEBRTC_CODECS:
             self._video_tracks.append(name)
@@ -1035,8 +1058,69 @@ class PortalConfig:
         or logging where losing state is worse than a transient video freeze.
         Leave off for real-time control where a stale frame would misalign
         the perception/action loop.
+
+        .. deprecated::
+            Use ``set_stall_behavior(StallBehavior.FREEZE)``, which is this plus
+            ``set_max_lag_ms(0)``.
         """
         self._inner.set_reuse_stale_frames(enable)
+
+    def set_stall_behavior(self, policy: "StallBehavior") -> None:
+        """How a moment is resolved when a video track goes silent for longer
+        than its `max_lag`. Applies to every track without a per-track
+        override; see `set_track_stall_behavior`.
+
+        **Receiving side only.** Observations are assembled where they are
+        consumed, so this is read on the `Operator` and is a no-op on
+        `RobotConfig`. Nothing about a stall crosses the wire: a silent track
+        is by definition sending nothing, so the substitute frame is
+        synthesized locally by the subscriber that noticed the gap.
+
+        `StallBehavior.DROP` (the default) emits no observation — the state
+        still reaches the drop callback, but the healthy tracks in that
+        moment go with it, so an operator screen stays dark while one camera
+        is down. `StallBehavior.FREEZE` holds the silent track's last good
+        frame. `StallBehavior.OMIT` substitutes a visible placeholder, so the
+        healthy tracks keep flowing.
+
+        Whichever fires, the frame carries a `FrameSource` saying which it
+        was. Check `frames[name].source` before feeding an observation to a
+        policy or writing it to a dataset.
+        """
+        self._inner.set_stall_behavior(policy)
+
+    def set_max_lag_ms(self, ms: int) -> None:
+        """How far the fastest-advancing stream may run past a moment before
+        that moment resolves without a silent track — in milliseconds of
+        **sender-clock time**, not wall-clock.
+
+        This is a statement about stream position, not a stopwatch. It is
+        evaluated when a packet arrives, so a burst of buffered frames can
+        cross it in far less real time, and if every stream goes quiet
+        nothing fires at all (nothing is being emitted either). Staying on
+        sender clocks is what keeps sync decisions reproducible.
+
+        Defaults to `slack / fps` — where state-buffer capacity would have
+        evicted the moment anyway — so the default timing is unchanged from
+        earlier versions. `0` resolves immediately, without waiting.
+
+        **Receiving side only**, like `set_stall_behavior`.
+        """
+        self._inner.set_max_lag_ms(ms)
+
+    def set_track_stall_behavior(self, track: str, policy: "StallBehavior") -> None:
+        """Per-track override for `set_stall_behavior`.
+
+        Use it when tracks differ in how load-bearing they are: a wrist
+        camera a policy depends on may warrant `DROP` (no observation beats
+        a wrong one), while a scene camera warrants `OMIT` so its failure
+        does not take the rest of the frame set down with it.
+        """
+        self._inner.set_track_stall_behavior(track, policy)
+
+    def set_track_max_lag_ms(self, track: str, ms: int) -> None:
+        """Per-track override for `set_max_lag_ms`."""
+        self._inner.set_track_max_lag_ms(track, ms)
 
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions.
@@ -1527,9 +1611,18 @@ class _RoleConfigBase:
         *,
         simulcast: Optional[bool] = None,
         screencast: Optional[bool] = None,
+        stall_behavior: Optional["StallBehavior"] = None,
+        max_lag_ms: Optional[int] = None,
     ) -> None:
         self._inner.add_video(
-            name, codec, quality, max_bitrate_kbps, simulcast, screencast
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
         )
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
@@ -1569,6 +1662,18 @@ class _RoleConfigBase:
 
     def set_reuse_stale_frames(self, enable: bool) -> None:
         self._inner.set_reuse_stale_frames(enable)
+
+    def set_stall_behavior(self, policy: "StallBehavior") -> None:
+        self._inner.set_stall_behavior(policy)
+
+    def set_max_lag_ms(self, ms: int) -> None:
+        self._inner.set_max_lag_ms(ms)
+
+    def set_track_stall_behavior(self, track: str, policy: "StallBehavior") -> None:
+        self._inner.set_track_stall_behavior(track, policy)
+
+    def set_track_max_lag_ms(self, track: str, ms: int) -> None:
+        self._inner.set_track_max_lag_ms(track, ms)
 
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions ("HITL
@@ -1953,6 +2058,8 @@ __all__ = [
     "Role",
     "DType",
     "VideoCodec",
+    "FrameSource",
+    "StallBehavior",
     "FieldSpec",
     "FrameVideoSpec",
     "ChunkSpec",

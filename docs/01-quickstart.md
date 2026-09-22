@@ -338,7 +338,10 @@ Build from source when there is no wheel for your platform (Windows, Intel
 macOS, Python 3.10 or 3.11) or when you are changing the Rust core.
 
 You need a [Rust toolchain](https://rustup.rs/) and
-[`uv`](https://docs.astral.sh/uv/).
+[`uv`](https://docs.astral.sh/uv/). On Linux you also need clang 21 or newer
+as `CC`/`CXX`: the bundled libwebrtc's libc++ does not build with older
+compilers. `.github/scripts/install-clang.sh` fetches an official LLVM
+release into `/opt` if your distro has nothing recent enough.
 
 ```bash
 git clone https://github.com/livekit/portal.git

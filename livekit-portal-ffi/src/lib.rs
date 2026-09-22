@@ -200,16 +200,36 @@ pub struct FieldSpec {
     pub dtype: DType,
 }
 
-/// One declared byte-stream video track: name, codec, and per-codec
-/// quality. Crosses the FFI boundary so bindings can introspect tracks
-/// declared via `PortalConfig.add_video` with a non-`H264` codec.
-/// `quality` is meaningful for `VideoCodec.Mjpeg` (1..=100) and ignored for
-/// `Raw` / `Png`.
+/// One declared video track: name, codec, and the per-codec options.
+///
+/// One record for every track regardless of transport, mirroring the core
+/// `VideoTrackSpec` — `codec` says which transport it rides and therefore
+/// which options apply. `quality` is meaningful for `VideoCodec.Mjpeg`
+/// (1..=100); `max_bitrate_kbps`, `simulcast` and `screencast` are
+/// meaningful for the WebRTC codecs. Each is ignored by the other transport
+/// — the YAML loader rejects a mismatched option outright, while `add_video`
+/// accepts and ignores it, so a spec may carry a value its codec never
+/// reads. `quality` is the exception: it reads back as `0` on every codec
+/// but `Mjpeg`.
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct FrameVideoSpec {
+pub struct VideoTrackSpec {
     pub name: String,
     pub codec: VideoCodec,
     pub quality: u8,
+    pub max_bitrate_kbps: Option<u32>,
+    pub simulcast: bool,
+    pub screencast: bool,
+}
+
+fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
+    VideoTrackSpec {
+        name: s.name.clone(),
+        codec: s.codec.into(),
+        quality: s.quality,
+        max_bitrate_kbps: s.max_bitrate_kbps,
+        simulcast: s.simulcast,
+        screencast: s.screencast,
+    }
 }
 
 /// A declared action chunk: name, fixed horizon, ordered field list. The
@@ -245,6 +265,70 @@ fn chunk_columns_to_core(data: HashMap<String, ChunkColumn>) -> HashMap<String, 
         .collect()
 }
 
+/// Where the pixels in a delivered frame came from. Mirrors
+/// `livekit_portal::FrameSource`.
+///
+/// Frames delivered on the raw video callbacks are always `Live`. The other
+/// variants appear only on frames inside an `Observation`, when the sync
+/// buffer had to resolve a track that went silent past its `max_lag`.
+/// Check it before feeding an observation to a policy or a dataset — `Stale`
+/// and `Omitted` frames are not measurements of the moment they hang off.
+///
+/// **Foreign binding casing**: UniFFI emits enum variants in the host
+/// language's idiomatic case. Python code uses `FrameSource.LIVE` /
+/// `FrameSource.STALE` / `FrameSource.OMITTED` (UPPER), not the Rust
+/// spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FrameSource {
+    /// A real frame matched to this state within the tolerance window.
+    Live,
+    /// A real frame from an earlier moment, reused because nothing in range
+    /// arrived (`stall_behavior: freeze`). Age is
+    /// `observation.timestamp_us - frame.timestamp_us`.
+    Stale,
+    /// A synthesized placeholder standing in for a silent track
+    /// (`stall_behavior: omit`). Not camera output.
+    Omitted,
+}
+
+impl From<core::FrameSource> for FrameSource {
+    fn from(s: core::FrameSource) -> Self {
+        match s {
+            core::FrameSource::Live => FrameSource::Live,
+            core::FrameSource::Stale => FrameSource::Stale,
+            core::FrameSource::Omitted => FrameSource::Omitted,
+        }
+    }
+}
+
+/// How a moment is resolved when a video track goes silent past its
+/// `max_lag`. Mirrors `livekit_portal::StallBehavior`.
+///
+/// **Foreign binding casing**: UniFFI emits enum variants in the host
+/// language's idiomatic case. Python code uses `StallBehavior.DROP` /
+/// `StallBehavior.FREEZE` / `StallBehavior.OMIT` (UPPER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum StallBehavior {
+    /// Emit no observation. The state still reaches the drop callback, but
+    /// the healthy tracks in that moment are discarded with it.
+    Drop,
+    /// Emit with the track's last good frame, tagged `FrameSource.STALE`.
+    Freeze,
+    /// Emit with a visible placeholder for the silent track, tagged
+    /// `FrameSource.OMITTED`. The map key is still present.
+    Omit,
+}
+
+impl From<StallBehavior> for core::StallBehavior {
+    fn from(p: StallBehavior) -> Self {
+        match p {
+            StallBehavior::Drop => core::StallBehavior::Drop,
+            StallBehavior::Freeze => core::StallBehavior::Freeze,
+            StallBehavior::Omit => core::StallBehavior::Omit,
+        }
+    }
+}
+
 /// Decoded video frame. `data` is packed RGB24 (R,G,B byte order, `W*H*3`
 /// bytes) on both sides — `send_video_frame` accepts RGB, and receive-side
 /// frames are color-converted from I420 (WebRTC) or codec-decoded (frame
@@ -255,6 +339,9 @@ pub struct VideoFrame {
     pub height: u32,
     pub data: Vec<u8>,
     pub timestamp_us: u64,
+    /// Whether these pixels are a live match, a reused earlier frame, or a
+    /// synthesized placeholder. Always `Live` outside of `Observation`.
+    pub source: FrameSource,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -304,6 +391,10 @@ pub struct SyncMetrics {
     pub observations_emitted: u64,
     pub stale_observations_emitted: u64,
     pub states_dropped: u64,
+    /// Per-track count of synthesized placeholder frames emitted under
+    /// `stall_behavior: omit` — that track is silent and its moments are being kept
+    /// alive with a stand-in. The frames carry `FrameSource.OMITTED`.
+    pub frames_omitted: HashMap<String, u64>,
     pub match_delta_us_p50: Option<u64>,
     pub match_delta_us_p95: Option<u64>,
     pub last_blocker_track: Option<String>,
@@ -609,6 +700,12 @@ impl PortalConfig {
     /// source as screen content, which pins the resolution and drops frames
     /// under CPU or bandwidth pressure instead of rescaling the frame. Both
     /// apply to the WebRTC codecs only and default to `false`.
+    /// `stall_behavior` and `max_lag_ms` are per-track overrides of
+    /// [`set_stall_behavior`] / [`set_max_lag_ms`], applied at the declaration
+    /// site so a track's whole configuration reads in one place. `None` on
+    /// either inherits the config-wide default. Both are read on the receiving
+    /// side; see `set_stall_behavior`.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_video(
         &self,
         name: String,
@@ -617,15 +714,17 @@ impl PortalConfig {
         max_bitrate_kbps: Option<u32>,
         simulcast: Option<bool>,
         screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
     ) {
-        self.inner.lock().add_video(
-            name,
-            codec.into(),
-            quality,
-            max_bitrate_kbps,
-            simulcast,
-            screencast,
-        );
+        let mut cfg = self.inner.lock();
+        cfg.add_video(name.clone(), codec.into(), quality, max_bitrate_kbps, simulcast, screencast);
+        if let Some(b) = stall_behavior {
+            cfg.set_track_stall_behavior(name.clone(), b.into());
+        }
+        if let Some(ms) = max_lag_ms {
+            cfg.set_track_max_lag_ms(name, ms);
+        }
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -671,8 +770,32 @@ impl PortalConfig {
         self.inner.lock().set_ping_ms(ms);
     }
 
+    #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.lock().set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.lock().set_stall_behavior(behavior.into());
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.lock().set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.lock().set_track_stall_behavior(track, behavior.into());
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.lock().set_track_max_lag_ms(track, ms);
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -688,24 +811,21 @@ impl PortalConfig {
         self.inner.lock().set_action_subscription(enable);
     }
 
-    /// Declared WebRTC video track names (H264).
+    /// Names of every declared video track, in declaration order, whatever
+    /// transport its codec selects.
     pub fn video_tracks(&self) -> Vec<String> {
         self.inner.lock().video_track_names().map(String::from).collect()
     }
 
-    /// Declared byte-stream video tracks (Raw / Png / Mjpeg) with codec
-    /// and per-codec quality.
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
-        self.inner
-            .lock()
-            .frame_video_tracks()
-            .iter()
-            .map(|s| FrameVideoSpec {
-                name: s.name.clone(),
-                codec: s.codec.into(),
-                quality: s.quality,
-            })
-            .collect()
+    /// Every declared video track with its codec and options, in declaration
+    /// order. The full readback of what `add_video` was given.
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.lock().video_tracks().iter().map(videotrackspec_from_core).collect()
+    }
+
+    /// The byte-stream subset (Raw / Png / Mjpeg) of `video_track_specs`.
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.inner.lock().frame_video_tracks().map(videotrackspec_from_core).collect()
     }
 
     /// Declared state schema, in declaration order.
@@ -777,6 +897,7 @@ impl PortalConfig {
 
     /// Whether a state past its video match window reuses the last emitted
     /// frame instead of being dropped.
+    #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.lock().reuse_stale_frames()
     }
@@ -806,7 +927,7 @@ pub struct Portal {
     state_fields: Vec<String>,
     action_fields: Vec<String>,
     video_tracks: Vec<String>,
-    frame_video_tracks: Vec<FrameVideoSpec>,
+    video_track_specs: Vec<VideoTrackSpec>,
     action_chunks: Vec<ChunkSpec>,
 }
 
@@ -821,15 +942,8 @@ impl Portal {
         let state_fields: Vec<String> = cfg.state_fields().map(String::from).collect();
         let action_fields: Vec<String> = cfg.action_fields().map(String::from).collect();
         let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
-        let frame_video_tracks: Vec<FrameVideoSpec> = cfg
-            .frame_video_tracks()
-            .iter()
-            .map(|s| FrameVideoSpec {
-                name: s.name.clone(),
-                codec: s.codec.into(),
-                quality: s.quality,
-            })
-            .collect();
+        let video_track_specs: Vec<VideoTrackSpec> =
+            cfg.video_tracks().iter().map(videotrackspec_from_core).collect();
         let action_chunks: Vec<ChunkSpec> =
             cfg.action_chunks().iter().map(chunkspec_from_core).collect();
 
@@ -872,7 +986,7 @@ impl Portal {
         // with WebRTC tracks on the core side, so a single registration
         // surface works for both — the foreign side only sees one
         // `on_video_frame(track, frame)` event stream per Portal.
-        for track in video_tracks.iter().chain(frame_video_tracks.iter().map(|s| &s.name)) {
+        for track in &video_tracks {
             let cb = callbacks.clone();
             let track_name = track.clone();
             inner.on_video_frame(track, move |_name, frame| {
@@ -906,7 +1020,7 @@ impl Portal {
             state_fields,
             action_fields,
             video_tracks,
-            frame_video_tracks,
+            video_track_specs,
             action_chunks,
         })
     }
@@ -1016,15 +1130,27 @@ impl Portal {
         self.action_fields.clone()
     }
 
+    /// Names of every declared video track, in declaration order, whatever
+    /// transport its codec selects.
     pub fn video_tracks(&self) -> Vec<String> {
         self.video_tracks.clone()
     }
 
-    /// Declared frame-video tracks (name + codec + quality), in declaration
-    /// order. Frame-video tracks ride a byte-stream channel rather than the
-    /// WebRTC media path; the user-facing send/receive API is the same.
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
-        self.frame_video_tracks.clone()
+    /// Every declared video track with its codec and options, in declaration
+    /// order.
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.video_track_specs.clone()
+    }
+
+    /// The byte-stream subset (Raw / Png / Mjpeg) of `video_track_specs`.
+    /// These ride a byte-stream channel rather than the WebRTC media path;
+    /// the user-facing send/receive API is the same either way.
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.video_track_specs
+            .iter()
+            .filter(|s| !core::Codec::from(s.codec).is_webrtc())
+            .cloned()
+            .collect()
     }
 
     pub fn action_chunks(&self) -> Vec<ChunkSpec> {
@@ -1133,6 +1259,7 @@ impl RobotConfig {
         Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Robot)? }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_video(
         &self,
         name: String,
@@ -1141,8 +1268,19 @@ impl RobotConfig {
         max_bitrate_kbps: Option<u32>,
         simulcast: Option<bool>,
         screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
     ) {
-        self.inner.add_video(name, codec, quality, max_bitrate_kbps, simulcast, screencast);
+        self.inner.add_video(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
+        );
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -1185,8 +1323,32 @@ impl RobotConfig {
         self.inner.set_e2ee_key(key);
     }
 
+    #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.set_stall_behavior(behavior);
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.set_track_stall_behavior(track, behavior);
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.set_track_max_lag_ms(track, ms);
     }
 
     /// No-op on the Robot side — the robot always processes actions. Kept on
@@ -1199,7 +1361,11 @@ impl RobotConfig {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1247,6 +1413,7 @@ impl RobotConfig {
         self.inner.action_reliable()
     }
 
+    #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.reuse_stale_frames()
     }
@@ -1286,6 +1453,7 @@ impl OperatorConfig {
         Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Operator)? }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_video(
         &self,
         name: String,
@@ -1294,8 +1462,19 @@ impl OperatorConfig {
         max_bitrate_kbps: Option<u32>,
         simulcast: Option<bool>,
         screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
     ) {
-        self.inner.add_video(name, codec, quality, max_bitrate_kbps, simulcast, screencast);
+        self.inner.add_video(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
+        );
     }
 
     pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
@@ -1338,8 +1517,32 @@ impl OperatorConfig {
         self.inner.set_e2ee_key(key);
     }
 
+    #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.set_stall_behavior(behavior);
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.set_track_stall_behavior(track, behavior);
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.set_track_max_lag_ms(track, ms);
     }
 
     /// Operator-side opt-in to receiving executed actions ("HITL recording").
@@ -1353,7 +1556,11 @@ impl OperatorConfig {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1401,6 +1608,7 @@ impl OperatorConfig {
         self.inner.action_reliable()
     }
 
+    #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.reuse_stale_frames()
     }
@@ -1482,7 +1690,11 @@ impl Robot {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1622,7 +1834,11 @@ impl Operator {
         self.inner.video_tracks()
     }
 
-    pub fn frame_video_tracks(&self) -> Vec<FrameVideoSpec> {
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
     }
 
@@ -1690,6 +1906,7 @@ fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
         height: f.height,
         data: f.data.to_vec(),
         timestamp_us: f.timestamp_us,
+        source: f.source.into(),
     }
 }
 
@@ -1767,6 +1984,7 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             observations_emitted: m.sync.observations_emitted,
             stale_observations_emitted: m.sync.stale_observations_emitted,
             states_dropped: m.sync.states_dropped,
+            frames_omitted: m.sync.frames_omitted.clone(),
             match_delta_us_p50: m.sync.match_delta_us_p50,
             match_delta_us_p95: m.sync.match_delta_us_p95,
             last_blocker_track: m.sync.last_blocker_track,

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import pathlib
 import time
 from typing import Optional
 
@@ -47,20 +48,13 @@ API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
 API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
 
 
+# Derived rather than enumerated: every module in this directory needs a
+# server, and a hand-maintained list silently un-skips any file someone
+# forgets to add. That surfaces as a confusing `NoneType` deep inside the FFI
+# rather than as a skip, and only in an environment without `LIVEKIT_URL` —
+# so it passes locally for whoever wrote the file and fails in CI.
 collect_ignore = (
-    []
-    if URL
-    else [
-        "test_chunks.py",
-        "test_frame_video.py",
-        "test_frame_video_stress.py",
-        "test_e2ee.py",
-        "test_multi_operator.py",
-        "test_action_subscription.py",
-        "test_webrtc_codecs.py",
-        "test_ffi_role_split.py",
-        "test_rpc.py",
-    ]
+    [] if URL else sorted(p.name for p in pathlib.Path(__file__).parent.glob("test_*.py"))
 )
 
 

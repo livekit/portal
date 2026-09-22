@@ -58,8 +58,13 @@ from ._frame import frame_bytes_to_numpy_rgb
 Role = _ffi.Role
 DType = _ffi.DType
 VideoCodec = _ffi.VideoCodec
+FrameSource = _ffi.FrameSource
+StallBehavior = _ffi.StallBehavior
 FieldSpec = _ffi.FieldSpec
-FrameVideoSpec = _ffi.FrameVideoSpec
+VideoTrackSpec = _ffi.VideoTrackSpec
+# Deprecated alias. `FrameVideoSpec` was the byte-stream-only record; there is
+# now one spec type for every track, and `frame_video_tracks` returns it.
+FrameVideoSpec = VideoTrackSpec
 ChunkSpec = _ffi.ChunkSpec
 VideoFrameData = _ffi.VideoFrame
 PortalMetrics = _ffi.PortalMetrics
@@ -76,19 +81,6 @@ RpcError = _ffi.RpcError
 # Default JPEG quality for `add_video` with `VideoCodec.MJPEG` when no
 # explicit value is given. Mirrors the Rust core's `DEFAULT_MJPEG_QUALITY`.
 DEFAULT_MJPEG_QUALITY: int = 90
-
-# Codecs that ride the WebRTC media path. The rest ride the per-frame
-# byte-stream channel. Mirrors the Rust core's `Codec::is_webrtc`; used to
-# route `add_video` declarations into the right Python-side mirror list.
-_WEBRTC_CODECS = frozenset(
-    {
-        VideoCodec.H264,
-        VideoCodec.VP8,
-        VideoCodec.VP9,
-        VideoCodec.AV1,
-        VideoCodec.H265,
-    }
-)
 
 # A schema entry accepted by add_state_typed/add_action_typed. Either a
 # FieldSpec (record passthrough) or a (name, dtype) tuple — the latter is
@@ -289,6 +281,12 @@ class Observation:
     `state` holds Python-native types per the declared state schema;
     `raw_state` keeps the f64 dict. `frames` is unchanged from the FFI
     layer — one entry per registered video track.
+
+    Every registered track always has an entry, even when it went silent:
+    check `frames[name].source` to tell a real match (`FrameSource.LIVE`)
+    from a reused earlier frame (`FrameSource.STALE`) or a synthesized
+    placeholder (`FrameSource.OMITTED`). Only `LIVE` frames are
+    measurements of `timestamp_us`.
     """
 
     state: Dict[str, TypedScalar]
@@ -707,8 +705,8 @@ class _RpcHandlerAdapter(_ffi.RpcHandler):
 class PortalConfig:
     """Builder for a Portal session.
 
-    State (`video_tracks`, `state_schema`, `action_schema`) is mirrored in
-    Python for fast lookup — the Rust side owns the authoritative copy.
+    State (`video_track_specs`, `state_schema`, `action_schema`) is mirrored
+    in Python for fast lookup — the Rust side owns the authoritative copy.
     Use `add_state_typed` / `add_action_typed` with `(name, DType)` pairs to
     declare fields.
     """
@@ -717,8 +715,7 @@ class PortalConfig:
         "_inner",
         "_session",
         "_role",
-        "_video_tracks",
-        "_frame_video_tracks",
+        "_video_track_specs",
         "_state_schema",
         "_action_schema",
         "_action_chunks",
@@ -728,8 +725,7 @@ class PortalConfig:
         self._inner = _ffi.PortalConfig(session, role)
         self._session = session
         self._role = role
-        self._video_tracks: List[str] = []
-        self._frame_video_tracks: List[FrameVideoSpec] = []
+        self._video_track_specs: List[VideoTrackSpec] = []
         self._state_schema: List[FieldSpec] = []
         self._action_schema: List[FieldSpec] = []
         self._action_chunks: List[ChunkSpec] = []
@@ -785,8 +781,7 @@ class PortalConfig:
         instance._inner = inner
         instance._session = session
         instance._role = role
-        instance._video_tracks = list(inner.video_tracks())
-        instance._frame_video_tracks = list(inner.frame_video_tracks())
+        instance._video_track_specs = list(inner.video_track_specs())
         instance._state_schema = list(inner.state_schema())
         instance._action_schema = list(inner.action_schema())
         instance._action_chunks = list(inner.action_chunks())
@@ -802,11 +797,33 @@ class PortalConfig:
 
     @property
     def video_tracks(self) -> List[str]:
-        return list(self._video_tracks)
+        """Names of every declared video track, in declaration order.
+
+        Every name passed to `add_video` is here, whatever codec it was
+        given — the codec picks the wire transport, not whether the track
+        counts as declared. For the codecs and encoder options too, see
+        `video_track_specs`.
+        """
+        return [s.name for s in self._video_track_specs]
 
     @property
-    def frame_video_tracks(self) -> List[FrameVideoSpec]:
-        return list(self._frame_video_tracks)
+    def video_track_specs(self) -> List[VideoTrackSpec]:
+        """Every declared video track with its codec and options, in
+        declaration order. The full readback of what `add_video` was given.
+        """
+        return list(self._video_track_specs)
+
+    @property
+    def frame_video_tracks(self) -> List[VideoTrackSpec]:
+        """The byte-stream subset of `video_track_specs` — the tracks whose
+        codec (`RAW` / `PNG` / `MJPEG`) rides a per-frame byte stream rather
+        than the WebRTC media path.
+
+        A filtered view, not a second list: everything here is also in
+        `video_tracks`. Callers that only want to know what was declared
+        want `video_tracks`.
+        """
+        return list(self._inner.frame_video_tracks())
 
     @property
     def state_fields(self) -> List[str]:
@@ -892,8 +909,13 @@ class PortalConfig:
         *,
         simulcast: Optional[bool] = None,
         screencast: Optional[bool] = None,
+        stall_behavior: Optional["StallBehavior"] = None,
+        max_lag_ms: Optional[int] = None,
     ) -> None:
         """Declare a video track.
+
+        Every declared track — whatever its codec — comes back from
+        `video_tracks`, `video_track_specs`, and `on_video_frame`.
 
         `codec` picks both the encoding and the wire transport. The
         user-facing send/receive API is identical regardless of codec —
@@ -924,6 +946,12 @@ class PortalConfig:
         `simulcast` and `screencast` are keyword-only, apply to the WebRTC
         codecs only, and both default to `False`.
 
+        `stall_behavior` and `max_lag_ms` are keyword-only per-track overrides
+        of `set_stall_behavior` / `set_max_lag_ms`, given here so a track's
+        whole configuration reads in one place. `None` on either inherits the
+        config-wide default. Both are read on the receiving side, so they have
+        no effect in a `RobotConfig`.
+
           * `simulcast=True` publishes several spatial layers at once so the
             SFU can hand each subscriber the layer their link can carry. Costs
             encode CPU per extra layer. Worth it only when several operators
@@ -948,14 +976,16 @@ class PortalConfig:
         usually does.
         """
         self._inner.add_video(
-            name, codec, quality, max_bitrate_kbps, simulcast, screencast
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
         )
-        if codec in _WEBRTC_CODECS:
-            self._video_tracks.append(name)
-        else:
-            self._frame_video_tracks.append(
-                FrameVideoSpec(name=name, codec=codec, quality=quality)
-            )
+        self._video_track_specs = list(self._inner.video_track_specs())
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
         """Declare state fields with per-field dtype.
@@ -1035,8 +1065,69 @@ class PortalConfig:
         or logging where losing state is worse than a transient video freeze.
         Leave off for real-time control where a stale frame would misalign
         the perception/action loop.
+
+        .. deprecated::
+            Use ``set_stall_behavior(StallBehavior.FREEZE)``, which is this plus
+            ``set_max_lag_ms(0)``.
         """
         self._inner.set_reuse_stale_frames(enable)
+
+    def set_stall_behavior(self, policy: "StallBehavior") -> None:
+        """How a moment is resolved when a video track goes silent for longer
+        than its `max_lag`. Applies to every track without a per-track
+        override; see `set_track_stall_behavior`.
+
+        **Receiving side only.** Observations are assembled where they are
+        consumed, so this is read on the `Operator` and is a no-op on
+        `RobotConfig`. Nothing about a stall crosses the wire: a silent track
+        is by definition sending nothing, so the substitute frame is
+        synthesized locally by the subscriber that noticed the gap.
+
+        `StallBehavior.DROP` (the default) emits no observation — the state
+        still reaches the drop callback, but the healthy tracks in that
+        moment go with it, so an operator screen stays dark while one camera
+        is down. `StallBehavior.FREEZE` holds the silent track's last good
+        frame. `StallBehavior.OMIT` substitutes a visible placeholder, so the
+        healthy tracks keep flowing.
+
+        Whichever fires, the frame carries a `FrameSource` saying which it
+        was. Check `frames[name].source` before feeding an observation to a
+        policy or writing it to a dataset.
+        """
+        self._inner.set_stall_behavior(policy)
+
+    def set_max_lag_ms(self, ms: int) -> None:
+        """How far the fastest-advancing stream may run past a moment before
+        that moment resolves without a silent track — in milliseconds of
+        **sender-clock time**, not wall-clock.
+
+        This is a statement about stream position, not a stopwatch. It is
+        evaluated when a packet arrives, so a burst of buffered frames can
+        cross it in far less real time, and if every stream goes quiet
+        nothing fires at all (nothing is being emitted either). Staying on
+        sender clocks is what keeps sync decisions reproducible.
+
+        Defaults to `slack / fps` — where state-buffer capacity would have
+        evicted the moment anyway — so the default timing is unchanged from
+        earlier versions. `0` resolves immediately, without waiting.
+
+        **Receiving side only**, like `set_stall_behavior`.
+        """
+        self._inner.set_max_lag_ms(ms)
+
+    def set_track_stall_behavior(self, track: str, policy: "StallBehavior") -> None:
+        """Per-track override for `set_stall_behavior`.
+
+        Use it when tracks differ in how load-bearing they are: a wrist
+        camera a policy depends on may warrant `DROP` (no observation beats
+        a wrong one), while a scene camera warrants `OMIT` so its failure
+        does not take the rest of the frame set down with it.
+        """
+        self._inner.set_track_stall_behavior(track, policy)
+
+    def set_track_max_lag_ms(self, track: str, ms: int) -> None:
+        """Per-track override for `set_max_lag_ms`."""
+        self._inner.set_track_max_lag_ms(track, ms)
 
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions.
@@ -1448,10 +1539,32 @@ class _RoleConfigBase:
 
     @property
     def video_tracks(self) -> List[str]:
+        """Names of every declared video track, in declaration order.
+
+        Every name passed to `add_video` is here, whatever codec it was
+        given — the codec picks the wire transport, not whether the track
+        counts as declared. For the codecs and encoder options too, see
+        `video_track_specs`.
+        """
         return list(self._inner.video_tracks())
 
     @property
-    def frame_video_tracks(self) -> List[FrameVideoSpec]:
+    def video_track_specs(self) -> List[VideoTrackSpec]:
+        """Every declared video track with its codec and options, in
+        declaration order. The full readback of what `add_video` was given.
+        """
+        return list(self._inner.video_track_specs())
+
+    @property
+    def frame_video_tracks(self) -> List[VideoTrackSpec]:
+        """The byte-stream subset of `video_track_specs` — the tracks whose
+        codec (`RAW` / `PNG` / `MJPEG`) rides a per-frame byte stream rather
+        than the WebRTC media path.
+
+        A filtered view, not a second list: everything here is also in
+        `video_tracks`. Callers that only want to know what was declared
+        want `video_tracks`.
+        """
         return list(self._inner.frame_video_tracks())
 
     @property
@@ -1527,9 +1640,18 @@ class _RoleConfigBase:
         *,
         simulcast: Optional[bool] = None,
         screencast: Optional[bool] = None,
+        stall_behavior: Optional["StallBehavior"] = None,
+        max_lag_ms: Optional[int] = None,
     ) -> None:
         self._inner.add_video(
-            name, codec, quality, max_bitrate_kbps, simulcast, screencast
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
         )
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
@@ -1569,6 +1691,18 @@ class _RoleConfigBase:
 
     def set_reuse_stale_frames(self, enable: bool) -> None:
         self._inner.set_reuse_stale_frames(enable)
+
+    def set_stall_behavior(self, policy: "StallBehavior") -> None:
+        self._inner.set_stall_behavior(policy)
+
+    def set_max_lag_ms(self, ms: int) -> None:
+        self._inner.set_max_lag_ms(ms)
+
+    def set_track_stall_behavior(self, track: str, policy: "StallBehavior") -> None:
+        self._inner.set_track_stall_behavior(track, policy)
+
+    def set_track_max_lag_ms(self, track: str, ms: int) -> None:
+        self._inner.set_track_max_lag_ms(track, ms)
 
     def set_action_subscription(self, enable: bool) -> None:
         """Operator-side opt-in to receiving executed actions ("HITL
@@ -1953,7 +2087,10 @@ __all__ = [
     "Role",
     "DType",
     "VideoCodec",
+    "FrameSource",
+    "StallBehavior",
     "FieldSpec",
+    "VideoTrackSpec",
     "FrameVideoSpec",
     "ChunkSpec",
     "TypedScalar",

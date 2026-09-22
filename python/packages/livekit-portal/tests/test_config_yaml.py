@@ -73,8 +73,8 @@ def test_from_yaml_str_mirrors_full_schema():
     assert cfg.session == "demo"
     assert cfg.role == Role.ROBOT
 
-    # H264 videos go on the WebRTC list, frame-video codecs on their own list.
-    assert cfg.video_tracks == ["front"]
+    # Every declared track, in declaration order, whatever its codec.
+    assert cfg.video_tracks == ["front", "wrist", "depth"]
     assert [t.name for t in cfg.frame_video_tracks] == ["wrist", "depth"]
     assert cfg.frame_video_tracks[0].codec == VideoCodec.MJPEG
     assert cfg.frame_video_tracks[0].quality == 80
@@ -89,6 +89,23 @@ def test_from_yaml_str_mirrors_full_schema():
     assert len(cfg.action_chunks) == 1
     assert cfg.action_chunks[0].name == "vla"
     assert cfg.action_chunks[0].horizon == 16
+
+
+def test_yaml_and_programmatic_builds_agree():
+    # The two ways to declare the same tracks now produce identical specs.
+    # They did not before: the loader defaulted `quality` per codec while
+    # the programmatic path stored whatever the caller's default was, and
+    # the difference was invisible because only byte-stream tracks kept a
+    # readable spec at all.
+    from_yaml = PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT)
+
+    built = PortalConfig("demo", Role.ROBOT)
+    built.add_video("front")
+    built.add_video("wrist", VideoCodec.MJPEG, 80)
+    built.add_video("depth", VideoCodec.PNG)
+
+    assert built.video_tracks == from_yaml.video_tracks
+    assert built.video_track_specs == from_yaml.video_track_specs
 
 
 def test_from_yaml_str_works_with_minimal_doc():
@@ -147,7 +164,7 @@ def test_from_yaml_file_round_trip():
         path = f.name
     try:
         cfg = PortalConfig.from_yaml_file(path, "demo", Role.ROBOT)
-        assert cfg.video_tracks == ["front"]
+        assert cfg.video_tracks == ["front", "wrist", "depth"]
         assert len(cfg.frame_video_tracks) == 2
         assert len(cfg.action_chunks) == 1
     finally:
@@ -163,7 +180,7 @@ def test_yaml_built_config_drives_portal():
     portal = Portal(cfg)
     assert portal._state_fields == ["joint_pos", "gripper"]
     assert portal._action_fields == ["joint_pos"]
-    assert portal._video_tracks == ["front"]
+    assert portal._video_tracks == ["front", "wrist", "depth"]
     assert "vla" in portal._chunk_schemas
 
 
@@ -213,3 +230,42 @@ def test_robot_config_from_yaml_file():
         assert cfg.role == Role.ROBOT
     finally:
         os.unlink(path)
+
+
+def test_stall_policy_parses_per_track():
+    """Both knobs parse at either level, and a per-track value overrides the
+    default without disturbing tracks that did not set one."""
+    cfg = PortalConfig.from_yaml_str(
+        textwrap.dedent(
+            """
+            version: 1
+            stall_behavior: freeze
+            max_lag_ms: 120
+            videos:
+              - { name: front, codec: h264 }
+              - { name: wrist, codec: h264, stall_behavior: drop, max_lag_ms: 20 }
+            """
+        ),
+        "demo",
+        Role.ROBOT,
+    )
+    assert list(cfg.video_tracks) == ["front", "wrist"]
+
+
+def test_unknown_stall_policy_is_rejected():
+    """A typo must fail loudly rather than silently falling back to the
+    default — a stall policy that quietly reverts is one you cannot trust in
+    an incident."""
+    with pytest.raises(ConfigFileError) as e:
+        PortalConfig.from_yaml_str(
+            textwrap.dedent(
+                """
+                version: 1
+                videos:
+                  - { name: front, codec: h264, stall_behavior: nope }
+                """
+            ),
+            "demo",
+            Role.ROBOT,
+        )
+    assert "nope" in str(e.value)

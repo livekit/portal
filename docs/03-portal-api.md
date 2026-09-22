@@ -16,8 +16,8 @@ callbacks. Connect. Push data.
 pip install livekit-portal      # or: uv add livekit-portal
 ```
 
-Prebuilt wheels cover CPython 3.12 on Linux x86\_64 (glibc 2.35 and newer),
-Linux aarch64 (glibc 2.39 and newer), and macOS Apple Silicon. On any other
+Prebuilt wheels cover CPython 3.12 on Linux x86\_64 and aarch64 (glibc 2.35 and
+newer) and macOS Apple Silicon. On any other
 platform or Python version, [build from
 source](01-quickstart.md#build-from-source).
 

@@ -41,9 +41,6 @@ pub enum PortalError {
     #[error("unknown video track: {name}")]
     UnknownVideoTrack { name: String },
 
-    #[error("unknown action chunk: {name}")]
-    UnknownChunk { name: String },
-
     #[error("wrong frame size: expected {expected} bytes, got {got}")]
     WrongFrameSize { expected: usize, got: usize },
 

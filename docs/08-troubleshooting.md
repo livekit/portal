@@ -268,7 +268,7 @@ in a one-off burst.
 [publish-full] frame_video 'front' queue full (cap=1024), dropping frame
 ```
 
-The outbound queue for a topic, chunk, or frame-video track filled and a packet
+The outbound queue for a topic or frame-video track filled and a packet
 was dropped before leaving the machine. The link cannot ship data as fast as you
 produce it.
 
@@ -281,7 +281,6 @@ load than queue it, use a WebRTC video track instead of frame video.
 
 ```
 [publish-failed] data publish failed: <error>
-[publish-failed] chunk 'grip' byte stream failed: <error>
 [publish-failed] rtt publish failed: <error>
 ```
 
@@ -333,42 +332,6 @@ The peer receives the clamped value and never learns the original. `NaN` becomes
 
 **Fix.** Widen the dtype, or scale the value before sending.
 
-### chunk-length
-
-```
-[chunk-length] chunk 'act': field 'j3' has 10 of 16 timesteps, padded with 6 zeros
-[chunk-length] chunk 'act': field 'j4' missing, padded with 16 zeros
-[chunk-length] chunk 'act': field 'j5' has 20 of 16 timesteps, truncated to 16
-```
-
-A chunk column was not exactly `horizon` long. The send still goes out: short
-columns and missing columns zero-pad, long ones truncate. Logged once per field,
-then silent.
-
-Read the zeros literally. A chunk is a whole unit, not a partial update, so an
-omitted column does **not** carry forward the way an omitted scalar action field
-does. Zero is a real commanded value, and for a position target it means move to
-zero.
-
-**Fix.** Send the full column. If your policy emits a shorter horizon than you
-declared, redeclare the chunk at the horizon it actually produces rather than
-letting the tail pad.
-
-### unknown-chunk
-
-```
-[unknown-chunk] on_action_chunk: chunk 'grip' not declared, callback ignored
-[unknown-chunk] topic 'portal_action_chunk': unknown fingerprint 0x1A2B3C4D, dropping byte stream
-```
-
-A chunk name or fingerprint matches no declared chunk. Either you registered a
-callback for a chunk that was never declared, or a byte stream arrived for a chunk
-this side does not know. Receive-side warnings cap at 256 unique fingerprints,
-then suppress.
-
-**Fix.** Declare the chunk with the same name, horizon, and fields on both ends
-before registering the callback or sending.
-
 ### unknown-track
 
 ```
@@ -408,7 +371,7 @@ or encoder problem on the sender.
 ```
 [bad-payload] frame_video: bad header (<error>)
 [bad-payload] state deserialize failed: <error>
-[bad-payload] failed to read chunk byte stream: <error>
+[bad-payload] failed to read frame_video byte stream: <error>
 ```
 
 A received payload could not be parsed. The header was malformed, the body failed
@@ -454,7 +417,6 @@ they are not tagged. `SESSION` below is your session label, not a tag.
 | `[SESSION] ready to publish frame-video track 'TRACK' via byte stream` | A byte-stream video track is set up. |
 | `[SESSION] ready to publish state via MODE data (N fields)` | The state publisher is set up. |
 | `[SESSION] ready to publish action via MODE data (N fields)` | The action publisher is set up. |
-| `[SESSION] ready to publish chunk 'NAME' via byte stream` | A chunk publisher is set up. |
 | `[SESSION] subscribed to video track 'TRACK'` | The operator is receiving a robot track. |
 | `[SESSION] participant 'ID' disconnected` | Someone left the room. |
 | `[SESSION] reconnected, clearing sync buffers and latest slots` | The session recovered. Buffers were flushed. |

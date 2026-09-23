@@ -325,7 +325,8 @@ The examples do the same thing with the rough edges sanded off, including
 - [`examples/python/basic/`](../examples/python/basic). What you just built,
   plus a YAML-config variant. No hardware.
 - [`examples/python/inference/`](../examples/python/inference). A VLA-shaped
-  loop using action chunks and end-to-end latency metrics.
+  loop that streams a planned horizon one action per tick, with end-to-end
+  latency metrics.
 - [`examples/python/modal-mock-inference/`](../examples/python/modal-mock-inference).
   Runs the policy on [Modal](https://modal.com) and measures true
   glass-to-glass latency.

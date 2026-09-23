@@ -51,6 +51,12 @@ pub enum ConfigFileError {
 
     #[error("invalid config: {0}")]
     Invalid(String),
+
+    #[error(
+        "`action_chunks` is no longer supported: action chunks were removed in v0.3. \
+         Declare the per-step fields under `action` and call `send_action` once per control tick"
+    )]
+    ActionChunksRemoved,
 }
 
 /// The single supported major version. Bump when an incompatible change
@@ -105,8 +111,11 @@ struct ConfigFileV1 {
     state: Vec<FieldEntry>,
     #[serde(default)]
     action: Vec<FieldEntry>,
-    #[serde(default)]
-    action_chunks: Vec<ChunkEntry>,
+    /// Removed in v0.3. Accepted by the parser only so its presence
+    /// surfaces as `ActionChunksRemoved` rather than a generic unknown-key
+    /// parse error.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    action_chunks: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,12 +156,12 @@ struct FieldEntry {
     dtype: DType,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChunkEntry {
-    name: String,
-    horizon: u32,
-    fields: Vec<FieldEntry>,
+/// `true` whenever the key is present, whatever its value (including null).
+fn deserialize_present<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(d).map(|_| true)
 }
 
 fn deserialize_codec<'de, D>(d: D) -> Result<Codec, D::Error>
@@ -217,6 +226,10 @@ impl PortalConfig {
             });
         }
 
+        if parsed.action_chunks {
+            return Err(ConfigFileError::ActionChunksRemoved);
+        }
+
         validate(&parsed)?;
 
         let mut cfg = PortalConfig::new(session, role);
@@ -234,13 +247,6 @@ impl PortalConfig {
         }
         if !parsed.action.is_empty() {
             cfg.add_action_typed(parsed.action.iter().map(|f| (f.name.clone(), f.dtype)));
-        }
-        for chunk in &parsed.action_chunks {
-            cfg.add_action_chunk(
-                &chunk.name,
-                chunk.horizon,
-                chunk.fields.iter().map(|f| (f.name.clone(), f.dtype)),
-            );
         }
 
         if let Some(v) = parsed.fps {
@@ -362,19 +368,6 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
         }
     }
 
-    let mut seen_chunk = std::collections::HashSet::new();
-    for c in &p.action_chunks {
-        if !seen_chunk.insert(c.name.as_str()) {
-            return Err(ConfigFileError::Invalid(format!("duplicate action chunk '{}'", c.name)));
-        }
-        if c.horizon == 0 {
-            return Err(ConfigFileError::Invalid(format!(
-                "action chunk '{}' horizon must be > 0",
-                c.name
-            )));
-        }
-    }
-
     Ok(())
 }
 
@@ -402,11 +395,6 @@ state:
   - { name: gripper, dtype: bool }
 action:
   - { name: joint_pos, dtype: f32 }
-action_chunks:
-  - name: vla
-    horizon: 16
-    fields:
-      - { name: joint_pos, dtype: f32 }
 "#
     }
 
@@ -431,9 +419,6 @@ action_chunks:
         let action: Vec<&str> = cfg.action_fields().collect();
         assert_eq!(action, vec!["joint_pos"]);
 
-        assert_eq!(cfg.action_chunks().len(), 1);
-        assert_eq!(cfg.action_chunks()[0].horizon, 16);
-
         assert_eq!(cfg.session(), "demo");
         assert_eq!(cfg.role(), Role::Robot);
         assert_eq!(cfg.fps(), 60);
@@ -456,7 +441,6 @@ action_chunks:
         assert_eq!(cfg.frame_video_tracks().count(), 0);
         assert_eq!(cfg.state_schema().len(), 0);
         assert_eq!(cfg.action_schema().len(), 0);
-        assert_eq!(cfg.action_chunks().len(), 0);
         assert_eq!(cfg.fps(), 30);
         assert_eq!(cfg.slack(), 5);
         assert_eq!(cfg.tolerance(), 1.5);
@@ -639,26 +623,25 @@ videos:
     }
 
     #[test]
-    fn duplicate_chunk_rejected() {
+    fn action_chunks_key_rejected_as_removed() {
         let yaml = r#"
 version: 1
+action:
+  - { name: x, dtype: f32 }
 action_chunks:
-  - { name: vla, horizon: 4, fields: [{ name: x, dtype: f32 }] }
   - { name: vla, horizon: 4, fields: [{ name: x, dtype: f32 }] }
 "#;
         let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
-        assert!(matches!(err, ConfigFileError::Invalid(_)));
+        assert!(matches!(err, ConfigFileError::ActionChunksRemoved), "got {err:?}");
+        assert!(err.to_string().contains("removed in v0.3"), "{err}");
     }
 
     #[test]
-    fn zero_horizon_rejected() {
-        let yaml = r#"
-version: 1
-action_chunks:
-  - { name: vla, horizon: 0, fields: [{ name: x, dtype: f32 }] }
-"#;
-        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
-        assert!(matches!(err, ConfigFileError::Invalid(_)));
+    fn empty_action_chunks_key_still_rejected() {
+        for yaml in ["version: 1\naction_chunks: []\n", "version: 1\naction_chunks:\n"] {
+            let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+            assert!(matches!(err, ConfigFileError::ActionChunksRemoved), "got {err:?}");
+        }
     }
 
     #[test]

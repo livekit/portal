@@ -119,7 +119,7 @@ class Pair:
     Tests that intentionally diverge schemas mutate `robot_cfg` /
     `operator_cfg` BEFORE calling `start()`. State schema is preset on
     both sides so observations can form, even when the test only cares
-    about chunks.
+    about actions.
 
     The operator self-claims the active-operator pointer after connect so
     its actions actually reach the robot — the action gate drops anything

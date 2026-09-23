@@ -59,11 +59,6 @@ YAML_FULL = textwrap.dedent(
       - { name: gripper, dtype: bool }
     action:
       - { name: joint_pos, dtype: f32 }
-    action_chunks:
-      - name: vla
-        horizon: 16
-        fields:
-          - { name: joint_pos, dtype: f32 }
     """
 )
 
@@ -85,10 +80,6 @@ def test_from_yaml_str_mirrors_full_schema():
         FieldSpec(name="gripper", dtype=DType.BOOL),
     ]
     assert cfg.action_schema == [FieldSpec(name="joint_pos", dtype=DType.F32)]
-
-    assert len(cfg.action_chunks) == 1
-    assert cfg.action_chunks[0].name == "vla"
-    assert cfg.action_chunks[0].horizon == 16
 
 
 def test_yaml_and_programmatic_builds_agree():
@@ -116,7 +107,6 @@ def test_from_yaml_str_works_with_minimal_doc():
     assert cfg.frame_video_tracks == []
     assert cfg.state_schema == []
     assert cfg.action_schema == []
-    assert cfg.action_chunks == []
 
 
 def test_from_yaml_str_role_is_supplied_at_load_time():
@@ -156,6 +146,33 @@ def test_from_yaml_str_duplicate_video_rejected():
         PortalConfig.from_yaml_str(yaml, "demo", Role.ROBOT)
 
 
+@pytest.mark.parametrize(
+    "load",
+    [
+        lambda y: PortalConfig.from_yaml_str(y, "demo", Role.ROBOT),
+        lambda y: RobotConfig.from_yaml_str(y, "demo"),
+        lambda y: OperatorConfig.from_yaml_str(y, "demo"),
+    ],
+    ids=["portal", "robot", "operator"],
+)
+def test_from_yaml_str_removed_chunks_key_rejected(load):
+    yaml = textwrap.dedent(
+        """
+        version: 1
+        action:
+          - { name: joint_pos, dtype: f32 }
+        action_chunks:
+          - name: vla
+            horizon: 16
+            fields:
+              - { name: joint_pos, dtype: f32 }
+        """
+    )
+    with pytest.raises(ConfigFileError.ActionChunksRemoved) as e:
+        load(yaml)
+    assert "removed in v0.3" in str(e.value)
+
+
 def test_from_yaml_file_round_trip():
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False
@@ -166,7 +183,6 @@ def test_from_yaml_file_round_trip():
         cfg = PortalConfig.from_yaml_file(path, "demo", Role.ROBOT)
         assert cfg.video_tracks == ["front", "wrist", "depth"]
         assert len(cfg.frame_video_tracks) == 2
-        assert len(cfg.action_chunks) == 1
     finally:
         os.unlink(path)
 
@@ -174,14 +190,13 @@ def test_from_yaml_file_round_trip():
 def test_yaml_built_config_drives_portal():
     # The whole point: Portal construction works seamlessly with a
     # YAML-built PortalConfig. Verifies the Python-side mirror is
-    # populated correctly (Portal reads chunk specs and field names
-    # from the config).
+    # populated correctly (Portal reads schemas and field names from the
+    # config).
     cfg = PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT)
     portal = Portal(cfg)
     assert portal._state_fields == ["joint_pos", "gripper"]
     assert portal._action_fields == ["joint_pos"]
     assert portal._video_tracks == ["front", "wrist", "depth"]
-    assert "vla" in portal._chunk_schemas
 
 
 def test_robot_config_from_yaml_str():
@@ -193,7 +208,7 @@ def test_robot_config_from_yaml_str():
 def test_operator_config_from_yaml_str():
     cfg = OperatorConfig.from_yaml_str(YAML_FULL, "demo")
     assert cfg.role == Role.OPERATOR
-    assert len(cfg.action_chunks) == 1
+    assert [f.name for f in cfg.action_schema] == ["joint_pos"]
 
 
 @pytest.mark.parametrize(

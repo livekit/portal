@@ -23,7 +23,6 @@ Each logical channel maps to one LiveKit primitive on one reserved topic.
 |---|---|---|---|---|
 | State | `portal_state` | data packet | yes | robot |
 | Action | `portal_action` | data packet | yes | operator |
-| Action chunk | `portal_action_chunk` | byte stream | yes | operator |
 | Frame video | `portal_frame_video` | byte stream | yes | robot |
 | RTT | `portal_rtt` | data packet | no | both |
 | WebRTC video | the track name | media track | n/a | robot |
@@ -34,7 +33,7 @@ share the room on other topics without interfering.
 
 The publisher column is the default direction. With
 [operator-side action subscription](../03-portal-api.md#operator-side-action-subscription)
-on, an operator also reads `portal_action` and `portal_action_chunk`.
+on, an operator also reads `portal_action`.
 
 ## Identity, roles, and discovery
 
@@ -129,8 +128,8 @@ for each field:
 return h
 ```
 
-The state topic uses that value directly. Action and chunk topics xor a
-per-stream tag onto it, so a peer running an older wire format without the
+The state topic uses that value directly. The action topic xors a stream tag
+onto it, so a peer running an older wire format without the
 `in_reply_to_ts_us` slot fails the fingerprint check instead of misparsing the
 header:
 
@@ -138,9 +137,6 @@ header:
 state_fingerprint  = schema_fingerprint(state_fields)
 action_fingerprint = schema_fingerprint(action_fields) XOR 0xa1c0b001
 ```
-
-The chunk fingerprint mixes in the chunk name and horizon as well. See
-[action chunks](#action-chunks).
 
 This hash is not cryptographic. It is a cheap agreement check, not a security
 boundary.
@@ -169,48 +165,6 @@ becomes `0`, or `false` for `Bool`.
 
 There is no in-band signal that a value saturated. The publisher logs it locally
 and the peer only ever sees the clipped value.
-
-## Action chunks
-
-An action chunk is a fixed-horizon batch of actions, which is the standard output
-of a VLA policy that emits several future steps per inference. Chunks travel as
-byte streams on `portal_action_chunk`, not data packets, because a horizon of rows
-can exceed the packet size limit.
-
-A chunk schema is a named tensor of shape `[horizon, n_fields]` with a per-field
-dtype. The payload:
-
-```
-[u32 fingerprint        little-endian]
-[u64 timestamp_us       little-endian]
-[u64 in_reply_to_ts_us  little-endian]
-[row 0: field 0, field 1, ... in schema order]
-[row 1: field 0, field 1, ...]
-...
-[row horizon-1: ...]
-```
-
-The header is the same 20-byte correlated header as an action packet. The body is
-row-major: every field of timestep 0, then every field of timestep 1, and so on
-for `horizon` rows. Each field uses its own dtype width.
-
-The chunk fingerprint extends the base fingerprint with the name and horizon, then
-xors a distinct stream tag, so a chunk and an action with identical fields can
-never collide:
-
-```
-h = schema_fingerprint(chunk.fields)
-for each byte b of chunk.name (UTF-8):
-    h = (h XOR b) * prime
-h = (h XOR 0xff) * prime
-for each byte b of chunk.horizon as u32 little-endian:   # 4 bytes
-    h = (h XOR b) * prime
-chunk_fingerprint = h XOR 0xc1c0b001
-```
-
-A peer can register more than one chunk schema. The receiver dispatches each
-incoming stream by matching the header fingerprint. An unknown fingerprint is
-dropped.
 
 ## Frame video
 
@@ -340,8 +294,8 @@ key or all traffic fails to decrypt, silently. See [E2EE](e2ee.md).
 ## Timestamps and clocks
 
 Every timestamp on the wire is `u64` microseconds since the Unix epoch, taken from
-the sender's wall clock, little-endian. State, action, chunk, frame video, and RTT
-all use this unit.
+the sender's wall clock, little-endian. State, action, frame video, and RTT all use
+this unit.
 
 The operator's synchronization compares a state timestamp against each video frame
 timestamp, so **the robot must stamp its state packets and its frames from the same
@@ -383,8 +337,8 @@ To act as a **robot** against Portal operators:
 5. Read `portal_action` packets. **Drop any whose sender identity is not your
    current active operator.** Then verify the fingerprint and parse.
 
-The shared schemas, meaning state fields, action fields, chunk specs, and video
-track names and codecs, are the out-of-band contract that makes any of these bytes
+The shared schemas, meaning state fields, action fields, and video track names
+and codecs, are the out-of-band contract that makes any of these bytes
 parseable. Distribute them as a [YAML config file](config-file.md) or agree on
 them some other way. The fingerprints only detect disagreement. They cannot
 describe the schema for you.

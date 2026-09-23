@@ -15,7 +15,6 @@
 """RrdSink writes the documented layout; read back with Rerun's RrdReader."""
 from __future__ import annotations
 
-import datetime
 import json
 import re
 import subprocess
@@ -25,6 +24,7 @@ import numpy as np
 import pytest
 
 rr = pytest.importorskip("rerun")
+pa = pytest.importorskip("pyarrow")
 from rerun.chunk import RrdReader  # noqa: E402
 
 from livekit.portal import (  # noqa: E402
@@ -75,16 +75,19 @@ def _read(path) -> dict[str, list[dict]]:
     rows: dict[str, list[dict]] = {}
     for chunk in RrdReader(path).store().stream().to_chunks():
         batch = chunk.to_record_batch()
-        cols = dict(zip(batch.schema.names, (c.to_pylist() for c in batch.columns)))
+        # Timestamps come back as integer nanoseconds: Arrow can't turn a
+        # nanosecond timestamp into a datetime without pandas.
+        cols = {
+            name: (col.cast(pa.int64()) if pa.types.is_timestamp(col.type) else col).to_pylist()
+            for name, col in zip(batch.schema.names, batch.columns)
+        }
         for i in range(batch.num_rows):
             rows.setdefault(str(chunk.entity_path), []).append({k: v[i] for k, v in cols.items()})
     return rows
 
 
 def _us(row, timeline):
-    # Arrow hands back naive datetimes in UTC; subtract instead of calling
-    # .timestamp(), which would read them as local time.
-    return (row[timeline] - datetime.datetime(1970, 1, 1)) // datetime.timedelta(microseconds=1)
+    return row[timeline] // 1_000
 
 
 def _record(tmp_path, jpeg_quality=95):

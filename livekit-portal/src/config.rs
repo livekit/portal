@@ -17,7 +17,7 @@ use crate::dtype::DType;
 use crate::types::{
     ActionSubscription, Role, StallBehavior, StallConfig, SyncConfig, TimeSyncSource,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
 /// explicit value. Tuned for inference workloads: visually near-lossless on
@@ -162,6 +162,12 @@ pub struct PortalConfig {
     /// Operator-side: which received actions reach `on_action`. See
     /// `set_action_subscription`.
     pub(crate) action_subscription: ActionSubscription,
+    /// Operator-side: bundle state and frames into observations. See
+    /// `set_observation_sync`.
+    pub(crate) observation_sync: bool,
+    /// Sync-only options the caller set explicitly, so a peer with sync off
+    /// can warn that they do nothing.
+    pub(crate) sync_options_set: BTreeSet<&'static str>,
 }
 
 impl PortalConfig {
@@ -186,6 +192,8 @@ impl PortalConfig {
             track_max_lag_ms: HashMap::new(),
             shared_key: None,
             action_subscription: ActionSubscription::None,
+            observation_sync: true,
+            sync_options_set: BTreeSet::new(),
         }
     }
 
@@ -203,6 +211,34 @@ impl PortalConfig {
 
     pub fn action_subscription(&self) -> ActionSubscription {
         self.action_subscription
+    }
+
+    /// Operator-side: bundle state and frames into `Observation`s. On by
+    /// default for operators. Only a peer that consumes bundles live needs
+    /// it, in practice a policy; a teleoperator flies on the newest frame,
+    /// and a recorder stores raw streams for offline alignment.
+    ///
+    /// Off means the sync buffer never runs: `on_observation` and
+    /// `get_observation` return `ObservationSyncDisabled`, `on_drop` never
+    /// fires, `metrics().sync` stays empty, and `slack`, `tolerance`,
+    /// `stall_behavior` and `max_lag_ms` do nothing. Frames and states
+    /// still arrive through `on_video_frame` and `on_state`. A local choice,
+    /// not part of the wire contract.
+    pub fn set_observation_sync(&mut self, enable: bool) {
+        self.observation_sync = enable;
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.observation_sync
+    }
+
+    /// Sync-only options that were set explicitly but do nothing because
+    /// observation sync is off. Empty when sync is on.
+    pub(crate) fn ignored_sync_options(&self) -> Vec<&'static str> {
+        match self.observation_sync {
+            true => Vec::new(),
+            false => self.sync_options_set.iter().copied().collect(),
+        }
     }
 
     /// Set a shared E2EE key. Both peers must call this with the same key
@@ -353,6 +389,7 @@ impl PortalConfig {
     pub fn set_tolerance(&mut self, ticks: f32) {
         assert!(ticks > 0.0, "tolerance must be > 0");
         self.tolerance = ticks;
+        self.sync_options_set.insert("tolerance");
     }
 
     /// Ticks of pipeline headroom — how much jitter, loss-detection latency,
@@ -362,6 +399,7 @@ impl PortalConfig {
     pub fn set_slack(&mut self, ticks: u32) {
         assert!(ticks > 0, "slack must be > 0");
         self.slack = ticks;
+        self.sync_options_set.insert("slack");
     }
 
     pub fn set_state_reliable(&mut self, reliable: bool) {
@@ -420,6 +458,7 @@ impl PortalConfig {
     )]
     pub fn set_reuse_stale_frames(&mut self, enable: bool) {
         self.reuse_stale_frames = enable;
+        self.sync_options_set.insert("reuse_stale_frames");
     }
 
     /// How a moment is resolved when a video track goes silent past its
@@ -444,6 +483,7 @@ impl PortalConfig {
     /// policy or writing it to a dataset.
     pub fn set_stall_behavior(&mut self, behavior: StallBehavior) {
         self.stall_behavior = behavior;
+        self.sync_options_set.insert("stall_behavior");
     }
 
     /// How far the fastest-advancing stream may run past a moment before it
@@ -463,6 +503,7 @@ impl PortalConfig {
     /// **Receiving side only**, like [`set_stall_behavior`](Self::set_stall_behavior).
     pub fn set_max_lag_ms(&mut self, ms: u32) {
         self.max_lag_ms = Some(ms);
+        self.sync_options_set.insert("max_lag_ms");
     }
 
     /// Per-track override for [`set_stall_behavior`](Self::set_stall_behavior). Use it
@@ -472,11 +513,13 @@ impl PortalConfig {
     /// take the rest of the frame set down with it.
     pub fn set_track_stall_behavior(&mut self, track: impl Into<String>, behavior: StallBehavior) {
         self.track_stall_behavior.insert(track.into(), behavior);
+        self.sync_options_set.insert("stall_behavior");
     }
 
     /// Per-track override for [`set_max_lag_ms`](Self::set_max_lag_ms).
     pub fn set_track_max_lag_ms(&mut self, track: impl Into<String>, ms: u32) {
         self.track_max_lag_ms.insert(track.into(), ms);
+        self.sync_options_set.insert("max_lag_ms");
     }
 
     /// Effective stall config for one track, after applying per-track

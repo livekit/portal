@@ -379,6 +379,15 @@ impl Portal {
                 .collect(),
         );
 
+        let ignored = config.ignored_sync_options();
+        if !ignored.is_empty() {
+            log::warn!(
+                "[{}] observation sync is off, so these options do nothing: {}",
+                config.session,
+                ignored.join(", ")
+            );
+        }
+
         let clock = Arc::new(SyncedClock::new(ClockOptions {
             is_reference: config.role == Role::Robot,
             source: config.time_sync_source,
@@ -1045,8 +1054,18 @@ impl Portal {
     /// Clone of the latest observation, or `None` if none received yet.
     /// Consumers wanting a history of observations should register
     /// `on_observation` and buffer on their own side.
-    pub fn get_observation(&self) -> Option<Observation> {
-        self.obs_sink.get()
+    /// Latest observation, or `ObservationSyncDisabled` when observation
+    /// sync is off.
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
+        self.require_observation_sync()?;
+        Ok(self.obs_sink.get())
+    }
+
+    fn require_observation_sync(&self) -> PortalResult<()> {
+        match self.config.observation_sync {
+            true => Ok(()),
+            false => Err(PortalError::ObservationSyncDisabled),
+        }
     }
 
     /// Clone of the latest action received (Robot side), or `None`.
@@ -1076,8 +1095,19 @@ impl Portal {
         *self.action.cb.lock() = Some(Box::new(callback));
     }
 
-    pub fn on_observation(&self, callback: impl Fn(&Observation) + Send + Sync + 'static) {
+    pub fn on_observation(
+        &self,
+        callback: impl Fn(&Observation) + Send + Sync + 'static,
+    ) -> PortalResult<()> {
+        self.require_observation_sync()?;
         self.obs_sink.set_observation_cb(Box::new(callback));
+        Ok(())
+    }
+
+    /// Whether this peer bundles observations. See
+    /// `PortalConfig::set_observation_sync`.
+    pub fn observation_sync(&self) -> bool {
+        self.config.observation_sync
     }
 
     /// Fire on every received state. Semantics mirror `on_action`.
@@ -1181,14 +1211,16 @@ impl Portal {
         // arrivals by name, regardless of whether they came from a WebRTC
         // RTP track or a frame-video byte stream. `all_track_names` was
         // computed once at construction.
-        let sync_buffer = Arc::new(Mutex::new(SyncBuffer::new(
-            &self.all_track_names,
-            self.config.state_schema.clone(),
-            self.config.sync_config(),
-            self.config.stall_configs(&self.all_track_names),
-            self.metrics.clone(),
-        )));
-        *self.sync_buffer.lock() = Some(sync_buffer);
+        if self.config.observation_sync {
+            let sync_buffer = Arc::new(Mutex::new(SyncBuffer::new(
+                &self.all_track_names,
+                self.config.state_schema.clone(),
+                self.config.sync_config(),
+                self.config.stall_configs(&self.all_track_names),
+                self.metrics.clone(),
+            )));
+            *self.sync_buffer.lock() = Some(sync_buffer);
+        }
 
         if !self.config.action_schema.is_empty() {
             let mode = if self.config.action_reliable { "reliable" } else { "unreliable" };
@@ -1417,28 +1449,26 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 let track_name = publication.name();
                 if ctx.config.video_tracks.iter().any(|s| s.name == track_name) {
                     log::info!("[{}] subscribed to video track '{track_name}'", ctx.config.session);
-                    if let Some(sync_buffer) = &ctx.sync_buffer {
-                        let slots = ctx
-                            .video_tracks
-                            .get(track_name.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| Arc::new(VideoTrackSlots::new()));
-                        let track_metrics = ctx
-                            .metrics
-                            .track(track_name.as_str())
-                            .expect("track metrics registered at construction");
+                    let slots = ctx
+                        .video_tracks
+                        .get(track_name.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(VideoTrackSlots::new()));
+                    let track_metrics = ctx
+                        .metrics
+                        .track(track_name.as_str())
+                        .expect("track metrics registered at construction");
 
-                        let stream = NativeVideoStream::new(video_track.rtc_track());
-                        let receiver = VideoReceiver::spawn(
-                            track_name.to_string(),
-                            stream,
-                            sync_buffer.clone(),
-                            slots,
-                            ctx.obs_sink.clone(),
-                            track_metrics,
-                        );
-                        ctx.video_receivers.lock().insert(track_name.to_string(), receiver);
-                    }
+                    let stream = NativeVideoStream::new(video_track.rtc_track());
+                    let receiver = VideoReceiver::spawn(
+                        track_name.to_string(),
+                        stream,
+                        ctx.sync_buffer.clone(),
+                        slots,
+                        ctx.obs_sink.clone(),
+                        track_metrics,
+                    );
+                    ctx.video_receivers.lock().insert(track_name.to_string(), receiver);
                 }
             }
         }
@@ -1492,9 +1522,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             {
                 return;
             }
-            let Some(sync_buffer) = ctx.sync_buffer.clone() else {
-                return;
-            };
+            let sync_buffer = ctx.sync_buffer.clone();
             let Some(reader) = reader.take() else {
                 return;
             };
@@ -1510,7 +1538,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     // zero-copy view of the wire payload all the
                     // way to `VideoFrameData.data`.
                     Ok(payload) => {
-                        dispatch_frame_payload(payload, &entries, &sync_buffer, &obs_sink)
+                        dispatch_frame_payload(payload, &entries, sync_buffer.as_ref(), &obs_sink)
                     }
                     Err(e) => {
                         log::warn!("[bad-payload] failed to read frame_video byte stream: {e}")

@@ -25,6 +25,7 @@ Each logical channel maps to one LiveKit primitive on one reserved topic.
 | Action | `portal_action` | data packet | yes | operator |
 | Frame video | `portal_frame_video` | byte stream | yes | robot |
 | Clock | `portal_clock` | data packet | no | robot answers, others ping |
+| Keypoint | `portal_keypoint` | data packet | yes | any role |
 | WebRTC video | the track name | media track | n/a | robot |
 
 All topic names are exact, case-sensitive literals. A peer must filter incoming
@@ -300,6 +301,23 @@ peer calls the RPC again.
 
 To claim control as an operator, call `portal.set_active_operator` on the robot
 with your own identity as the payload.
+
+## Keypoint
+
+A free-form annotation, broadcast as a **reliable** data packet on
+`portal_keypoint`. The payload is UTF-8 JSON:
+
+```json
+{"type": "recording", "payload": {"task_description": "pick the blue cube"}, "timestamp_us": 1790184569394000}
+```
+
+- `type` is any string and `payload` any JSON object; `payload` may be omitted
+  and reads as `{}`. Portal defines nothing else and interprets neither field.
+- `timestamp_us` is where the mark belongs, on the robot's clock.
+- Receivers ignore unknown fields, and drop malformed packets and packets from
+  participants that are not a recognised Portal peer.
+- A keypoint must fit in one data packet (64 KB negotiated on a local server);
+  a larger one fails at send time.
 
 ## Application RPC
 

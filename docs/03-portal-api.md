@@ -759,6 +759,10 @@ obs.operators() / obs.observers() / obs.robot_identity() / obs.local_identity()
 obs.on_operator_joined(cb) / obs.on_operator_left(cb)
 obs.on_active_operator_changed(cb)
 
+# recording
+obs.record_to(sink, max_queued_frames=64, metrics_interval_s=1.0) / obs.stop_recording()
+obs.metrics().observer          # recording, frames_written, frames_dropped, queued
+
 # keypoints, time sync, rpc, metrics, lifecycle: as on the operator
 await obs.send_keypoint(type, payload=None, timestamp_us=None) / obs.on_keypoint(cb)
 ```
@@ -768,6 +772,40 @@ defaults to `set_action_subscription("active")` and observation sync off. The
 robot accepts `set_active_operator` from operators and observers, and every
 role has `observers()`, listed apart from `operators()` so the latter only
 holds peers that can drive.
+
+### Recording
+
+An observer writes what it hears to a **sink**:
+
+```python
+from livekit.portal.recording import Sink, SessionInfo
+
+class JsonlSink:
+    def open(self, session: SessionInfo) -> None: ...   # session, schemas, tracks, time sync source
+    def write_state(self, state) -> None: ...
+    def write_frame(self, track, frame) -> None: ...
+    def write_action(self, action) -> None: ...
+    def write_keypoint(self, keypoint) -> None: ...
+    def write_metrics(self, metrics) -> None: ...
+    def close(self) -> None: ...
+
+obs.record_to(JsonlSink(), max_queued_frames=64, metrics_interval_s=1.0)
+...
+obs.stop_recording()   # or disconnect(): writes what is queued, then close()
+```
+
+- **Portal calls the sink from its own writer thread, behind a queue**, so a slow
+  disk never stalls the receive path. Calls arrive in the order the observer
+  heard them, with `open` first and `close` last.
+- **Only video frames are dropped when the sink falls behind.** Once
+  `max_queued_frames` frames are waiting, new ones are dropped and counted in
+  `metrics().observer.frames_dropped`. State, actions and keypoints are never
+  dropped.
+- `record_to` calls `open` right away and raises what it raises. A write that
+  raises is logged once per kind and skipped, so one bad record doesn't end the
+  recording.
+- Actions follow the observer's action subscription: `"active"` by default,
+  `"all"` to also record shadow actions tagged `active=False`.
 
 ## Using `Portal` directly
 

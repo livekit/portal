@@ -51,6 +51,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 _log = logging.getLogger(__name__)
 
 from . import _frame
+from ._recording import ObserverMetrics, Recorder, SessionInfo, Sink, _Converters
 from . import livekit_portal_ffi as _ffi
 from ._frame import frame_bytes_to_numpy_rgb
 
@@ -322,6 +323,15 @@ def _wrap_action(
     )
 
 
+def _wrap_keypoint(keypoint: _ffi.Keypoint) -> Keypoint:
+    return Keypoint(
+        type=keypoint.kind,
+        payload=json.loads(keypoint.payload_json),
+        timestamp_us=keypoint.timestamp_us,
+        sender=keypoint.sender,
+    )
+
+
 def _wrap_state(
     state: _ffi.State, schema: List[FieldSpec]
 ) -> State:
@@ -375,6 +385,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
         self._time_synced_cb: Optional[Callable[[], Any]] = None
         self._keypoint_cb: Optional[Callable[[Keypoint], Any]] = None
+        # Recording tap: sees every raw record on the delivering thread,
+        # ahead of (and independent of) the user callbacks.
+        self._tap: Optional[Callable[[str, Any], None]] = None
         # Schemas are frozen at Portal construction and read by the wrap
         # helpers below on every delivery.
         self._action_schema = action_schema
@@ -394,11 +407,17 @@ class _Dispatcher(_ffi.PortalCallbacks):
     # --- PortalCallbacks trait impls (called from Rust/tokio thread) --------
 
     def on_action(self, action: _ffi.Action) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("action", action)
         cb = self._action_cb
         if cb is not None:
             self._schedule(cb, _wrap_action(action, self._action_schema))
 
     def on_state(self, state: _ffi.State) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("state", state)
         cb = self._state_cb
         if cb is not None:
             self._schedule(cb, _wrap_state(state, self._state_schema))
@@ -411,6 +430,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
             )
 
     def on_video_frame(self, track_name: str, frame: VideoFrameData) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("frame", (track_name, frame))
         cb = self._video_cbs.get(track_name)
         if cb is not None:
             self._schedule(cb, track_name, frame)
@@ -445,17 +467,12 @@ class _Dispatcher(_ffi.PortalCallbacks):
             self._schedule(cb)
 
     def on_keypoint(self, keypoint: _ffi.Keypoint) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("keypoint", keypoint)
         cb = self._keypoint_cb
         if cb is not None:
-            self._schedule(
-                cb,
-                Keypoint(
-                    type=keypoint.kind,
-                    payload=json.loads(keypoint.payload_json),
-                    timestamp_us=keypoint.timestamp_us,
-                    sender=keypoint.sender,
-                ),
-            )
+            self._schedule(cb, _wrap_keypoint(keypoint))
 
     # --- Registration (from Python user thread) -----------------------------
 
@@ -485,6 +502,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
 
     def set_time_synced(self, cb: Callable[[], Any]) -> None:
         self._time_synced_cb = cb
+
+    def set_tap(self, tap: Optional[Callable[[str, Any], None]]) -> None:
+        self._tap = tap
 
     def set_keypoint(self, cb: Callable[[Keypoint], Any]) -> None:
         self._keypoint_cb = cb
@@ -2028,7 +2048,7 @@ class Observer:
     operators and observers alike.
     """
 
-    __slots__ = ("_portal",)
+    __slots__ = ("_portal", "_config", "_recorder")
 
     def __init__(self, config: ObserverConfig) -> None:
         # Back the facade with `_ffi.Operator` — the role-split surface
@@ -2038,6 +2058,8 @@ class Observer:
             config.state_schema,
             config.action_schema,
         )
+        self._config = config
+        self._recorder: Optional[Recorder] = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -2045,10 +2067,73 @@ class Observer:
         await self._portal.connect(url, token)
 
     async def disconnect(self) -> None:
+        """Disconnect, then finish any recording: queued records are written
+        and the sink is closed."""
         await self._portal.disconnect()
+        await asyncio.to_thread(self.stop_recording)
 
     def close(self) -> None:
+        self.stop_recording()
         self._portal.close()
+
+    # -- recording -----------------------------------------------------------
+
+    def record_to(
+        self,
+        sink: Sink,
+        *,
+        max_queued_frames: int = 64,
+        metrics_interval_s: Optional[float] = 1.0,
+    ) -> None:
+        """Write everything this observer hears to `sink`: state, video
+        frames, actions (per the action subscription) and keypoints, in the
+        order they arrive, plus `metrics()` every `metrics_interval_s`
+        seconds (`None` turns that off).
+
+        Calls `sink.open` right away and raises what it raises. The sink is
+        then fed from a writer thread behind a queue. When more than
+        `max_queued_frames` video frames are waiting, new frames are dropped
+        and counted in `metrics().observer.frames_dropped`; state, actions
+        and keypoints are never dropped. A write that raises is logged and
+        skipped. Recording to a second sink before `stop_recording` raises.
+        """
+        if self._recorder is not None:
+            raise RuntimeError("already recording; call stop_recording() first")
+        portal = self._portal
+        recorder = Recorder(
+            sink,
+            _Converters(
+                state=lambda raw: _wrap_state(raw, portal._state_schema),
+                action=lambda raw: _wrap_action(raw, portal._action_schema),
+                keypoint=_wrap_keypoint,
+                metrics=portal.metrics,
+            ),
+            max_queued_frames=max_queued_frames,
+            metrics_interval_s=metrics_interval_s,
+        )
+        recorder.start(
+            SessionInfo(
+                session=self._config.session,
+                local_identity=portal.local_identity(),
+                state_schema=list(self._config.state_schema),
+                action_schema=list(self._config.action_schema),
+                video_tracks=list(self._config.video_track_specs),
+                time_sync_source=self._config.time_sync_source,
+                started_at_us=portal.now_us(),
+            )
+        )
+        self._recorder = recorder
+        portal._dispatcher.set_tap(recorder.enqueue)
+
+    def stop_recording(self) -> None:
+        """Stop feeding the sink, write what is already queued, and close it.
+        Blocks until the writer thread is done. A no-op when not recording."""
+        recorder = self._recorder
+        if recorder is None:
+            return
+        self._portal._dispatcher.set_tap(None)
+        self._recorder = None
+        recorder.stop()
 
     # -- no publishing ------------------------------------------------------
 
@@ -2195,7 +2280,11 @@ class Observer:
     # -- metrics -------------------------------------------------------------
 
     def metrics(self) -> PortalMetrics:
-        return self._portal.metrics()
+        """Portal metrics plus `.observer`, the recording counters."""
+        m = self._portal.metrics()
+        recorder = self._recorder
+        m.observer = recorder.metrics() if recorder is not None else ObserverMetrics()
+        return m
 
     def reset_metrics(self) -> None:
         self._portal.reset_metrics()

@@ -807,6 +807,47 @@ obs.stop_recording()   # or disconnect(): writes what is queued, then close()
 - Actions follow the observer's action subscription: `"active"` by default,
   `"all"` to also record shadow actions tagged `active=False`.
 
+#### `RrdSink`
+
+The built-in sink writes one Rerun `.rrd` archive per recording. It ships as an
+extra so the core package does not depend on Rerun:
+
+```bash
+pip install 'livekit-portal[rerun]'
+```
+
+```python
+from livekit.portal.recording import RrdSink
+
+obs.record_to(RrdSink("data/sessions", jpeg_quality=95))   # 0 stores frames uncompressed
+# writes data/sessions/<session>-<UTC start>.rrd
+```
+
+Two timelines, both on the robot's clock:
+
+| Entity | `robot_time` | `action_time` |
+|---|---|---|
+| `observation/<field>` | state timestamp | — |
+| `observation/<track>` | frame timestamp (JPEG) | — |
+| `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
+| `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | — |
+| `metrics/*` | observer's `now_us()` | — |
+| `portal/schema` | static: field order and dtypes, tracks, time sync source | — |
+
+- **`robot_time` lines up an action with the frame it answered.** Scrub to any
+  instant and the frame, the state and the action taken in response share a row.
+- **`action_time` keeps every action.** Rerun keeps one value per entity per
+  timestamp, so two actions answering the same frame would overwrite each other
+  on `robot_time` alone.
+- **`portal/schema` records field order.** Rerun entities are independent, so
+  without it anything reading the file would have to guess joint order.
+- **`action/<sender>/active`** is 1 for actions the robot executed and 0 for
+  shadow actions, recorded with `set_action_subscription("all")`.
+
+Turning archives into datasets (LeRobot or anything else) is up to your own
+tooling. For other formats, such as MCAP or your own storage, write your own
+sink.
+
 ## Using `Portal` directly
 
 `Robot` and `Operator` are facades over a unified `Portal` class, which is also

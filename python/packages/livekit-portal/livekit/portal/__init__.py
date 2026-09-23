@@ -2120,6 +2120,7 @@ class Observer:
                 video_tracks=list(self._config.video_track_specs),
                 time_sync_source=self._config.time_sync_source,
                 started_at_us=portal.now_us(),
+                now_us=portal.now_us,
             )
         )
         self._recorder = recorder

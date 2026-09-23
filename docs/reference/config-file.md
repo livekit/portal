@@ -100,6 +100,9 @@ action_reliable: true
 stall_behavior: drop               # drop | freeze | omit
 max_lag_ms: 166              # wait this long first; default is slack / fps
 
+# Clock
+time_sync_source: portal     # portal (sync to the robot) | system (trust the host clock)
+
 # Operator-only opt-in
 action_subscription: false   # receive executed actions, for HITL recording
 
@@ -135,6 +138,7 @@ action:
 | `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
 | `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |
 | `reuse_stale_frames` | bool | `false` | Deprecated. Alias for `stall_behavior: freeze` with `max_lag_ms: 0`. |
+| `time_sync_source` | string | `portal` | Where `now_us()` comes from. `portal` syncs to the robot's clock. `system` trusts the host clock, for hosts kept in step by PTP or GPS. |
 | `action_subscription` | bool | `false` | Operator-side opt-in for receiving executed actions. No-op on the robot. |
 | `videos` | list | `[]` | Declared video tracks. |
 | `state` | list | `[]` | Declared state schema. |
@@ -252,6 +256,7 @@ The loader produces the same config you would build by hand.
 | `stall_behavior` | `cfg.set_stall_behavior(...)` / `cfg.set_track_stall_behavior(...)` |
 | `max_lag_ms` | `cfg.set_max_lag_ms(...)` / `cfg.set_track_max_lag_ms(...)` |
 | `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` (deprecated) |
+| `time_sync_source` | `cfg.set_time_sync_source(...)` |
 | `action_subscription` | `cfg.set_action_subscription(...)` |
 | `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=...)` |
 | `state[]` | `cfg.add_state_typed([...])` |

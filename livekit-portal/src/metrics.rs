@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::types::TimeSyncSource;
+
 /// Snapshot of portal metrics. Counters are cumulative since construction
 /// (or the last `reset_metrics()` call); gauges reflect instantaneous state.
 #[derive(Debug, Clone, Default)]
@@ -109,11 +111,16 @@ pub struct BufferMetrics {
 /// the counters: zeroing `synced` or `offset_us` would look like lost sync.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimeSyncMetrics {
+    pub source: TimeSyncSource,
     pub synced: bool,
     /// Robot clock minus local clock, as currently applied to `now_us()`.
     pub offset_us: i64,
-    /// How far off `now_us()` could be. `None` until synced.
+    /// How far off `now_us()` could be. `None` until synced, and always in
+    /// `system` mode, where nothing is applied.
     pub uncertainty_us: Option<u64>,
+    /// Latest offset the exchange measured, applied or not. In `system`
+    /// mode a non-zero value means the host clocks have drifted apart.
+    pub measured_offset_us: Option<i64>,
     pub resyncs: u64,
     pub samples_rejected: u64,
 }

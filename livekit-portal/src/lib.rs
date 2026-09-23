@@ -46,5 +46,5 @@ pub use portal::{
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
     Action, FrameSource, Observation, Role, StallBehavior, StallConfig, State, SyncConfig,
-    TypedValue, VideoFrameData,
+    TimeSyncSource, TypedValue, VideoFrameData,
 };

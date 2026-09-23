@@ -296,6 +296,33 @@ impl From<StallBehavior> for core::StallBehavior {
     }
 }
 
+/// Where `now_us()` comes from. `PORTAL` syncs to the robot's clock;
+/// `SYSTEM` trusts the host clock, for hosts kept in step by PTP or GPS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum TimeSyncSource {
+    #[default]
+    Portal,
+    System,
+}
+
+impl From<TimeSyncSource> for core::TimeSyncSource {
+    fn from(s: TimeSyncSource) -> Self {
+        match s {
+            TimeSyncSource::Portal => core::TimeSyncSource::Portal,
+            TimeSyncSource::System => core::TimeSyncSource::System,
+        }
+    }
+}
+
+impl From<core::TimeSyncSource> for TimeSyncSource {
+    fn from(s: core::TimeSyncSource) -> Self {
+        match s {
+            core::TimeSyncSource::Portal => TimeSyncSource::Portal,
+            core::TimeSyncSource::System => TimeSyncSource::System,
+        }
+    }
+}
+
 /// Decoded video frame. `data` is packed RGB24 (R,G,B byte order, `W*H*3`
 /// bytes) on both sides — `send_video_frame` accepts RGB, and receive-side
 /// frames are color-converted from I420 (WebRTC) or codec-decoded (frame
@@ -401,9 +428,11 @@ pub struct RttMetrics {
 /// Clock sync with the robot. `reset_metrics()` only zeroes the counters.
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct TimeSyncMetrics {
+    pub source: TimeSyncSource,
     pub synced: bool,
     pub offset_us: i64,
     pub uncertainty_us: Option<u64>,
+    pub measured_offset_us: Option<i64>,
     pub resyncs: u64,
     pub samples_rejected: u64,
 }
@@ -718,6 +747,14 @@ impl PortalConfig {
     /// Test hook: shifts this peer's local clock.
     pub fn set_clock_skew_us(&self, skew_us: i64) {
         self.inner.lock().set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.lock().set_time_sync_source(source.into());
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.lock().time_sync_source().into()
     }
 
     #[allow(deprecated)]
@@ -1221,6 +1258,14 @@ impl RobotConfig {
         self.inner.set_clock_skew_us(skew_us);
     }
 
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.set_time_sync_source(source);
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.time_sync_source()
+    }
+
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
         self.inner.set_e2ee_key(key);
     }
@@ -1402,6 +1447,14 @@ impl OperatorConfig {
     /// Test hook: shifts this peer's local clock.
     pub fn set_clock_skew_us(&self, skew_us: i64) {
         self.inner.set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.set_time_sync_source(source);
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.time_sync_source()
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -1858,9 +1911,11 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             pongs_received: m.rtt.pongs_received,
         },
         time_sync: TimeSyncMetrics {
+            source: m.time_sync.source.into(),
             synced: m.time_sync.synced,
             offset_us: m.time_sync.offset_us,
             uncertainty_us: m.time_sync.uncertainty_us,
+            measured_offset_us: m.time_sync.measured_offset_us,
             resyncs: m.time_sync.resyncs,
             samples_rejected: m.time_sync.samples_rejected,
         },

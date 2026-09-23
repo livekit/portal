@@ -26,7 +26,19 @@
         def close(self) -> None: ...
 
     observer.record_to(MySink())
+
+`RrdSink` writes Rerun archives; it needs `pip install 'livekit-portal[rerun]'`.
 """
 from ._recording import ObserverMetrics, SessionInfo, Sink
 
-__all__ = ["Sink", "SessionInfo", "ObserverMetrics"]
+__all__ = ["Sink", "SessionInfo", "ObserverMetrics", "RrdSink"]
+
+
+def __getattr__(name: str):
+    # `RrdSink` pulls in Rerun, which ships as the `[rerun]` extra; importing
+    # this module must keep working without it.
+    if name == "RrdSink":
+        from ._rrd import RrdSink
+
+        return RrdSink
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

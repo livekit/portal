@@ -15,6 +15,7 @@ concurrency:
 # come from the media/capture transitive deps. Matches livekit/rust-sdks' own
 # CI recipe, minus the desktop-capture and NVIDIA bits we don't compile.
 env:
+  LIVEKIT_SERVER_VERSION: 1.13.5
   LINUX_SYSTEM_DEPS: >-
     libssl-dev
     libglib2.0-dev
@@ -98,6 +99,28 @@ jobs:
         working-directory: python
         run: uv sync --group dev
 
+      # Integration tests skip themselves without `LIVEKIT_URL`, so a dev
+      # server is what turns them on.
+      - name: Start LiveKit dev server
+        run: |
+          curl -sSfL "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_SERVER_VERSION}/livekit_${LIVEKIT_SERVER_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" livekit-server
+          "$RUNNER_TEMP/livekit-server" --dev > "$RUNNER_TEMP/livekit-server.log" 2>&1 &
+          timeout 30 bash -c 'until curl -sf http://localhost:7880 > /dev/null; do sleep 0.5; done'
+
       - name: Run pytest
         working-directory: python
+        env:
+          LIVEKIT_URL: ws://localhost:7880
         run: uv run pytest packages/livekit-portal/tests -v
+
+      - name: Run stress tests
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: python
+        env:
+          LIVEKIT_URL: ws://localhost:7880
+        run: uv run pytest packages/livekit-portal/tests -v -m stress
+
+      - name: LiveKit server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/livekit-server.log"

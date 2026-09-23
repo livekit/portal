@@ -52,7 +52,7 @@ def _rss_mib() -> float:
         return rss / (1024 * 1024)
     return rss / 1024
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.stress]
 SETTLE_S = 0.6
 
 

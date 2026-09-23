@@ -32,6 +32,9 @@ integration = [
 # into example directories at repo root.
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Stress tests push multi-MB frames for minutes; run them with `-m stress`.
+addopts = "-m 'not stress'"
+markers = ["stress: long-running load tests, excluded by default"]
 
 # The Rust cdylib and generated UniFFI module are built out-of-band via
 # the repo-root `scripts/build_ffi_python.sh` and dropped into

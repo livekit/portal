@@ -83,19 +83,20 @@ Full walkthrough in [Quickstart](docs/01-quickstart.md).
 
 ## Features
 
-**Multi-operator sessions.** A robot, policies, humans, recorders, and supervisors
-all join one room. The robot listens to whichever operator holds control, and
-everyone else streams silently and is dropped at the gate. Handoff is
-`await op.set_active_operator("human-binh")` from any participant. Built on
-LiveKit participant attributes plus one RPC method.
+**Multi-operator sessions.** A robot, policies and humans join one room as
+operators, and recorders and supervisors as observers. The robot listens to
+whichever operator holds control, and everyone else's actions are dropped at the
+gate. Handoff is `await op.set_active_operator("human-binh")` from any operator
+or observer. Built on LiveKit participant attributes plus one RPC method.
 
 **Human in the loop.** Policy drives, human takes over to demonstrate a
 correction, policy resumes. The robot's stream of executed actions stays
 continuous across the cutover.
 
-**HITL data recording.** A passive operator joins with
-`set_action_subscription(True)` and receives every executed action, labeled with
-`action.sender` and paired with its observation. About 50 lines.
+**HITL data recording.** An observer records state, video, every executed action
+(labeled with `action.sender`) and keypoints marking each take to a Rerun
+archive with `obs.record_to(RrdSink("data"))`. Every peer syncs to the robot's
+clock, so streams from several participants line up in the file.
 
 **Built for VLA inference.** Stamp actions with `in_reply_to_ts_us` and
 `metrics.policy.e2e_us_p95` gives you true observation-to-action latency rather
@@ -162,6 +163,7 @@ under [`examples/python/`](examples/python).
 | [`basic/`](examples/python/basic) | none | The whole API end to end, with synthetic video. Also ships a YAML-config variant. Start here. |
 | [`inference/`](examples/python/inference) | none | A VLA-shaped loop that plans a horizon and streams one action per tick, with true end-to-end latency metrics. |
 | [`modal-mock-inference/`](examples/python/modal-mock-inference) | none | Runs the policy on [Modal](https://modal.com) and measures real glass-to-glass latency with a QR clock. |
+| [`recording/`](examples/python/recording) | none | Observers recording the basic example to a Rerun archive and handing control between operators, with keypoints marking each take. |
 | [`so101/`](examples/python/so101) | 2x SO-101 | A physical SO-101 follower driven by a remote SO-101 leader, rendered in [rerun](https://rerun.io). |
 
 ```bash
@@ -247,7 +249,8 @@ Start with the [docs index](docs/) for a guided path.
 
 **Then as needed:** [Tuning](docs/04-tuning.md) ·
 [Frame video](docs/05-frame-video.md) · [RPC](docs/06-rpc.md) ·
-[Metrics](docs/07-metrics.md) · [Troubleshooting](docs/08-troubleshooting.md)
+[Metrics](docs/07-metrics.md) · [Troubleshooting](docs/08-troubleshooting.md) ·
+[Migrating to v0.3](docs/09-migrating-to-v0.3.md)
 
 **Reference:** [Config from YAML](docs/reference/config-file.md) ·
 [E2EE](docs/reference/e2ee.md) ·

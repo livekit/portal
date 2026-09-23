@@ -1,0 +1,17 @@
+[project]
+name = "livekit-portal-recording-example"
+version = "0.1.0"
+description = "Observers recording a Portal session to Rerun and handing control between operators"
+requires-python = ">=3.12"
+dependencies = [
+    "livekit-portal[rerun]",
+    "livekit-api>=0.7",
+    "python-dotenv>=1",
+    "numpy>=1.24",
+]
+
+# Relative path so the example stays self-contained: `uv sync` in this
+# directory links livekit-portal as an editable install from the package
+# source tree without requiring workspace coordination.
+[tool.uv.sources]
+livekit-portal = { path = "../../../python/packages/livekit-portal", editable = true }

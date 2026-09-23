@@ -70,8 +70,8 @@ the plugins are a thin wrapper over the same model. Then
 Code samples are Python. The same model holds in the Rust core and in the
 other LiveKit SDKs.
 
-"Robot" and "Operator" are the two roles. One robot per session, any number of
-operators. See [Concepts](02-concepts.md).
+"Robot", "Operator" and "Observer" are the three roles. One robot per session,
+any number of operators and observers. See [Concepts](02-concepts.md).
 
 Samples that show a full file are runnable as written once you fill in your
 LiveKit credentials. Samples that show a fragment say so.

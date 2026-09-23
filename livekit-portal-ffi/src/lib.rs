@@ -59,6 +59,7 @@ fn init_logging() {
 pub enum Role {
     Robot,
     Operator,
+    Observer,
 }
 
 impl From<Role> for core::Role {
@@ -66,6 +67,7 @@ impl From<Role> for core::Role {
         match r {
             Role::Robot => core::Role::Robot,
             Role::Operator => core::Role::Operator,
+            Role::Observer => core::Role::Observer,
         }
     }
 }
@@ -75,6 +77,7 @@ impl From<core::Role> for Role {
         match r {
             core::Role::Robot => Role::Robot,
             core::Role::Operator => Role::Operator,
+            core::Role::Observer => Role::Observer,
         }
     }
 }
@@ -1179,6 +1182,10 @@ impl Portal {
         self.inner.operators()
     }
 
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
+    }
+
     /// Robot's identity if discovered, else `None`. Operator-side helper.
     pub fn robot_identity(&self) -> Option<String> {
         self.inner.robot_identity()
@@ -1710,6 +1717,10 @@ impl Robot {
         self.inner.operators()
     }
 
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
+    }
+
     pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
         self.inner.register_rpc_method(method, handler);
     }
@@ -1841,6 +1852,335 @@ impl Operator {
 
     pub fn operators(&self) -> Vec<String> {
         self.inner.operators()
+    }
+
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
+    }
+
+    pub fn robot_identity(&self) -> Option<String> {
+        self.inner.robot_identity()
+    }
+
+    pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
+        self.inner.register_rpc_method(method, handler);
+    }
+
+    pub fn unregister_rpc_method(&self, method: String) {
+        self.inner.unregister_rpc_method(method);
+    }
+
+    pub async fn perform_rpc(
+        &self,
+        destination: Option<String>,
+        method: String,
+        payload: String,
+        response_timeout_ms: Option<u64>,
+    ) -> PortalResult<String> {
+        self.inner.perform_rpc(destination, method, payload, response_timeout_ms).await
+    }
+
+    pub fn metrics(&self) -> PortalMetrics {
+        self.inner.metrics()
+    }
+
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+
+    pub fn reset_metrics(&self) {
+        self.inner.reset_metrics();
+    }
+}
+
+/// Observer-side session config. Same declarative surface as
+/// `OperatorConfig`; the role is pinned to `Role::Observer` internally, and
+/// it defaults to `ActionSubscription::Active` with observation sync off. Identity is set on the
+/// LiveKit access token at mint time and read back via
+/// `Observer::local_identity` after `connect()` — there is no config-level
+/// identity field.
+#[derive(uniffi::Object)]
+pub struct ObserverConfig {
+    inner: Arc<PortalConfig>,
+}
+
+#[uniffi::export]
+impl ObserverConfig {
+    #[uniffi::constructor]
+    pub fn new(session: String) -> Arc<Self> {
+        Arc::new(Self { inner: PortalConfig::new(session, Role::Observer) })
+    }
+
+    /// Build an `ObserverConfig` from a YAML string. See
+    /// `PortalConfig::from_yaml_str` for the schema and semantics.
+    #[uniffi::constructor]
+    pub fn from_yaml_str(yaml: String, session: String) -> Result<Arc<Self>, ConfigFileError> {
+        Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Observer)? }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_video(
+        &self,
+        name: String,
+        codec: VideoCodec,
+        quality: u8,
+        max_bitrate_kbps: Option<u32>,
+        simulcast: Option<bool>,
+        screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
+    ) {
+        self.inner.add_video(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
+        );
+    }
+
+    pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_state_typed(schema);
+    }
+
+    pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_action_typed(schema);
+    }
+
+    pub fn set_fps(&self, fps: u32) {
+        self.inner.set_fps(fps);
+    }
+
+    pub fn set_slack(&self, ticks: u32) {
+        self.inner.set_slack(ticks);
+    }
+
+    pub fn set_tolerance(&self, ticks: f32) {
+        self.inner.set_tolerance(ticks);
+    }
+
+    pub fn set_state_reliable(&self, reliable: bool) {
+        self.inner.set_state_reliable(reliable);
+    }
+
+    pub fn set_action_reliable(&self, reliable: bool) {
+        self.inner.set_action_reliable(reliable);
+    }
+
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.set_time_sync_source(source);
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.time_sync_source()
+    }
+
+    pub fn set_observation_sync(&self, enable: bool) {
+        self.inner.set_observation_sync(enable);
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
+    }
+
+    pub fn set_e2ee_key(&self, key: Vec<u8>) {
+        self.inner.set_e2ee_key(key);
+    }
+
+    #[allow(deprecated)]
+    pub fn set_reuse_stale_frames(&self, enable: bool) {
+        self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.set_stall_behavior(behavior);
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.set_track_stall_behavior(track, behavior);
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.set_track_max_lag_ms(track, ms);
+    }
+
+    /// Which received actions reach `on_action`. See
+    /// `PortalConfig::set_action_subscription`.
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.set_action_subscription(subscription);
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    pub fn state_schema(&self) -> Vec<FieldSpec> {
+        self.inner.state_schema()
+    }
+
+    pub fn action_schema(&self) -> Vec<FieldSpec> {
+        self.inner.action_schema()
+    }
+
+    pub fn session(&self) -> String {
+        self.inner.session()
+    }
+
+    pub fn role(&self) -> Role {
+        self.inner.role()
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.inner.fps()
+    }
+
+    pub fn slack(&self) -> u32 {
+        self.inner.slack()
+    }
+
+    pub fn tolerance(&self) -> f32 {
+        self.inner.tolerance()
+    }
+
+    pub fn state_reliable(&self) -> bool {
+        self.inner.state_reliable()
+    }
+
+    pub fn action_reliable(&self) -> bool {
+        self.inner.action_reliable()
+    }
+
+    #[allow(deprecated)]
+    pub fn reuse_stale_frames(&self) -> bool {
+        self.inner.reuse_stale_frames()
+    }
+
+    pub fn action_subscription(&self) -> ActionSubscription {
+        self.inner.action_subscription()
+    }
+
+    pub fn has_e2ee_key(&self) -> bool {
+        self.inner.has_e2ee_key()
+    }
+}
+
+/// Observer-side Portal facade: receives everything in the room and can
+/// hand control between operators, but has no send methods for state or
+/// actions.
+#[derive(uniffi::Object)]
+pub struct Observer {
+    inner: Arc<Portal>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Observer {
+    #[uniffi::constructor]
+    pub fn new(config: Arc<ObserverConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
+        Arc::new(Self { inner: Portal::new(config.inner.clone(), callbacks) })
+    }
+
+    pub async fn connect(&self, url: String, token: String) -> PortalResult<()> {
+        self.inner.connect(url, token).await
+    }
+
+    pub async fn disconnect(&self) -> PortalResult<()> {
+        self.inner.disconnect().await
+    }
+
+    // -- receive ---------------------------------------------
+
+    pub fn get_state(&self) -> Option<State> {
+        self.inner.get_state()
+    }
+
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
+        self.inner.get_observation()
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
+    }
+
+    pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {
+        self.inner.get_video_frame(track_name)
+    }
+
+    /// Latest executed action, or `None`. Requires
+    /// an `ObserverConfig::set_action_subscription` other than `NONE` for any value to land.
+    pub fn get_action(&self) -> Option<Action> {
+        self.inner.get_action()
+    }
+
+    // -- introspection (shared) ----------------------------------------------
+
+    pub fn state_fields(&self) -> Vec<String> {
+        self.inner.state_fields()
+    }
+
+    pub fn action_fields(&self) -> Vec<String> {
+        self.inner.action_fields()
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    // -- multi-controller + rpc + metrics (shared) ---------------------------
+
+    pub fn local_identity(&self) -> Option<String> {
+        self.inner.local_identity()
+    }
+
+    pub fn active_operator(&self) -> Option<String> {
+        self.inner.active_operator()
+    }
+
+    pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
+        self.inner.set_active_operator(identity).await
+    }
+
+    pub fn operators(&self) -> Vec<String> {
+        self.inner.operators()
+    }
+
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
     }
 
     pub fn robot_identity(&self) -> Option<String> {

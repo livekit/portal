@@ -169,3 +169,36 @@ async def pair():
         yield p
     finally:
         await p.stop()
+
+
+class RawPeer:
+    """A plain `livekit.rtc` participant: no Portal, any attributes, any bytes.
+
+    Stands in for peers Portal must defend against: another protocol
+    version, a spoofed role, or a malformed packet. Records every data
+    packet it hears as `(topic, sender, payload)`.
+    """
+
+    def __init__(self, room: str, identity: str, attributes: Optional[dict] = None) -> None:
+        from livekit import rtc
+
+        self._token = _make_token(identity, room, attributes=attributes)
+        self.room = rtc.Room()
+        self.received: list[tuple[str, str, bytes]] = []
+        self.room.on("data_received", self._on_data)
+
+    def _on_data(self, packet) -> None:
+        sender = packet.participant.identity if packet.participant else ""
+        self.received.append((packet.topic, sender, bytes(packet.data)))
+
+    def payloads(self, topic: str, sender: Optional[str] = None) -> list[bytes]:
+        return [p for t, s, p in self.received if t == topic and sender in (None, s)]
+
+    async def connect(self) -> None:
+        await self.room.connect(URL, self._token)
+
+    async def publish(self, topic: str, payload: bytes, *, reliable: bool = True) -> None:
+        await self.room.local_participant.publish_data(payload, reliable=reliable, topic=topic)
+
+    async def disconnect(self) -> None:
+        await self.room.disconnect()

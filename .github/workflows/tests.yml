@@ -15,7 +15,6 @@ concurrency:
 # come from the media/capture transitive deps. Matches livekit/rust-sdks' own
 # CI recipe, minus the desktop-capture and NVIDIA bits we don't compile.
 env:
-  LIVEKIT_SERVER_VERSION: 1.13.5
   LINUX_SYSTEM_DEPS: >-
     libssl-dev
     libglib2.0-dev
@@ -102,11 +101,11 @@ jobs:
       # Integration tests skip themselves without `LIVEKIT_URL`, so a dev
       # server is what turns them on.
       - name: Start LiveKit dev server
-        run: |
-          curl -sSfL "https://github.com/livekit/livekit/releases/download/v${LIVEKIT_SERVER_VERSION}/livekit_${LIVEKIT_SERVER_VERSION}_linux_amd64.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP" livekit-server
-          "$RUNNER_TEMP/livekit-server" --dev > "$RUNNER_TEMP/livekit-server.log" 2>&1 &
-          timeout 30 bash -c 'until curl -sf http://localhost:7880 > /dev/null; do sleep 0.5; done'
+        id: livekit
+        uses: livekit/dev-server-action@5d4d5337a875e2d1afd37bed03c601d159dab002 # v1.1.1
+        with:
+          github-token: ${{ github.token }}
+          version: v1.13.5
 
       - name: Run pytest
         working-directory: python
@@ -123,4 +122,4 @@ jobs:
 
       - name: LiveKit server log
         if: failure()
-        run: cat "$RUNNER_TEMP/livekit-server.log"
+        run: cat "${{ steps.livekit.outputs.log-path }}"

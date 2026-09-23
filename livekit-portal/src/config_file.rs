@@ -101,8 +101,6 @@ struct ConfigFileV1 {
     #[serde(default)]
     max_lag_ms: Option<u32>,
     #[serde(default)]
-    ping_ms: Option<u64>,
-    #[serde(default)]
     action_subscription: Option<bool>,
 
     #[serde(default)]
@@ -283,9 +281,6 @@ impl PortalConfig {
                 cfg.set_track_max_lag_ms(v.name.clone(), ms);
             }
         }
-        if let Some(v) = parsed.ping_ms {
-            cfg.set_ping_ms(v);
-        }
         if let Some(v) = parsed.action_subscription {
             cfg.set_action_subscription(v);
         }
@@ -384,7 +379,6 @@ tolerance: 1.0
 state_reliable: false
 action_reliable: false
 reuse_stale_frames: true
-ping_ms: 500
 action_subscription: true
 videos:
   - { name: front, codec: h264, max_bitrate_kbps: 4000 }
@@ -424,7 +418,6 @@ action:
         assert_eq!(cfg.fps(), 60);
         assert_eq!(cfg.slack(), 8);
         assert_eq!(cfg.tolerance(), 1.0);
-        assert_eq!(cfg.ping_ms(), 500);
         assert!(!cfg.state_reliable());
         assert!(!cfg.action_reliable());
         assert!(cfg.reuse_stale_frames());
@@ -444,7 +437,6 @@ action:
         assert_eq!(cfg.fps(), 30);
         assert_eq!(cfg.slack(), 5);
         assert_eq!(cfg.tolerance(), 1.5);
-        assert_eq!(cfg.ping_ms(), 1000);
         assert!(cfg.state_reliable());
         assert!(cfg.action_reliable());
         assert!(!cfg.reuse_stale_frames());

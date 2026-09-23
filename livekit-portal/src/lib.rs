@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod clock;
 pub mod codec;
 pub mod config;
 pub mod config_file;
@@ -23,7 +24,6 @@ pub mod metrics;
 mod placeholder;
 mod portal;
 pub mod rpc;
-mod rtt;
 mod serialization;
 mod sync_buffer;
 pub mod types;
@@ -36,7 +36,8 @@ pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
 pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use metrics::{
-    BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TransportMetrics,
+    BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
+    TransportMetrics,
 };
 pub use portal::{
     ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, Portal, ROLE_ATTR_KEY,

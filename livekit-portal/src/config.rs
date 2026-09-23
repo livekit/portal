@@ -140,7 +140,9 @@ pub struct PortalConfig {
     pub(crate) fps: u32,
     pub(crate) slack: u32,
     pub(crate) tolerance: f32,
-    pub(crate) ping_ms: u64,
+    /// Test hook: shifts this peer's local clock to simulate hosts whose
+    /// clocks disagree. See `set_clock_skew_us`.
+    pub(crate) clock_skew_us: i64,
     /// Deprecated alias, retained so existing callers keep working. Folded
     /// into the stall behavior in `sync_config()`; see `set_reuse_stale_frames`.
     pub(crate) reuse_stale_frames: bool,
@@ -180,7 +182,7 @@ impl PortalConfig {
             fps: 30,
             slack: 5,
             tolerance: 1.5,
-            ping_ms: 1000,
+            clock_skew_us: 0,
             reuse_stale_frames: false,
             stall_behavior: StallBehavior::Drop,
             max_lag_ms: None,
@@ -372,10 +374,11 @@ impl PortalConfig {
         self.action_reliable = reliable;
     }
 
-    /// RTT ping cadence. Set to `0` to disable active pinging on this side;
-    /// the pong echo path remains active so the peer can still measure.
-    pub fn set_ping_ms(&mut self, ms: u64) {
-        self.ping_ms = ms;
+    /// Shift this peer's local clock by `skew_us`. Only for tests that need
+    /// peers with disagreeing clocks on a single host.
+    #[doc(hidden)]
+    pub fn set_clock_skew_us(&mut self, skew_us: i64) {
+        self.clock_skew_us = skew_us;
     }
 
     /// When enabled, a state whose video match window has elapsed reuses
@@ -581,11 +584,6 @@ impl PortalConfig {
     /// Frame-match window, in tick intervals at `fps`. Defaults to 1.5.
     pub fn tolerance(&self) -> f32 {
         self.tolerance
-    }
-
-    /// RTT ping cadence in milliseconds; `0` means active pinging is off.
-    pub fn ping_ms(&self) -> u64 {
-        self.ping_ms
     }
 
     /// Whether state packets are published on the reliable channel.

@@ -16,7 +16,6 @@ cfg.set_tolerance(1.5)               # match window, in ticks
 
 cfg.set_state_reliable(True)
 cfg.set_action_reliable(True)
-cfg.set_ping_ms(1000)                # 0 disables RTT probing on this side
 
 cfg.set_stall_behavior(StallBehavior.DROP)   # what to do about a silent track
 cfg.set_max_lag_ms(166)              # how long to wait first; default slack/fps
@@ -206,17 +205,10 @@ is what you want when a fresher reading is already in flight.
 Actions usually want ordering, because applying a stale action after a newer one
 moves the arm backwards.
 
-## RTT probing
+## Time sync
 
-```python
-cfg.set_ping_ms(1000)   # default
-cfg.set_ping_ms(0)      # stop probing from this side
-```
-
-Each side sends an unreliable ping on this cadence and the peer echoes it back.
-Setting `0` disables sending. The echo path stays active either way, so the peer
-can still measure. Raise the interval or disable it on bandwidth-constrained
-links.
+Not tunable. Each peer pings the robot at 4 Hz until synced, then 1 Hz, with
+packets of 13 and 29 bytes. RTT comes from the same exchange.
 
 ## Seeing what is actually happening
 

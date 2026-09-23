@@ -73,6 +73,7 @@ SESSION = SessionInfo(
     video_tracks=[],
     time_sync_source=TimeSyncSource.PORTAL,
     started_at_us=1,
+    now_us=lambda: 1,
 )
 
 

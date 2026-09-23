@@ -281,7 +281,7 @@ load than queue it, use a WebRTC video track instead of frame video.
 
 ```
 [publish-failed] data publish failed: <error>
-[publish-failed] rtt publish failed: <error>
+[publish-failed] clock publish failed: <error>
 ```
 
 A publish call returned a transport error. The room is disconnected, or the peer

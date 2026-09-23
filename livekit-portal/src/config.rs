@@ -191,8 +191,13 @@ impl PortalConfig {
             track_stall_behavior: HashMap::new(),
             track_max_lag_ms: HashMap::new(),
             shared_key: None,
-            action_subscription: ActionSubscription::None,
-            observation_sync: true,
+            // Observers watch what the robot does and record raw streams, so
+            // they want the executed actions and have no use for bundles.
+            action_subscription: match role {
+                Role::Observer => ActionSubscription::Active,
+                Role::Robot | Role::Operator => ActionSubscription::None,
+            },
+            observation_sync: role != Role::Observer,
             sync_options_set: BTreeSet::new(),
         }
     }

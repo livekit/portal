@@ -51,6 +51,7 @@ pub const PROTOCOL_VERSION_ATTR_KEY: &str = "lk.portal.version";
 pub const PROTOCOL_VERSION: &str = "3";
 const ROLE_VALUE_ROBOT: &str = "robot";
 const ROLE_VALUE_OPERATOR: &str = "operator";
+const ROLE_VALUE_OBSERVER: &str = "observer";
 /// RPC method registered by Robot-side Portals so any participant can request
 /// a change to the active operator pointer. Payload is the new identity, or
 /// the empty string to clear. Result is the empty string on success.
@@ -63,6 +64,13 @@ const RPC_NOT_CONNECTED: u32 = 2001;
 /// App-level RPC error code returned when the SDK's `set_attributes` fails
 /// while the robot is processing a `set_active_operator` request.
 const RPC_SET_ATTRIBUTES_FAILED: u32 = 2002;
+/// App-level RPC error code returned when `set_active_operator` comes from
+/// a participant that is neither an operator nor an observer.
+const RPC_NOT_AUTHORIZED: u32 = 2003;
+/// How long the robot waits for an unrecognised RPC caller to appear in the
+/// rosters. The caller's role attribute and its RPC travel separately, so a
+/// peer that calls right after connecting can beat its own attribute here.
+const RPC_CALLER_ROSTER_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 type ObservationCb = Box<dyn Fn(&Observation) + Send + Sync>;
 type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
@@ -81,6 +89,9 @@ pub(crate) struct ControllerState {
     /// from `ParticipantConnected` plus the initial remote-participants
     /// snapshot.
     pub(crate) operators: Mutex<HashSet<String>>,
+    /// Identities of currently-connected observers (excluding self). Kept
+    /// apart from `operators` so that list only holds peers that can drive.
+    pub(crate) observers: Mutex<HashSet<String>>,
     /// The robot's identity, discovered by reading the `lk.portal.role`
     /// attribute. Operators use this to address `set_active_operator` RPCs.
     pub(crate) robot_identity: Mutex<Option<String>>,
@@ -99,6 +110,7 @@ impl ControllerState {
         Self {
             active_operator: Mutex::new(None),
             operators: Mutex::new(HashSet::new()),
+            observers: Mutex::new(HashSet::new()),
             robot_identity: Mutex::new(None),
             version_mismatch_warned: Mutex::new(HashSet::new()),
             on_operator_joined: Mutex::new(None),
@@ -137,6 +149,7 @@ impl ControllerState {
     fn clear(&self) {
         *self.active_operator.lock() = None;
         self.operators.lock().clear();
+        self.observers.lock().clear();
         *self.robot_identity.lock() = None;
     }
 
@@ -159,6 +172,7 @@ impl ControllerState {
     ///   does not produce a spurious callback when it gets re-read.
     fn clear_for_reconnect(&self) {
         self.operators.lock().clear();
+        self.observers.lock().clear();
         *self.robot_identity.lock() = None;
     }
 }
@@ -170,6 +184,7 @@ fn classify_role(attrs: &HashMap<String, String>) -> Option<Role> {
     let role = match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
         Some(ROLE_VALUE_ROBOT) => Role::Robot,
         Some(ROLE_VALUE_OPERATOR) => Role::Operator,
+        Some(ROLE_VALUE_OBSERVER) => Role::Observer,
         _ => return None,
     };
     is_compatible(attrs).then_some(role)
@@ -484,6 +499,7 @@ impl Portal {
         let role_value = match self.config.role {
             Role::Robot => ROLE_VALUE_ROBOT,
             Role::Operator => ROLE_VALUE_OPERATOR,
+            Role::Observer => ROLE_VALUE_OBSERVER,
         };
         let mut role_attrs = HashMap::new();
         role_attrs.insert(ROLE_ATTR_KEY.to_string(), role_value.to_string());
@@ -527,7 +543,7 @@ impl Portal {
 
         let setup_result = match self.config.role {
             Role::Robot => self.setup_robot(&room).await,
-            Role::Operator => {
+            Role::Operator | Role::Observer => {
                 self.setup_operator(&room);
                 Ok(())
             }
@@ -631,7 +647,7 @@ impl Portal {
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
         let publisher =
-            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Operator))?;
+            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
         let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         // State has no echo path; drop the wire-values vector that
         // `send_map` returns for action callers.
@@ -652,7 +668,7 @@ impl Portal {
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
         let publisher =
-            self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Robot))?;
+            self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
         // Resolve the actual send timestamp the publisher will stamp onto
         // the wire so the local echo (if any) sees the same value the
         // robot sees.
@@ -753,7 +769,7 @@ impl Portal {
                 }
                 Ok(())
             }
-            Role::Operator => {
+            Role::Operator | Role::Observer => {
                 // Cached robot identity (populated by attribute events) is
                 // the fast path. The common pattern is:
                 //
@@ -778,6 +794,14 @@ impl Portal {
     /// Currently-connected operator identities (excluding self).
     pub fn operators(&self) -> Vec<String> {
         let mut v: Vec<String> = self.controller.operators.lock().iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Currently-connected observer identities (excluding self). Observers
+    /// never drive, so they are listed apart from `operators()`.
+    pub fn observers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.controller.observers.lock().iter().cloned().collect();
         v.sort();
         v
     }
@@ -931,7 +955,7 @@ impl Portal {
     /// snapshot for setups that haven't designated control yet.
     fn resolve_peer(&self) -> PortalResult<String> {
         match self.config.role {
-            Role::Operator => {
+            Role::Operator | Role::Observer => {
                 if let Some(id) = self.controller.robot_identity.lock().clone() {
                     return Ok(id);
                 }
@@ -1222,7 +1246,7 @@ impl Portal {
             *self.sync_buffer.lock() = Some(sync_buffer);
         }
 
-        if !self.config.action_schema.is_empty() {
+        if self.config.role == Role::Operator && !self.config.action_schema.is_empty() {
             let mode = if self.config.action_reliable { "reliable" } else { "unreliable" };
             log::info!(
                 "[{}] ready to publish action via {mode} data ({} fields)",
@@ -1340,8 +1364,8 @@ fn classify_and_update(
                     *slot = Some(id.clone());
                 }
             }
-            // Operator-side: mirror the robot's `active_operator` attribute.
-            if self_role == Role::Operator {
+            // Operators and observers mirror the robot's `active_operator`.
+            if self_role != Role::Robot {
                 let new_value = attrs
                     .get(ACTIVE_OPERATOR_ATTR_KEY)
                     .and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
@@ -1358,6 +1382,9 @@ fn classify_and_update(
             if inserted {
                 controller.fire_op_joined(&id);
             }
+        }
+        Some(Role::Observer) => {
+            controller.observers.lock().insert(id);
         }
         None => {
             // Either the role attribute isn't visible yet (a follow-up
@@ -1382,11 +1409,35 @@ fn classify_and_update(
 /// new identity (or empty string to clear). The handler updates the local
 /// pointer and the broadcast attribute, then fires
 /// `on_active_operator_changed` if the value actually moved.
+/// Whether `caller` is an operator or observer. A peer that calls right
+/// after connecting can reach the robot before its role attribute does, so
+/// an unknown caller gets a short grace period to show up in the rosters.
+async fn caller_may_steer(controller: &ControllerState, caller: &str) -> bool {
+    let known = || {
+        controller.operators.lock().contains(caller) || controller.observers.lock().contains(caller)
+    };
+    let deadline = tokio::time::Instant::now() + RPC_CALLER_ROSTER_WAIT;
+    while !known() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    true
+}
+
 async fn set_active_operator_rpc_impl(
     lp_slot: &Mutex<Option<LocalParticipant>>,
     controller: &ControllerState,
     data: RpcInvocationData,
 ) -> Result<String, RpcError> {
+    if !caller_may_steer(controller, &data.caller_identity).await {
+        return Err(RpcError::new(
+            RPC_NOT_AUTHORIZED,
+            "only operators and observers may set the active operator",
+            None,
+        ));
+    }
     let identity = if data.payload.is_empty() { None } else { Some(data.payload.clone()) };
     let lp = lp_slot.lock().clone();
     let Some(lp) = lp else {
@@ -1423,7 +1474,7 @@ fn gate_action(
 ) -> Option<ActionOrigin> {
     let subscription = match ctx.config.role {
         Role::Robot => ActionSubscription::Active,
-        Role::Operator => ctx.config.action_subscription,
+        Role::Operator | Role::Observer => ctx.config.action_subscription,
     };
     if subscription == ActionSubscription::None {
         return None;
@@ -1442,7 +1493,7 @@ fn gate_action(
 fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
     match event {
         RoomEvent::TrackSubscribed { track, publication, .. } => {
-            if ctx.config.role != Role::Operator {
+            if ctx.config.role == Role::Robot {
                 return;
             }
             if let RemoteTrack::Video(video_track) = track {
@@ -1516,7 +1567,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // are left untouched. The header in each payload routes it to
             // the right entry (spec + slots + metrics fused; one HashMap
             // lookup at dispatch).
-            if ctx.config.role != Role::Operator
+            if ctx.config.role == Role::Robot
                 || topic != FRAME_VIDEO_TOPIC
                 || ctx.frame_video_entries.is_empty()
             {
@@ -1578,6 +1629,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             if ctx.controller.operators.lock().remove(&id_str) {
                 ctx.controller.fire_op_left(&id_str);
             }
+            ctx.controller.observers.lock().remove(&id_str);
             let mut robot_slot = ctx.controller.robot_identity.lock();
             if robot_slot.as_deref() == Some(id_str.as_str()) {
                 *robot_slot = None;
@@ -1651,5 +1703,55 @@ mod tests {
         let robot = ParticipantIdentity::from("old-robot".to_string());
         classify_and_update(&controller, Role::Operator, &robot, &attrs("robot", Some("2")));
         assert!(controller.robot_identity.lock().is_none());
+    }
+
+    #[test]
+    fn observers_have_their_own_roster() {
+        assert_eq!(classify_role(&attrs("observer", Some(PROTOCOL_VERSION))), Some(Role::Observer));
+
+        let controller = ControllerState::new();
+        let joined = Arc::new(Mutex::new(Vec::new()));
+        let log = joined.clone();
+        *controller.on_operator_joined.lock() =
+            Some(Box::new(move |id| log.lock().push(id.to_string())));
+
+        let obs = ParticipantIdentity::from("recorder".to_string());
+        let op = ParticipantIdentity::from("teleop".to_string());
+        classify_and_update(
+            &controller,
+            Role::Robot,
+            &obs,
+            &attrs("observer", Some(PROTOCOL_VERSION)),
+        );
+        classify_and_update(
+            &controller,
+            Role::Robot,
+            &op,
+            &attrs("operator", Some(PROTOCOL_VERSION)),
+        );
+
+        assert!(controller.observers.lock().contains("recorder"));
+        assert!(!controller.operators.lock().contains("recorder"));
+        assert_eq!(*joined.lock(), vec!["teleop".to_string()], "observers are not operators");
+    }
+
+    #[test]
+    fn observers_mirror_the_active_operator() {
+        let controller = ControllerState::new();
+        let robot = ParticipantIdentity::from("robot".to_string());
+        let mut robot_attrs = attrs("robot", Some(PROTOCOL_VERSION));
+        robot_attrs.insert(ACTIVE_OPERATOR_ATTR_KEY.to_string(), "teleop".to_string());
+        classify_and_update(&controller, Role::Observer, &robot, &robot_attrs);
+        assert_eq!(controller.active_operator.lock().as_deref(), Some("teleop"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_operators_and_observers_may_steer() {
+        let controller = ControllerState::new();
+        controller.operators.lock().insert("teleop".to_string());
+        controller.observers.lock().insert("recorder".to_string());
+        assert!(caller_may_steer(&controller, "teleop").await);
+        assert!(caller_may_steer(&controller, "recorder").await);
+        assert!(!caller_may_steer(&controller, "stranger").await);
     }
 }

@@ -14,7 +14,7 @@
 
 use crate::codec::Codec;
 use crate::dtype::DType;
-use crate::types::{Role, StallBehavior, StallConfig, SyncConfig};
+use crate::types::{Role, StallBehavior, StallConfig, SyncConfig, TimeSyncSource};
 use std::collections::HashMap;
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
@@ -143,6 +143,7 @@ pub struct PortalConfig {
     /// Test hook: shifts this peer's local clock to simulate hosts whose
     /// clocks disagree. See `set_clock_skew_us`.
     pub(crate) clock_skew_us: i64,
+    pub(crate) time_sync_source: TimeSyncSource,
     /// Deprecated alias, retained so existing callers keep working. Folded
     /// into the stall behavior in `sync_config()`; see `set_reuse_stale_frames`.
     pub(crate) reuse_stale_frames: bool,
@@ -183,6 +184,7 @@ impl PortalConfig {
             slack: 5,
             tolerance: 1.5,
             clock_skew_us: 0,
+            time_sync_source: TimeSyncSource::Portal,
             reuse_stale_frames: false,
             stall_behavior: StallBehavior::Drop,
             max_lag_ms: None,
@@ -372,6 +374,17 @@ impl PortalConfig {
 
     pub fn set_action_reliable(&mut self, reliable: bool) {
         self.action_reliable = reliable;
+    }
+
+    /// Where `now_us()` comes from. `Portal` (default) syncs to the robot's
+    /// clock; `System` trusts the host clock, for hosts already kept in step
+    /// by PTP or GPS. A per-peer choice: both kinds of peer share a room.
+    pub fn set_time_sync_source(&mut self, source: TimeSyncSource) {
+        self.time_sync_source = source;
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.time_sync_source
     }
 
     /// Shift this peer's local clock by `skew_us`. Only for tests that need

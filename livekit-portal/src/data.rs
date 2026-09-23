@@ -352,6 +352,9 @@ fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State
 /// stamped into `Action::sender` so recorders can label rows by producer
 /// without consulting any room state. Empty on the state path, which doesn't
 /// carry a sender field.
+///
+/// `received_at_us` is on the same clock as `Portal::now_us()`, so the robot's
+/// end-to-end latency compares its own frame timestamps against its own clock.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_data_received(
     payload: &[u8],
@@ -366,12 +369,13 @@ pub(crate) fn handle_data_received(
     sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     metrics: &MetricsRegistry,
     sender: String,
+    received_at_us: u64,
 ) -> SyncOutput {
     match (config_role, topic) {
         (Role::Robot, ACTION_TOPIC) | (Role::Operator, ACTION_TOPIC) => {
             match deserialize_action(payload, action_fp, action_schema) {
                 Ok((send_ts, in_reply_to_ts_us, values)) => {
-                    let now = now_us();
+                    let now = received_at_us;
                     metrics.record_received(DataStream::Action, send_ts, now);
                     metrics.record_e2e(in_reply_to_ts_us, now);
                     action.deliver(build_action(
@@ -393,7 +397,7 @@ pub(crate) fn handle_data_received(
         (Role::Operator, STATE_TOPIC) => {
             match deserialize_values(payload, state_fp, state_schema) {
                 Ok((timestamp_us, values)) => {
-                    metrics.record_received(DataStream::State, timestamp_us, now_us());
+                    metrics.record_received(DataStream::State, timestamp_us, received_at_us);
                     state.deliver(build_state(timestamp_us, state_schema, &values));
                     if let Some(sb) = sync_buffer {
                         return sb.lock().push_state(timestamp_us, values);

@@ -177,9 +177,11 @@ uncertainty, because the robot's clock is the reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `synced` | `bool` | Whether `now_us()` is on the robot's clock yet. |
+| `source` | `TimeSyncSource` | `PORTAL` or `SYSTEM`, from `set_time_sync_source`. Sinks record it, so every archive says which clock its timestamps came from. |
+| `synced` | `bool` | Whether `now_us()` is on the robot's clock yet. Always `True` in `SYSTEM` mode. |
 | `offset_us` | `int` | Robot clock minus local clock, as applied to `now_us()`. |
-| `uncertainty_us` | `int \| None` | How far off `now_us()` could be: half the round trip of the sample the offset came from. `None` until synced. |
+| `uncertainty_us` | `int \| None` | How far off `now_us()` could be: half the round trip of the sample the offset came from. `None` until synced, and always in `SYSTEM` mode. |
+| `measured_offset_us` | `int \| None` | Latest offset the exchange measured, applied or not. In `SYSTEM` mode, a value far from zero means the host clocks have drifted apart. |
 | `resyncs` | `int` | Times 30 agreeing samples moved the timeline by more than 1 s. |
 | `samples_rejected` | `int` | Samples ignored for implying a jump of more than 1 s. |
 

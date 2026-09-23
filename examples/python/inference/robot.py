@@ -1,9 +1,9 @@
-"""Inference-side robot: publishes camera + state, consumes action chunks.
+"""Inference-side robot: publishes camera + state, applies incoming actions.
 
 This mirrors a real VLA loop: the robot streams frames + joint state at FPS
-to a remote policy. The policy emits an `action chunk` (a horizon of future
-actions) per inference step; this script unrolls the chunk locally and
-applies one timestep per tick until the next chunk arrives.
+to a remote policy. The policy plans a horizon of future actions per
+inference step and streams them back one action per control tick; this
+script applies the latest action it has received on every tick.
 
 Run alongside `policy.py`:
 
@@ -25,7 +25,7 @@ from typing import Optional
 import numpy as np
 
 from livekit.portal import (
-    ActionChunk,
+    Action,
     DType,
     Robot,
     RobotConfig,
@@ -64,35 +64,18 @@ def _make_frame(width: int, height: int, phase: float) -> np.ndarray:
     ).astype(np.uint8)
 
 
-class ChunkPlayer:
-    """Tiny helper: hold the latest chunk and yield one timestep per tick.
-
-    Real VLA stacks usually want this same shape — the policy emits a
-    horizon, the robot unrolls until the next chunk lands and overrides.
-    """
+class ActionTracker:
+    """Hold the latest action and when it arrived, for logging."""
 
     def __init__(self) -> None:
-        self._chunk: Optional[ActionChunk] = None
-        self._cursor = 0
-        # Wall-clock receive time of the current chunk, for "chunk age" logging.
+        self.latest: Optional[Action] = None
+        self.received = 0
         self._received_at: Optional[float] = None
 
-    def push(self, chunk: ActionChunk) -> None:
-        self._chunk = chunk
-        self._cursor = 0
+    def push(self, action: Action) -> None:
+        self.latest = action
+        self.received += 1
         self._received_at = time.monotonic()
-
-    def step(self) -> Optional[dict]:
-        """Return the next per-timestep action, or None if no chunk yet
-        or the current chunk is exhausted."""
-        if self._chunk is None or self._cursor >= self._chunk.horizon:
-            return None
-        action = {
-            field: float(column[self._cursor])
-            for field, column in self._chunk.data.items()
-        }
-        self._cursor += 1
-        return action
 
     def age_ms(self) -> Optional[float]:
         if self._received_at is None:
@@ -106,32 +89,22 @@ async def main() -> None:
     room = required_env("LIVEKIT_ROOM")
     token = mint_token(IDENTITY, room)
     fps = env_int("PORTAL_FPS", 30)
-    horizon = env_int("PORTAL_HORIZON", 20)
     duration = env_float("PORTAL_DURATION_SECONDS", 20.0)
 
     cfg = RobotConfig(room)
     cfg.add_video(TRACK_NAME)
     cfg.add_state_typed(JOINT_FIELDS)
-    cfg.add_action_chunk("act", horizon=horizon, fields=JOINT_FIELDS)
+    cfg.add_action_typed(JOINT_FIELDS)
     cfg.set_fps(fps)
 
     robot_portal = Robot(cfg)
-    player = ChunkPlayer()
-
-    chunks_received = 0
-
-    def on_chunk(chunk: ActionChunk) -> None:
-        nonlocal chunks_received
-        chunks_received += 1
-        player.push(chunk)
-
-    robot_portal.on_action_chunk("act", on_chunk)
+    tracker = ActionTracker()
+    robot_portal.on_action(tracker.push)
 
     print(f"[robot] connecting to {url} as '{IDENTITY}' in room '{room}' ...")
     await robot_portal.connect(url, token)
     print(
-        f"[robot] connected; streaming {fps} fps for {duration:.0f}s, "
-        f"playing back chunks of horizon {horizon}"
+        f"[robot] connected; streaming {fps} fps for {duration:.0f}s"
     )
 
     n_ticks = int(duration * fps)
@@ -162,21 +135,21 @@ async def main() -> None:
                 timestamp_us=ts_us,
             )
 
-            # Step the chunk player. In a real system this is where you'd
-            # hand the joint commands off to your servo loop.
-            cmd = player.step()
+            # Apply the latest command. In a real system this is where you'd
+            # hand the joint targets off to your servo loop. No action yet
+            # means the policy hasn't produced one: hold position.
+            cmd = tracker.latest
             if cmd is None:
-                # No policy output yet, or chunk exhausted — hold position.
                 pass
 
             now = time.monotonic()
             if now - last_log >= 1.0:
                 m = robot_portal.metrics()
-                age = player.age_ms()
+                age = tracker.age_ms()
                 age_str = "-" if age is None else f"{age:.0f}ms"
                 print(
                     f"[robot] t={i // fps:>2}s "
-                    f"chunks={chunks_received} chunk_age={age_str} "
+                    f"actions={tracker.received} action_age={age_str} "
                     f"active={robot_portal.active_operator()} "
                     f"e2e={fmt_us(m.policy.e2e_us_p50)}/{fmt_us(m.policy.e2e_us_p95)} "
                     f"(p50/p95) correlated={m.policy.correlated_received} "
@@ -195,8 +168,8 @@ async def main() -> None:
         print(f"  e2e_us_p50:           {fmt_us(m.policy.e2e_us_p50)}")
         print(f"  e2e_us_p95:           {fmt_us(m.policy.e2e_us_p95)}")
         print(f"  correlated_received:  {m.policy.correlated_received}")
-        print(f"  action_chunks_recv:   {m.transport.action_chunks_received}")
-        print(f"  chunk_jitter:         {fmt_us(m.transport.action_chunk_jitter_us)}")
+        print(f"  actions_received:     {m.transport.actions_received}")
+        print(f"  action_jitter:        {fmt_us(m.transport.action_jitter_us)}")
     finally:
         print("[robot] disconnecting...")
         await robot_portal.disconnect()

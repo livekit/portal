@@ -22,10 +22,9 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::config::{ChunkSpec, FieldSpec, PortalConfig};
+use crate::config::{FieldSpec, PortalConfig};
 use crate::data::{
-    ACTION_CHUNK_TOPIC, ACTION_TOPIC, ActionSlot, ChunkPublisher, ChunkSlot, DataPublisher,
-    STATE_TOPIC, StateSlot, dispatch_chunk_payload, handle_data_received,
+    ACTION_TOPIC, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot, handle_data_received,
 };
 use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{
@@ -269,8 +268,6 @@ pub struct Portal {
     frame_video_publishers: Mutex<HashMap<String, Arc<FrameVideoPublisher>>>,
     state_publisher: Mutex<Option<Arc<DataPublisher>>>,
     action_publisher: Mutex<Option<Arc<DataPublisher>>>,
-    /// Operator-side: one publisher per declared action chunk.
-    chunk_publishers: Mutex<HashMap<String, Arc<ChunkPublisher>>>,
 
     // Operator-side sync + dispatch.
     sync_buffer: Mutex<Option<Arc<Mutex<SyncBuffer>>>>,
@@ -279,13 +276,6 @@ pub struct Portal {
     // Push callback + pull latest-wins slot, bundled per stream.
     action: Arc<ActionSlot>,
     state: Arc<StateSlot>,
-    /// Robot-side: one slot per declared action chunk. Fixed at construction
-    /// (keyed by chunk name) so the receive path doesn't lock the map.
-    chunk_slots: HashMap<String, Arc<ChunkSlot>>,
-    /// Rate-limit set for unknown chunk fingerprints — the byte-stream
-    /// equivalent of `DataSlot::warned_mismatches`, but lives at the
-    /// dispatcher level because no slot owns "unknown" packets.
-    unknown_chunk_fp_warns: Arc<Mutex<HashSet<u32>>>,
     // Fixed at construction (keyed by declared video_tracks) — no lock on the map itself.
     video_tracks: HashMap<String, Arc<VideoTrackSlots>>,
     /// Names of all video tracks (WebRTC + frame video) in declaration
@@ -340,15 +330,6 @@ impl Portal {
         let metrics = Arc::new(MetricsRegistry::new(&all_track_names));
         let obs_sink = Arc::new(ObservationSink::new());
 
-        // Build chunk slots once at construction so the dispatch table is
-        // immutable for the Portal's lifetime — `handle_room_event` reads
-        // them without taking any Portal-level lock.
-        let chunk_slots: HashMap<String, Arc<ChunkSlot>> = config
-            .action_chunks
-            .iter()
-            .map(|spec| (spec.name.clone(), Arc::new(ChunkSlot::new(spec.clone()))))
-            .collect();
-
         // Same idea for frame-video entries: the dispatch path reads them
         // per packet, so freezing the map at construction lets the hot path
         // skip a Portal-level lock and the per-connect rebuild. Each entry
@@ -387,13 +368,10 @@ impl Portal {
             frame_video_publishers: Mutex::new(HashMap::new()),
             state_publisher: Mutex::new(None),
             action_publisher: Mutex::new(None),
-            chunk_publishers: Mutex::new(HashMap::new()),
             sync_buffer: Mutex::new(None),
             obs_sink,
             action: Arc::new(ActionSlot::new()),
             state: Arc::new(StateSlot::new()),
-            chunk_slots,
-            unknown_chunk_fp_warns: Arc::new(Mutex::new(HashSet::new())),
             video_tracks,
             all_track_names,
             frame_video_entries,
@@ -539,12 +517,6 @@ impl Portal {
         // whole Portal, so it doesn't need any outer lock.
         let action_schema_fp = action_fingerprint(&self.config.action_schema);
         let state_schema_fp = schema_fingerprint(&self.config.state_schema);
-        // The dispatch path needs a slice for fingerprint lookup; the map
-        // form is for `get_action_chunk` / `on_action_chunk` name lookups.
-        // Build the slice once per connect so the event loop iterates a
-        // plain Vec, not a HashMap.
-        let chunk_slots_for_dispatch: Vec<Arc<ChunkSlot>> =
-            self.chunk_slots.values().cloned().collect();
         let local_identity = local_participant.identity().as_str().to_string();
         let ctx = EventContext {
             config: self.config.clone(),
@@ -554,8 +526,6 @@ impl Portal {
             obs_sink: self.obs_sink.clone(),
             action: self.action.clone(),
             state: self.state.clone(),
-            chunk_slots: chunk_slots_for_dispatch,
-            unknown_chunk_fp_warns: self.unknown_chunk_fp_warns.clone(),
             video_tracks: self.video_tracks.clone(),
             video_receivers: self.video_receivers.clone(),
             frame_video_entries: self.frame_video_entries.clone(),
@@ -600,8 +570,7 @@ impl Portal {
         // Distinguish wrong-role (track is declared but no publisher exists
         // because send is operator-side) from genuinely unknown-track. The
         // operator never spawns video publishers, so a declared name with
-        // no publisher means "wrong role" — same shape as `send_state` /
-        // `send_action_chunk`.
+        // no publisher means "wrong role" — same shape as `send_state`.
         if self.config.role != Role::Robot
             && self.config.video_tracks.iter().any(|s| s.name == track_name)
         {
@@ -672,83 +641,6 @@ impl Portal {
                 local_id,
             );
             self.action.deliver(action);
-        }
-        Ok(())
-    }
-
-    /// Publish an action chunk on the named chunk schema (operator only).
-    ///
-    /// `data` is `field -> column of length horizon`. Columns shorter than
-    /// `horizon` are zero-padded, longer columns are truncated, both with a
-    /// warn-once, and unknown keys are warned-and-ignored once each. Use
-    /// `in_reply_to_ts_us` the same way as `send_action` to feed
-    /// `metrics.policy.e2e_us_*`.
-    ///
-    /// A column built with `ChunkColumn::typed` is checked against the
-    /// declared field dtype and returns `PortalError::DtypeMismatch` on
-    /// disagreement, the same rejection `send_action` gives a `TypedValue`
-    /// of the wrong variant. `ChunkColumn::untyped` (and the `From<Vec<f64>>`
-    /// conversion) waives the check and coerces.
-    pub fn send_action_chunk(
-        &self,
-        chunk_name: &str,
-        data: &HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        let publisher = {
-            let map = self.chunk_publishers.lock();
-            map.get(chunk_name).cloned()
-        };
-        let Some(publisher) = publisher else {
-            // No publisher resolves to one of three precise errors so the
-            // caller sees the actual mistake instead of a generic refusal:
-            // wrong role, undeclared chunk name, or operator-but-not-yet
-            // connected (publishers are spawned in `setup_operator`).
-            return if self.config.role != Role::Operator {
-                Err(PortalError::WrongRole(Role::Robot))
-            } else if !self.chunk_slots.contains_key(chunk_name) {
-                Err(PortalError::UnknownChunk { name: chunk_name.to_string() })
-            } else {
-                Err(PortalError::NotConnected)
-            };
-        };
-        let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
-        publisher.send(data, Some(send_ts), in_reply_to_ts_us)?;
-        // Echo path: same conditions as `send_action`. Unlike scalar
-        // actions where we rebuild the typed values, chunks already carry
-        // raw `f64` columns — we hand the same `data` map straight to the
-        // slot, padded/truncated to the declared horizon to match what
-        // the wire path emits.
-        if self.config.action_subscription
-            && self.is_self_active()
-            && let Some(slot) = self.chunk_slots.get(chunk_name)
-        {
-            let local_id =
-                self.local_identity().expect("local_identity is Some when self == active_operator");
-            let horizon = slot.spec.horizon as usize;
-            let normalized: HashMap<String, Vec<f64>> = slot
-                .spec
-                .fields
-                .iter()
-                .map(|f| {
-                    let mut col = data.get(&f.name).map(|c| c.values.clone()).unwrap_or_default();
-                    if col.len() < horizon {
-                        col.resize(horizon, 0.0);
-                    } else if col.len() > horizon {
-                        col.truncate(horizon);
-                    }
-                    (f.name.clone(), col)
-                })
-                .collect();
-            slot.deliver(ActionChunk {
-                name: slot.spec.name.clone(),
-                horizon: slot.spec.horizon,
-                data: normalized,
-                timestamp_us: send_ts,
-                in_reply_to_ts_us,
-                sender: local_id,
-            });
         }
         Ok(())
     }
@@ -1051,16 +943,12 @@ impl Portal {
         self.frame_video_publishers.lock().clear();
         *self.state_publisher.lock() = None;
         *self.action_publisher.lock() = None;
-        self.chunk_publishers.lock().clear();
         if let Some(sb) = self.sync_buffer.lock().take() {
             sb.lock().clear();
         }
         self.obs_sink.clear();
         self.action.clear();
         self.state.clear();
-        for slot in self.chunk_slots.values() {
-            slot.clear();
-        }
         for slots in self.video_tracks.values() {
             slots.clear();
         }
@@ -1103,7 +991,6 @@ impl Portal {
         self.frame_video_publishers.lock().clear();
         *self.state_publisher.lock() = None;
         *self.action_publisher.lock() = None;
-        self.chunk_publishers.lock().clear();
 
         if let Some(sb) = self.sync_buffer.lock().take() {
             sb.lock().clear();
@@ -1111,9 +998,6 @@ impl Portal {
         self.obs_sink.clear();
         self.action.clear();
         self.state.clear();
-        for slot in self.chunk_slots.values() {
-            slot.clear();
-        }
         for slots in self.video_tracks.values() {
             slots.clear();
         }
@@ -1148,17 +1032,6 @@ impl Portal {
         self.video_tracks.get(track_name).and_then(|s| s.latest.lock().clone())
     }
 
-    /// Clone of the latest chunk received for `chunk_name`, or `None` if
-    /// none received yet (or the chunk wasn't declared).
-    pub fn get_action_chunk(&self, chunk_name: &str) -> Option<ActionChunk> {
-        self.chunk_slots.get(chunk_name).and_then(|s| s.get())
-    }
-
-    /// All declared action chunk schemas, in declaration order.
-    pub fn action_chunks(&self) -> &[ChunkSpec] {
-        self.config.action_chunks()
-    }
-
     // --- Callback registration (push API) ---
 
     /// Fire on every received action. The `Action` record exposes typed
@@ -1166,23 +1039,6 @@ impl Portal {
     /// `f64` view.
     pub fn on_action(&self, callback: impl Fn(&Action) + Send + Sync + 'static) {
         *self.action.cb.lock() = Some(Box::new(callback));
-    }
-
-    /// Fire on every received chunk for the named declaration. Only one
-    /// callback per chunk; calling twice overwrites. Unknown names are
-    /// logged and ignored — they aren't a hard error because the chunk
-    /// schema may have been intentionally omitted on this peer.
-    pub fn on_action_chunk(
-        &self,
-        chunk_name: &str,
-        callback: impl Fn(&ActionChunk) + Send + Sync + 'static,
-    ) {
-        match self.chunk_slots.get(chunk_name) {
-            Some(slot) => slot.set_callback(Box::new(callback)),
-            None => log::warn!(
-                "[unknown-chunk] on_action_chunk: chunk '{chunk_name}' not declared, callback ignored"
-            ),
-        }
     }
 
     pub fn on_observation(&self, callback: impl Fn(&Observation) + Send + Sync + 'static) {
@@ -1316,20 +1172,6 @@ impl Portal {
             );
             *self.action_publisher.lock() = Some(Arc::new(publisher));
         }
-
-        if !self.config.action_chunks.is_empty() {
-            for spec in &self.config.action_chunks {
-                log::info!(
-                    "[{}] ready to publish chunk '{}' via byte stream (horizon={}, {} fields)",
-                    self.config.session,
-                    spec.name,
-                    spec.horizon,
-                    spec.fields.len()
-                );
-                let publisher = ChunkPublisher::new(spec.clone(), lp.clone(), self.metrics.clone());
-                self.chunk_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
-            }
-        }
     }
 
     /// Snapshot of metrics since construction or the last `reset_metrics()`.
@@ -1376,8 +1218,6 @@ struct EventContext {
     obs_sink: Arc<ObservationSink>,
     action: Arc<ActionSlot>,
     state: Arc<StateSlot>,
-    chunk_slots: Vec<Arc<ChunkSlot>>,
-    unknown_chunk_fp_warns: Arc<Mutex<HashSet<u32>>>,
     video_tracks: HashMap<String, Arc<VideoTrackSlots>>,
     video_receivers: Arc<Mutex<HashMap<String, VideoReceiver>>>,
     /// Frame-video entries (spec + slots + metrics fused) keyed by track
@@ -1565,97 +1405,45 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 ctx.obs_sink.dispatch(output);
             }
         }
-        RoomEvent::ByteStreamOpened { reader, topic, participant_identity } => {
-            // Two Portal byte-stream topics, each owned by a different role:
-            //   * `portal_action_chunk` — operator → robot. Action chunks
-            //     too big to fit in a 15 KB data packet.
-            //   * `portal_frame_video`  — robot → operator. Per-frame
-            //     RGB/PNG/MJPEG payloads that bypass the WebRTC media path.
-            // We `take_if` on the topic so this Portal only consumes streams
-            // it owns; other applications using byte streams on unrelated
-            // topics are left untouched.
-            match (ctx.config.role, topic.as_str()) {
-                (Role::Robot, ACTION_CHUNK_TOPIC) | (Role::Operator, ACTION_CHUNK_TOPIC) => {
-                    // Robot always consumes chunks. Operators only consume
-                    // when subscription is on (HITL recording, shadow eval).
-                    // Bail out early on operators with subscription off so
-                    // we never spawn the read task.
-                    if matches!(ctx.config.role, Role::Operator) && !ctx.config.action_subscription
-                    {
-                        return;
-                    }
-                    let Some(reader) = reader.take() else {
-                        return;
-                    };
-                    let chunk_slots = ctx.chunk_slots.clone();
-                    let unknown_fp_warns = ctx.unknown_chunk_fp_warns.clone();
-                    let metrics = ctx.metrics.clone();
-                    let controller = ctx.controller.clone();
-                    let sender_id = participant_identity.as_str().to_string();
-                    tokio::spawn(async move {
-                        use livekit::StreamReader;
-                        match reader.read_all().await {
-                            Ok(payload) => {
-                                // Apply the active-operator gate at delivery
-                                // time. Sender at delivery wins; a chunk
-                                // started under one operator and finishing
-                                // under another is dropped if the new active
-                                // is different.
-                                let active = controller.active_operator.lock().clone();
-                                if active.as_deref() != Some(sender_id.as_str()) {
-                                    return;
-                                }
-                                dispatch_chunk_payload(
-                                    &payload,
-                                    &chunk_slots,
-                                    &unknown_fp_warns,
-                                    &metrics,
-                                    sender_id,
-                                )
-                            }
-                            Err(e) => {
-                                log::warn!("[bad-payload] failed to read chunk byte stream: {e}")
-                            }
-                        }
-                    });
-                }
-                (Role::Operator, FRAME_VIDEO_TOPIC) => {
-                    // Operator-side: each byte stream carries one frame for
-                    // some declared frame-video track. The header in the
-                    // payload routes it to the right entry (spec + slots
-                    // + metrics fused; one HashMap lookup at dispatch).
-                    if ctx.frame_video_entries.is_empty() {
-                        return;
-                    }
-                    let Some(reader) = reader.take() else {
-                        return;
-                    };
-                    let Some(sync_buffer) = ctx.sync_buffer.clone() else {
-                        return;
-                    };
-                    let _ = participant_identity;
-                    // Refcount bumps only — no map or HashMap clone.
-                    let entries = ctx.frame_video_entries.clone();
-                    let obs_sink = ctx.obs_sink.clone();
-                    tokio::spawn(async move {
-                        use livekit::StreamReader;
-                        match reader.read_all().await {
-                            // `Bytes::from(Vec)` is a move. Subsequent
-                            // `Bytes::slice(...)` in the dispatch path is a
-                            // refcount bump, so the `Raw` codec gets a
-                            // zero-copy view of the wire payload all the
-                            // way to `VideoFrameData.data`.
-                            Ok(payload) => {
-                                dispatch_frame_payload(payload, &entries, &sync_buffer, &obs_sink)
-                            }
-                            Err(e) => log::warn!(
-                                "[bad-payload] failed to read frame_video byte stream: {e}"
-                            ),
-                        }
-                    });
-                }
-                _ => {}
+        RoomEvent::ByteStreamOpened { reader, topic, .. } => {
+            // Portal owns one byte-stream topic, `portal_frame_video`
+            // (robot → operator): per-frame RGB/PNG/MJPEG payloads that
+            // bypass the WebRTC media path. We `take` only matching streams
+            // so other applications using byte streams on unrelated topics
+            // are left untouched. The header in each payload routes it to
+            // the right entry (spec + slots + metrics fused; one HashMap
+            // lookup at dispatch).
+            if ctx.config.role != Role::Operator
+                || topic != FRAME_VIDEO_TOPIC
+                || ctx.frame_video_entries.is_empty()
+            {
+                return;
             }
+            let Some(sync_buffer) = ctx.sync_buffer.clone() else {
+                return;
+            };
+            let Some(reader) = reader.take() else {
+                return;
+            };
+            // Refcount bumps only — no map or HashMap clone.
+            let entries = ctx.frame_video_entries.clone();
+            let obs_sink = ctx.obs_sink.clone();
+            tokio::spawn(async move {
+                use livekit::StreamReader;
+                match reader.read_all().await {
+                    // `Bytes::from(Vec)` is a move. Subsequent
+                    // `Bytes::slice(...)` in the dispatch path is a
+                    // refcount bump, so the `Raw` codec gets a
+                    // zero-copy view of the wire payload all the
+                    // way to `VideoFrameData.data`.
+                    Ok(payload) => {
+                        dispatch_frame_payload(payload, &entries, &sync_buffer, &obs_sink)
+                    }
+                    Err(e) => {
+                        log::warn!("[bad-payload] failed to read frame_video byte stream: {e}")
+                    }
+                }
+            });
         }
         RoomEvent::ParticipantConnected(participant) => {
             // Snapshot the peer's attributes once they are visible. We may
@@ -1708,9 +1496,6 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             ctx.obs_sink.clear();
             ctx.action.clear();
             ctx.state.clear();
-            for slot in &ctx.chunk_slots {
-                slot.clear();
-            }
             for slots in ctx.video_tracks.values() {
                 slots.clear();
             }

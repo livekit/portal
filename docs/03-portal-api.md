@@ -81,33 +81,6 @@ Each field declares a dtype that fixes its width on the wire.
 Values you pass to `send_state` and `send_action` stay ordinary Python values.
 Conversion happens at the wire boundary.
 
-### Declaring an action chunk
-
-A chunk is a named `[horizon, fields]` tensor for policies that emit several
-future timesteps per inference. Its fields are typed exactly like the state and
-action schemas, with the same `DType` values from the table above.
-
-```python
-JOINTS = [
-    ("joint1", DType.F32),
-    ("joint2", DType.F32),
-    ("gripper", DType.BOOL),
-]
-
-cfg.add_action_typed(JOINTS)
-cfg.add_action_chunk("act", horizon=16, fields=JOINTS)
-```
-
-Declaring the same field list for both is the common case and worth doing
-deliberately: a chunk timestep and a scalar action then describe the same
-robot, so you can fall back from chunked to per-tick control without a second
-schema.
-
-The chunk's name, horizon, **and** per-field dtypes all feed its fingerprint.
-Both peers must declare all three identically or the receiver drops the stream.
-Nothing about a chunk is untyped: see [Action chunks](#action-chunks) for the
-send and receive surface.
-
 > **Note.** Field order is part of the contract, not just the names. Reordering
 > two fields on one side changes the schema fingerprint and all traffic drops.
 > A [shared YAML file](reference/config-file.md) is the reliable way to keep
@@ -123,7 +96,6 @@ role-specific is a no-op on the wrong side.
 | `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
-| `add_action_chunk(name, horizon, [(name, dtype), ...])` | none | Declare a fixed-horizon action batch. Fields are typed, same as the state and action schemas. |
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
 | `set_slack(int)` | 5 | Ticks of buffer headroom. |
 | `set_tolerance(float)` | 1.5 | Match window, in ticks. |
@@ -152,7 +124,6 @@ config you loaded from YAML instead of building by hand:
 | `video_track_specs` | `list[VideoTrackSpec]` | Those same tracks with codec, quality, and encoder options. |
 | `frame_video_tracks` | `list[VideoTrackSpec]` | The byte-stream subset of `video_track_specs`. A filter, not a rival list. |
 | `state_schema` / `action_schema` | `list[FieldSpec]` | Declared schemas, in order. |
-| `action_chunks` | `list[ChunkSpec]` | Declared chunks. |
 | `fps` | `int` | `set_fps`. |
 | `slack` | `int` | `set_slack`. |
 | `tolerance` | `float` | `set_tolerance`. |
@@ -293,49 +264,7 @@ robot.send_state(values, timestamp_us=None)
 
 ```python
 op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
-op.send_action_chunk(name, data, timestamp_us=None, in_reply_to_ts_us=None)
 ```
-
-Chunks travel as byte streams rather than data packets, so a full horizon is
-not bounded by the 15 KB packet limit.
-
-### Action chunks
-
-`send_action_chunk` accepts two input shapes, and they differ in more than
-convenience.
-
-```python
-# Dict of per-field columns, each of length horizon. Dtype-checked per column.
-op.send_action_chunk("act", {
-    "joint1": np.array([...], dtype=np.float32),   # declared F32
-    "gripper": [True, False, ...],                 # declared BOOL
-})
-
-# One (horizon, n_fields) array in declared field order. Shape-checked only.
-op.send_action_chunk("act", policy_output)         # what most VLAs emit
-```
-
-**The dict form is dtype-checked**, by the same rules `send_action` applies to a
-scalar. A `BOOL` field wants `bool` or `numpy.bool_`, an integer field wants an
-integer type, a float field takes any real. A mismatch raises
-`DtypeMismatch` before the chunk is sent, so a float column against a `BOOL`
-gripper fails at your call site rather than arriving as a silently coerced
-`1.0`. numpy columns are checked once via the array's dtype, so the check does
-not scale with horizon.
-
-**The array form is not dtype-checked.** One uniform tensor spread across a
-mixed schema is exactly what that shape is for, and a `float32` array is a
-legitimate way to express a `BOOL` gripper column inside it. Values coerce to
-each field's declared dtype. Use the dict form when you want the check.
-
-Either way, out-of-range values saturate at the wire boundary and warn once per
-field, the same as a scalar action. `500` into an `I8` column arrives as `127`.
-
-Columns that aren't exactly `horizon` long are still accepted: short and
-missing columns zero-pad, long ones truncate, each warning once per field with
-[`chunk-length`](08-troubleshooting.md#chunk-length). Treat those zeros as real
-commands. A chunk is a whole unit, so an omitted column does **not** carry
-forward the way an omitted scalar action field does.
 
 ## Receiving data
 
@@ -357,7 +286,6 @@ latest-wins, so a slow reader sees the freshest value rather than a backlog.
 | Callback | Pull | Fires with |
 |---|---|---|
 | `robot.on_action(cb)` | `robot.get_action()` | `Action` |
-| `robot.on_action_chunk(name, cb)` | `robot.get_action_chunk(name)` | `ActionChunk` |
 
 `on_state` and `on_video_frame` are raw firehoses. They fire on arrival with no
 matching at all. Use them for a preview pane or a debug log. Use
@@ -375,10 +303,9 @@ op.on_drop(on_drop)
 
 ### Typed values on receive
 
-`Action`, `State`, `Observation`, and `ActionChunk` are all typed by default.
-Each carries the declared-type view plus a lossless all-`f64` view, under names
-that match its shape: scalars use `.values` / `.raw_values`, and a chunk uses
-`.data` / `.raw_data` because its fields are columns rather than single values.
+`Action`, `State`, and `Observation` are all typed by default. Each carries the
+declared-type view in `.values` plus a lossless all-`f64` view in
+`.raw_values`.
 
 ```python
 def on_action(action):
@@ -390,41 +317,10 @@ def on_action(action):
 
 For `Observation`, the same pair is named `.state` / `.raw_state`.
 
-A chunk's `.data` gives one NumPy array per field, each of length `horizon` and
-already in the field's declared dtype, so a `float32` policy output does not
-come back widened:
-
-```python
-def on_chunk(chunk):
-    chunk.data["joint1"].dtype   # dtype('float32'), per the declaration
-    chunk.data["gripper"]        # array([True, False, ...]), a real bool array
-    chunk.data["joint1"][3]      # timestep 3 of that field
-    chunk.raw_data               # Dict[str, list[float]], every column widened
-```
-
-Reach for `.raw_data` when you want to skip the per-field NumPy reconstruction
-and write straight into your own buffer.
-
-The Rust core mirrors this for scalars: `Action`, `State`, and `Observation`
+The Rust core mirrors this: `Action`, `State`, and `Observation`
 carry `values: HashMap<String, TypedValue>` alongside `raw_values:
 HashMap<String, f64>`. Declare a dtype, send an ordinary value, receive the
 declared type.
-
-`ActionChunk` is the one deliberate exception. Its `data` is
-`HashMap<String, Vec<f64>>` with no `TypedValue` column equivalent, because an
-enum-of-vectors is friction for exactly the numeric code that consumes a chunk,
-and a Rust caller already holds the `ChunkSpec` it declared. The dtypes are not
-lost, they just live in the schema rather than in the payload. The Python
-binding re-casts against that schema on your behalf, which NumPy makes nearly
-free.
-
-On the send side that asymmetry reverses, and Rust gets the stronger guarantee.
-A Rust caller passes `ChunkColumn::typed(dtype, values)` to claim a column's
-dtype and have the core reject a disagreement with `DtypeMismatch`, or
-`ChunkColumn::untyped(values)` to waive the check and coerce. Python always
-sends unclaimed columns and runs the category check described under
-[Action chunks](#action-chunks), because a Python `int` is a legitimate `I8`
-*and* `I32` and an exact claim would be invented rather than observed.
 
 ## The active operator
 
@@ -510,9 +406,9 @@ op = Operator(cfg)
 op.on_action(lambda action: log.append(action))
 ```
 
-With it on, the operator runs the same gate the robot runs. `on_action` and
-`on_action_chunk` fire only for the active operator's output. `get_action()`
-and `get_action_chunk(name)` mirror the latest gate-passed value.
+With it on, the operator runs the same gate the robot runs. `on_action` fires
+only for the active operator's output. `get_action()` mirrors the latest
+gate-passed value.
 
 It is off by default because most operators are pure controllers that want
 neither the bandwidth nor the callback traffic.
@@ -524,7 +420,7 @@ miss its own output. Portal fires the local callback after `send_action` when
 which matches what the robot does with those packets.
 
 **Label rows with `action.sender`, not `active_operator()`.** Every `Action`
-and `ActionChunk` carries a `sender` stamped at gate time. Reading
+carries a `sender` stamped at gate time. Reading
 `active_operator()` inside the callback can race a handoff that already moved
 the pointer.
 
@@ -649,10 +545,7 @@ These are the behaviors that surprise people. Each one is deliberate.
 field, or a `bool` into an `F32` field, raises
 `PortalError.DtypeMismatch` before any packet is built. There is no silent
 cast. `int` is accepted for float dtypes. `bool` is rejected everywhere except
-`BOOL`. This applies to `send_action_chunk`'s dict form column by column, with
-one carve-out: its `(horizon, n_fields)` array form is shape-checked only, since
-a uniform tensor across a mixed schema is the reason that shape exists. See
-[Action chunks](#action-chunks).
+`BOOL`.
 
 **Schema mismatch is detected but never raises.** Every packet carries a `u32`
 fingerprint over the ordered field names and dtypes. A peer whose schema
@@ -686,11 +579,10 @@ sender's side. Check `op.active_operator()`.
 | `NoPeer` | `perform_rpc` with no peer discovered and no `destination`. |
 | `AmbiguousPeer` | Several remote participants and no peer identified. Pass `destination`. |
 | `UnknownVideoTrack` | Track name was never declared with `add_video`. |
-| `UnknownChunk` | Chunk name was never declared with `add_action_chunk`. |
 | `WrongFrameSize` | Buffer length is not `width * height * 3`. |
 | `InvalidFrameDimensions` | Width or height is odd. |
 | `WrongRole` | `send_action` on a robot, or `send_state` on an operator. |
-| `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. Also raised per column by `send_action_chunk`'s dict form. |
+| `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
 | `Deserialization` | A received payload could not be parsed. |
 | `Codec` | Frame encode or decode failed. |
 | `Rpc` | The remote handler raised. Carries the `RpcError`. |
@@ -707,8 +599,7 @@ sender's side. Check `op.active_operator()`.
 robot.send_video_frame(track, frame, width=None, height=None, timestamp_us=None)
 robot.send_state(values, timestamp_us=None)
 robot.on_action(cb)                          # active operator only
-robot.on_action_chunk(name, cb)
-robot.get_action() / robot.get_action_chunk(name)
+robot.get_action()
 
 # control plane
 robot.active_operator() / await robot.set_active_operator(identity)
@@ -728,7 +619,6 @@ await robot.connect(url, token) / await robot.disconnect() / robot.close()
 ```text
 # data
 op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
-op.send_action_chunk(name, data, timestamp_us=None, in_reply_to_ts_us=None)
 op.on_observation(cb) / op.on_state(cb) / op.on_drop(cb)
 op.on_video_frame(track, cb)
 op.get_observation() / op.get_state() / op.get_video_frame(track)

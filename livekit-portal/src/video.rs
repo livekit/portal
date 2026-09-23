@@ -297,16 +297,38 @@ impl VideoReceiver {
             let mut stream = stream;
             let mut dropped_total: u64 = 0;
             let mut last_warn: Option<Instant> = None;
+            let mut untimed_total: u64 = 0;
+            let mut last_untimed_warn: Option<Instant> = None;
             while let Some(frame) = stream.next().await {
-                // Hard requirement: every frame must carry a user_timestamp.
-                // Portal-published tracks set this automatically; subscribed
-                // tracks from other publishers must do the same. See the
-                // "Sender requirement" note in README.md.
-                let timestamp_us =
-                    frame.frame_metadata.as_ref().and_then(|m| m.user_timestamp).expect(
-                        "video frame missing user_timestamp — \
-                         sender must enable FrameMetadataFeatures.user_timestamp",
-                    );
+                // Every frame needs a user_timestamp to be aligned. Portal
+                // publishers always set one, but frames decoded before the
+                // SDK attaches its trailer handler arrive without it, as do
+                // frames from publishers that never enable it (see the
+                // "Sender requirement" note in README.md). Skip those rather
+                // than stamping them with a made-up time.
+                let Some(timestamp_us) =
+                    frame.frame_metadata.as_ref().and_then(|m| m.user_timestamp)
+                else {
+                    untimed_total += 1;
+                    // The first frame after subscribing routinely races the
+                    // trailer handler; only repeated skips point at the sender.
+                    if untimed_total == 1 {
+                        log::debug!("[missing-timestamp] '{drain_name}' skipped first frame");
+                        continue;
+                    }
+                    let now = Instant::now();
+                    if last_untimed_warn
+                        .is_none_or(|t| now.duration_since(t) >= RECV_DROP_WARN_INTERVAL)
+                    {
+                        log::warn!(
+                            "[missing-timestamp] '{drain_name}' skipped {untimed_total} frame(s) \
+                             with no user_timestamp; the sender must enable \
+                             FrameMetadataFeatures.user_timestamp"
+                        );
+                        last_untimed_warn = Some(now);
+                    }
+                    continue;
+                };
                 let frame_data = convert_frame(&frame, timestamp_us);
                 let frame_arc = Arc::new(frame_data);
 

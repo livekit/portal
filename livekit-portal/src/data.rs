@@ -27,7 +27,6 @@ use crate::error::{PortalError, PortalResult};
 #[cfg(test)]
 use crate::dtype::DType;
 use crate::metrics::{DataStream, MetricsRegistry};
-use crate::rtt::{RTT_TOPIC, RttService};
 use crate::serialization::{
     DecodeError, action_fingerprint, deserialize_action, deserialize_values, schema_fingerprint,
     serialize_action, serialize_values,
@@ -351,8 +350,8 @@ fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State
 ///
 /// `sender` is the identity of the participant who published the packet,
 /// stamped into `Action::sender` so recorders can label rows by producer
-/// without consulting any room state. Empty on non-action paths (state,
-/// RTT) — those don't carry a sender field.
+/// without consulting any room state. Empty on the state path, which doesn't
+/// carry a sender field.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_data_received(
     payload: &[u8],
@@ -366,13 +365,8 @@ pub(crate) fn handle_data_received(
     state: &StateSlot,
     sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     metrics: &MetricsRegistry,
-    rtt: &RttService,
     sender: String,
 ) -> SyncOutput {
-    if topic == RTT_TOPIC {
-        rtt.handle_packet(payload);
-        return SyncOutput::empty();
-    }
     match (config_role, topic) {
         (Role::Robot, ACTION_TOPIC) | (Role::Operator, ACTION_TOPIC) => {
             match deserialize_action(payload, action_fp, action_schema) {

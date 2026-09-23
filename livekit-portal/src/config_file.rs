@@ -35,7 +35,7 @@ use serde::Deserialize;
 use crate::codec::Codec;
 use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig};
 use crate::dtype::DType;
-use crate::types::{Role, StallBehavior, TimeSyncSource};
+use crate::types::{ActionSubscription, Role, StallBehavior, TimeSyncSource};
 
 /// Errors raised by `PortalConfig::from_yaml_*`.
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +72,33 @@ fn parse_stall_behavior(s: &str, context: &str) -> Result<StallBehavior, ConfigF
         "omit" => Ok(StallBehavior::Omit),
         other => Err(ConfigFileError::Invalid(format!(
             "{context}: expected one of drop, freeze, omit — got '{other}'"
+        ))),
+    }
+}
+
+/// `action_subscription` as written. v0.2 took a bool; v0.3 names the mode,
+/// so a bool gets a targeted error instead of a generic type mismatch.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ActionSubscriptionFile {
+    Name(String),
+    Bool(bool),
+}
+
+fn parse_action_subscription(
+    v: &ActionSubscriptionFile,
+) -> Result<ActionSubscription, ConfigFileError> {
+    match v {
+        ActionSubscriptionFile::Name(s) if s == "none" => Ok(ActionSubscription::None),
+        ActionSubscriptionFile::Name(s) if s == "active" => Ok(ActionSubscription::Active),
+        ActionSubscriptionFile::Name(s) if s == "all" => Ok(ActionSubscription::All),
+        ActionSubscriptionFile::Name(other) => Err(ConfigFileError::Invalid(format!(
+            "action_subscription: expected one of none, active, all — got '{other}'"
+        ))),
+        ActionSubscriptionFile::Bool(b) => Err(ConfigFileError::Invalid(format!(
+            "action_subscription: booleans are no longer accepted; use one of none, active, \
+             all (v0.2's {b} is now '{}')",
+            if *b { "active" } else { "none" }
         ))),
     }
 }
@@ -113,7 +140,7 @@ struct ConfigFileV1 {
     #[serde(default)]
     time_sync_source: Option<String>,
     #[serde(default)]
-    action_subscription: Option<bool>,
+    action_subscription: Option<ActionSubscriptionFile>,
 
     #[serde(default)]
     videos: Vec<VideoEntry>,
@@ -296,8 +323,8 @@ impl PortalConfig {
         if let Some(v) = &parsed.time_sync_source {
             cfg.set_time_sync_source(parse_time_sync_source(v)?);
         }
-        if let Some(v) = parsed.action_subscription {
-            cfg.set_action_subscription(v);
+        if let Some(v) = &parsed.action_subscription {
+            cfg.set_action_subscription(parse_action_subscription(v)?);
         }
 
         Ok(cfg)
@@ -395,7 +422,7 @@ state_reliable: false
 action_reliable: false
 reuse_stale_frames: true
 time_sync_source: system
-action_subscription: true
+action_subscription: all
 videos:
   - { name: front, codec: h264, max_bitrate_kbps: 4000 }
   - { name: wrist, codec: mjpeg, quality: 80 }
@@ -438,7 +465,7 @@ action:
         assert!(!cfg.action_reliable());
         assert!(cfg.reuse_stale_frames());
         assert_eq!(cfg.time_sync_source(), TimeSyncSource::System);
-        assert!(cfg.action_subscription());
+        assert_eq!(cfg.action_subscription(), ActionSubscription::All);
         assert!(!cfg.has_e2ee_key());
     }
 
@@ -458,7 +485,19 @@ action:
         assert!(cfg.action_reliable());
         assert!(!cfg.reuse_stale_frames());
         assert_eq!(cfg.time_sync_source(), TimeSyncSource::Portal);
-        assert!(!cfg.action_subscription());
+        assert_eq!(cfg.action_subscription(), ActionSubscription::None);
+    }
+
+    #[test]
+    fn action_subscription_bool_is_rejected_with_the_new_names() {
+        for (value, replacement) in [("true", "'active'"), ("false", "'none'")] {
+            let yaml = format!("version: 1\naction_subscription: {value}\n");
+            let err = PortalConfig::from_yaml_str(&yaml, "demo", Role::Operator).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("none, active, all") && msg.contains(replacement), "{msg}");
+        }
+        let yaml = "version: 1\naction_subscription: sometimes\n";
+        assert!(PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).is_err());
     }
 
     #[test]

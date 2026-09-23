@@ -107,7 +107,7 @@ role-specific is a no-op on the wrong side.
 | `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
 | `set_time_sync_source(TimeSyncSource)` | `PORTAL` | Where `now_us()` comes from: `PORTAL` syncs to the robot, `SYSTEM` trusts the host clock. |
 | `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_stall_behavior(FREEZE)` with `set_max_lag_ms(0)`. |
-| `set_action_subscription(bool)` | `False` | Operator-only. Receive executed actions. |
+| `set_action_subscription(str)` | `"none"` | Operator-only. Which received actions reach `on_action`: `"none"`, `"active"` or `"all"`. |
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
 
 `set_fps`, `set_slack`, and `set_tolerance` are covered in
@@ -129,7 +129,7 @@ config you loaded from YAML instead of building by hand:
 | `tolerance` | `float` | `set_tolerance`. |
 | `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
 | `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. Deprecated. |
-| `action_subscription` | `bool` | `set_action_subscription`. |
+| `action_subscription` | `ActionSubscription` | `set_action_subscription`. |
 | `has_e2ee_key` | `bool` | Whether a key was set. The bytes are not readable back. |
 
 ```python
@@ -418,8 +418,8 @@ without any extra API.
 |---|---|---|
 | **Single operator** | robot, 1 operator | Operator claims control at startup. |
 | **Human in the loop** | robot, policy, human | Either side calls `set_active_operator`. Executed actions stay continuous across the cutover. |
-| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription(True)` and logs every executed action with `action.sender`. |
-| **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. Both streams get recorded for offline comparison. |
+| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription("active")` and logs every executed action with `action.sender`. |
+| **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. A recorder with `set_action_subscription("all")` gets both streams, with `action.active` telling them apart. |
 | **Supervisor** | robot, N operators, supervisor UI | Supervisor never claims control. It only calls `set_active_operator` to route. |
 
 Working versions of the last three live in the integration tests:
@@ -430,29 +430,41 @@ Working versions of the last three live in the integration tests:
 
 By default an operator only sends actions. It never sees what the robot
 actually executed. Recorders, shadow policies, and monitoring UIs need that
-view. One flag turns it on.
+view. `set_action_subscription` decides which actions reach `on_action`.
 
 ```python
 cfg = OperatorConfig("session-1")
 cfg.add_action_typed([("joint1", DType.F32)])   # needed to deserialize
-cfg.set_action_subscription(True)
+cfg.set_action_subscription("active")           # "none" | "active" | "all"
 
 op = Operator(cfg)
 op.on_action(lambda action: log.append(action))
 ```
 
-With it on, the operator runs the same gate the robot runs. `on_action` fires
-only for the active operator's output. `get_action()` mirrors the latest
-gate-passed value.
+| Value | What reaches `on_action` |
+|---|---|
+| `none` (default) | nothing |
+| `active` | only the active operator's actions, the same gate the robot runs |
+| `all` | every operator's actions, including the ones the gate dropped |
 
-It is off by default because most operators are pure controllers that want
-neither the bandwidth nor the callback traffic.
+Every action carries `sender` and `active`, both stamped at gate time.
+`active=False` marks a shadow action the robot ignored. With `all` you can
+record a candidate policy next to the one actually driving and compare them
+offline. It means the action passed the gate, not that the robot carried it
+out.
+
+Actions are broadcast to the whole room either way, so this is a local filter
+and `all` costs nothing extra on the wire. `none` is the default because most
+operators are pure controllers that don't want the callback traffic.
+`get_action()` mirrors the latest delivered action. v0.2's `True`/`False`
+raise a `TypeError`: they are now `"active"`/`"none"`.
 
 **Your own actions echo back.** LiveKit does not fan a publisher's own data
-packets back to it, so an active operator with subscription on would otherwise
-miss its own output. Portal fires the local callback after `send_action` when
-`local_identity == active_operator`. An **inactive** subscriber gets no echo,
-which matches what the robot does with those packets.
+packets back to it, so a subscribed operator would otherwise miss its own
+output. Portal fires the local callback after `send_action` whenever the
+subscription would have delivered that action from anyone else: with `active`
+only while you are the active operator, with `all` always, tagged with
+`active` accordingly.
 
 **Label rows with `action.sender`, not `active_operator()`.** Every `Action`
 carries a `sender` stamped at gate time. Reading
@@ -465,6 +477,7 @@ def on_action(action):
         "ts_us": action.timestamp_us,
         "in_reply_to": action.in_reply_to_ts_us,
         "sender": action.sender,
+        "active": action.active,
         "values": action.values,
     })
 ```

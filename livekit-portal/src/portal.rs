@@ -25,7 +25,8 @@ use tokio::task::JoinHandle;
 use crate::clock::{CLOCK_TOPIC, ClockActor, ClockOptions, ClockService, SyncedClock};
 use crate::config::{FieldSpec, PortalConfig};
 use crate::data::{
-    ACTION_TOPIC, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot, handle_data_received,
+    ACTION_TOPIC, ActionOrigin, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot,
+    handle_data_received,
 };
 use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{
@@ -649,10 +650,9 @@ impl Portal {
         let send_ts = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         let wire_values = publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
         // Echo path. LiveKit does not fan out a publisher's own data
-        // packets, so without this an active operator would never see its
-        // own action through `on_action`. We only echo when subscription
-        // is on AND we are the active operator: otherwise this would just
-        // be local noise that nobody else in the room sees either.
+        // packets, so without this an operator would never see its own
+        // action through `on_action`. Echo exactly what the subscription
+        // would have delivered from anyone else.
         //
         // `wire_values` is what the receiver will reconstruct after decode:
         // post-carry-forward (so omitted fields keep their last-sent value
@@ -660,20 +660,23 @@ impl Portal {
         // inputs match the clipped wire bytes). Building the echo from the
         // caller's input map directly would silently diverge whenever a
         // partial update or saturating value is involved.
-        if self.config.action_subscription && self.is_self_active() {
-            // We only echo when self is the active operator, which means
-            // we are connected and have a local identity. Unwrap is safe.
-            let local_id =
-                self.local_identity().expect("local_identity is Some when self == active_operator");
-            let action = crate::data::build_action(
-                send_ts,
-                in_reply_to_ts_us,
-                &self.config.action_schema,
-                &wire_values,
-                local_id,
-            );
-            self.action.deliver(action);
-        }
+        let active = self.is_self_active();
+        let echo = match self.config.action_subscription {
+            ActionSubscription::None => false,
+            ActionSubscription::Active => active,
+            ActionSubscription::All => true,
+        };
+        let Some(sender) = self.local_identity().filter(|_| echo) else {
+            return Ok(());
+        };
+        let action = crate::data::build_action(
+            send_ts,
+            in_reply_to_ts_us,
+            &self.config.action_schema,
+            &wire_values,
+            ActionOrigin { sender, active },
+        );
+        self.action.deliver(action);
         Ok(())
     }
 
@@ -1374,6 +1377,36 @@ async fn set_active_operator_rpc_impl(
     Ok(String::new())
 }
 
+/// The active-operator gate for an incoming action packet. Returns who sent
+/// it and whether they were active, or `None` to drop it before decoding.
+///
+/// The robot takes only the active operator's actions. An operator takes
+/// what its subscription asks for, so a controller with `None` pays nothing
+/// on the receive path. In every case the sender must be a recognised
+/// operator: a pointer seeded from a token or set over RPC can name any
+/// identity.
+fn gate_action(
+    ctx: &EventContext,
+    participant: Option<&RemoteParticipant>,
+) -> Option<ActionOrigin> {
+    let subscription = match ctx.config.role {
+        Role::Robot => ActionSubscription::Active,
+        Role::Operator => ctx.config.action_subscription,
+    };
+    if subscription == ActionSubscription::None {
+        return None;
+    }
+    let sender = participant?.identity().as_str().to_string();
+    if !ctx.controller.operators.lock().contains(&sender) {
+        return None;
+    }
+    let active = ctx.controller.active_operator.lock().as_deref() == Some(sender.as_str());
+    if !active && subscription == ActionSubscription::Active {
+        return None;
+    }
+    Some(ActionOrigin { sender, active })
+}
+
 fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
     match event {
         RoomEvent::TrackSubscribed { track, publication, .. } => {
@@ -1416,46 +1449,15 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 }
                 return;
             }
-            // Active-operator gate. Drop incoming actions whose sender does
-            // not match `active_operator`. Applies to both the robot (always
-            // processes ACTION_TOPIC) and operators with subscription on
-            // (recorders, shadow eval, live monitoring). Operators without
-            // subscription short-circuit before the deserialize so the
-            // receive hot path costs nothing for the common controller-only
-            // case. Non-action topics (state, RTT) bypass the gate and pass
-            // an empty sender — those records don't carry a sender field.
-            let gate_sender: String = match (ctx.config.role, topic.as_str()) {
-                (Role::Robot, ACTION_TOPIC) => {
-                    let Some(p) = &participant else {
+            // Actions go through the gate; state carries no sender.
+            let origin = match topic.as_str() {
+                ACTION_TOPIC => {
+                    let Some(origin) = gate_action(ctx, participant.as_ref()) else {
                         return;
                     };
-                    let sender_id = p.identity().as_str().to_string();
-                    let active = ctx.controller.active_operator.lock().clone();
-                    if active.as_deref() != Some(sender_id.as_str()) {
-                        return;
-                    }
-                    // A pointer seeded from a token or set over RPC can name
-                    // any identity; only a recognised operator may drive.
-                    if !ctx.controller.operators.lock().contains(&sender_id) {
-                        return;
-                    }
-                    sender_id
+                    origin
                 }
-                (Role::Operator, ACTION_TOPIC) => {
-                    if !ctx.config.action_subscription {
-                        return;
-                    }
-                    let Some(p) = &participant else {
-                        return;
-                    };
-                    let sender_id = p.identity().as_str().to_string();
-                    let active = ctx.controller.active_operator.lock().clone();
-                    if active.as_deref() != Some(sender_id.as_str()) {
-                        return;
-                    }
-                    sender_id
-                }
-                _ => String::new(),
+                _ => ActionOrigin { sender: String::new(), active: false },
             };
             let output = handle_data_received(
                 &payload,
@@ -1469,7 +1471,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 &ctx.state,
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
-                gate_sender,
+                origin,
                 ctx.time.now_us(),
             );
             if !output.is_empty() {

@@ -91,13 +91,12 @@ def _make_operator(
     room: str,
     identity: str,
     *,
-    subscribe: bool = False,
+    subscription: str = "none",
 ) -> Operator:
     cfg = OperatorConfig(room)
     cfg.add_state_typed(_STATE_SCHEMA)
     cfg.add_action_typed(_ACTION_SCHEMA)
-    if subscribe:
-        cfg.set_action_subscription(True)
+    cfg.set_action_subscription(subscription)
     return Operator(cfg)
 
 
@@ -356,7 +355,7 @@ async def test_concurrent_writes_converge():
 
 @pytest.mark.asyncio
 async def test_default_subscription_is_off():
-    """Spec 33: an operator without `set_action_subscription(True)` never
+    """Spec 33: an operator with the default `none` subscription never
     fires `on_action`, even when actions flow.
     """
     room = _room_name()
@@ -393,7 +392,7 @@ async def test_recorder_receives_active_operator_actions():
     room = _room_name()
     robot = _make_robot(room)
     active = _make_operator(room, "active")
-    recorder = _make_operator(room, "recorder", subscribe=True)
+    recorder = _make_operator(room, "recorder", subscription="active")
     seen: List[Action] = []
     recorder.on_action(lambda a: seen.append(a))
     try:
@@ -428,7 +427,7 @@ async def test_non_active_operators_dropped_at_recorder():
     robot = _make_robot(room)
     active = _make_operator(room, "active")
     other = _make_operator(room, "other")
-    recorder = _make_operator(room, "recorder", subscribe=True)
+    recorder = _make_operator(room, "recorder", subscription="active")
     seen: List[Action] = []
     recorder.on_action(lambda a: seen.append(a))
     try:
@@ -460,7 +459,7 @@ async def test_self_echo_when_active():
     """
     room = _room_name()
     robot = _make_robot(room)
-    op = _make_operator(room, "self", subscribe=True)
+    op = _make_operator(room, "self", subscription="active")
     seen: List[Action] = []
     op.on_action(lambda a: seen.append(a))
     try:
@@ -492,7 +491,7 @@ async def test_no_echo_when_inactive():
     """
     room = _room_name()
     robot = _make_robot(room)
-    op_a = _make_operator(room, "op-a", subscribe=True)
+    op_a = _make_operator(room, "op-a", subscription="active")
     op_b = _make_operator(room, "op-b")
     seen_a: List[Action] = []
     op_a.on_action(lambda a: seen_a.append(a))
@@ -526,7 +525,7 @@ async def test_recorder_sees_handoff_in_action_stream():
     robot = _make_robot(room)
     op_a = _make_operator(room, "op-a")
     op_b = _make_operator(room, "op-b")
-    rec = _make_operator(room, "rec", subscribe=True)
+    rec = _make_operator(room, "rec", subscription="active")
     seen: List[Action] = []
     rec.on_action(lambda a: seen.append(a))
     try:
@@ -568,7 +567,7 @@ async def test_sender_set_on_every_delivered_action():
     room = _room_name()
     robot = _make_robot(room)
     active = _make_operator(room, "x")
-    rec = _make_operator(room, "rec", subscribe=True)
+    rec = _make_operator(room, "rec", subscription="active")
     seen: List[Action] = []
     rec.on_action(lambda a: seen.append(a))
     try:
@@ -602,7 +601,7 @@ async def test_pull_surface_populates_on_operator_side():
     room = _room_name()
     robot = _make_robot(room)
     active = _make_operator(room, "x")
-    rec = _make_operator(room, "rec", subscribe=True)
+    rec = _make_operator(room, "rec", subscription="active")
     try:
         await robot.connect(URL, _make_token("robot", room))
         await active.connect(URL, _make_token("x", room))
@@ -635,7 +634,7 @@ async def test_subscription_does_not_leak_across_operators():
     """
     room = _room_name()
     robot = _make_robot(room)
-    rec = _make_operator(room, "rec", subscribe=True)
+    rec = _make_operator(room, "rec", subscription="active")
     a = _make_operator(room, "a")
     b = _make_operator(room, "b")
     seen_rec: List[Action] = []
@@ -674,8 +673,8 @@ async def test_subscription_does_not_affect_robot():
     room = _room_name()
     robot = _make_robot(room)
     sender = _make_operator(room, "sender")
-    rec_1 = _make_operator(room, "r1", subscribe=True)
-    rec_2 = _make_operator(room, "r2", subscribe=True)
+    rec_1 = _make_operator(room, "r1", subscription="active")
+    rec_2 = _make_operator(room, "r2", subscription="active")
     robot_received: List[Action] = []
     robot.on_action(lambda a: robot_received.append(a))
     try:
@@ -699,4 +698,131 @@ async def test_subscription_does_not_affect_robot():
         await sender.disconnect()
         await rec_1.disconnect()
         await rec_2.disconnect()
+        await robot.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# `all`: shadow actions, tagged with `active`
+# ---------------------------------------------------------------------------
+
+
+async def _three_operators(room: str, recorder_subscription: str):
+    robot = _make_robot(room)
+    ops = {
+        "op-a": _make_operator(room, "op-a"),
+        "op-b": _make_operator(room, "op-b"),
+        "recorder": _make_operator(room, "recorder", subscription=recorder_subscription),
+    }
+    await robot.connect(URL, _make_token("robot", room))
+    for ident, op in ops.items():
+        await op.connect(URL, _make_token(ident, room))
+    assert await _wait_for(lambda: set(ops) <= set(robot.operators()))
+    await ops["op-a"].set_active_operator("op-a")
+    assert await _wait_for(lambda: ops["recorder"].active_operator() == "op-a")
+    return robot, ops
+
+
+@pytest.mark.asyncio
+async def test_all_delivers_shadow_actions_tagged_inactive():
+    room = _room_name()
+    robot, ops = await _three_operators(room, "all")
+    seen: List[Action] = []
+    executed: List[Action] = []
+    ops["recorder"].on_action(lambda a: seen.append(a))
+    robot.on_action(lambda a: executed.append(a))
+    try:
+        ops["op-a"].send_action({"a": 1.0})
+        ops["op-b"].send_action({"a": 2.0})
+        assert await _wait_for(lambda: {a.sender for a in seen} == {"op-a", "op-b"})
+
+        by_sender = {a.sender: a for a in seen}
+        assert by_sender["op-a"].active is True
+        assert by_sender["op-b"].active is False
+        # The robot still only executes the active operator.
+        await asyncio.sleep(0.3)
+        assert {a.sender for a in executed} == {"op-a"}
+        assert all(a.active for a in executed)
+    finally:
+        for op in ops.values():
+            await op.disconnect()
+        await robot.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_active_subscription_marks_every_action_active():
+    room = _room_name()
+    robot, ops = await _three_operators(room, "active")
+    seen: List[Action] = []
+    ops["recorder"].on_action(lambda a: seen.append(a))
+    try:
+        ops["op-a"].send_action({"a": 1.0})
+        ops["op-b"].send_action({"a": 2.0})
+        assert await _wait_for(lambda: seen)
+        await asyncio.sleep(0.3)
+        assert [(a.sender, a.active) for a in seen] == [("op-a", True)]
+    finally:
+        for op in ops.values():
+            await op.disconnect()
+        await robot.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_active_flag_flips_once_at_handoff():
+    """Each sender's `active` flag changes exactly once, at the handoff:
+    labels are decided at gate time and never flicker."""
+    room = _room_name()
+    robot, ops = await _three_operators(room, "all")
+    seen: List[Action] = []
+    ops["recorder"].on_action(lambda a: seen.append(a))
+    try:
+        async def stream(n: int) -> None:
+            for i in range(n):
+                ops["op-a"].send_action({"a": float(i)})
+                ops["op-b"].send_action({"a": float(i)})
+                await asyncio.sleep(0.02)
+
+        await stream(15)
+        await ops["op-a"].set_active_operator("op-b")
+        assert await _wait_for(lambda: ops["recorder"].active_operator() == "op-b")
+        await stream(15)
+        assert await _wait_for(lambda: len(seen) >= 60, timeout=5)
+
+        for sender, before, after in (("op-a", True, False), ("op-b", False, True)):
+            flags = [a.active for a in seen if a.sender == sender]
+            flips = sum(1 for x, y in zip(flags, flags[1:]) if x != y)
+            assert (flags[0], flags[-1], flips) == (before, after, 1), (sender, flags)
+    finally:
+        for op in ops.values():
+            await op.disconnect()
+        await robot.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_all_echoes_own_sends_with_active_flag():
+    room = _room_name()
+    robot = _make_robot(room)
+    active = _make_operator(room, "active", subscription="all")
+    shadow = _make_operator(room, "shadow", subscription="all")
+    seen_active: List[Action] = []
+    seen_shadow: List[Action] = []
+    active.on_action(lambda a: seen_active.append(a))
+    shadow.on_action(lambda a: seen_shadow.append(a))
+    try:
+        await robot.connect(URL, _make_token("robot", room))
+        await active.connect(URL, _make_token("active", room))
+        await shadow.connect(URL, _make_token("shadow", room))
+        assert await _wait_for(lambda: {"active", "shadow"} <= set(robot.operators()))
+        await active.set_active_operator("active")
+        assert await _wait_for(lambda: shadow.active_operator() == "active")
+
+        active.send_action({"a": 1.0})
+        shadow.send_action({"a": 2.0})
+
+        own = lambda seen, who: [a for a in seen if a.sender == who]
+        assert await _wait_for(lambda: own(seen_active, "active") and own(seen_shadow, "shadow"))
+        assert own(seen_active, "active")[0].active is True
+        assert own(seen_shadow, "shadow")[0].active is False
+    finally:
+        await active.disconnect()
+        await shadow.disconnect()
         await robot.disconnect()

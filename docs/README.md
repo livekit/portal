@@ -18,7 +18,7 @@ specific question comes up.
 |---|---|
 | [1. Quickstart](01-quickstart.md) | Install, mint a token, run a robot and an operator end to end. |
 | [2. Concepts](02-concepts.md) | The mental model. Roles, observations, control handoff, frame format. |
-| [3. Portal API](03-portal-api.md) | The main surface. `Robot`, `Operator`, callbacks, send methods, control plane. |
+| [3. Portal API](03-portal-api.md) | The main surface. `Robot`, `Operator`, `Observer`, callbacks, send methods, control plane, keypoints, recording. |
 
 ## Then as needed
 
@@ -29,6 +29,7 @@ specific question comes up.
 | [6. RPC](06-rpc.md) | You need one-shot commands like `home` or `calibrate`. |
 | [7. Metrics](07-metrics.md) | You want to know what `portal.metrics()` contains and which number to watch. |
 | [8. Troubleshooting](08-troubleshooting.md) | Something is not working, or a tagged warning showed up in your logs. |
+| [9. Migrating to v0.3](09-migrating-to-v0.3.md) | You are upgrading from v0.2. Every breaking change and what to do. |
 
 ## Reference
 

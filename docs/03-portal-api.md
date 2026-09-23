@@ -105,6 +105,7 @@ role-specific is a no-op on the wrong side.
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
 | `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
 | `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
+| `set_time_sync_source(TimeSyncSource)` | `PORTAL` | Where `now_us()` comes from: `PORTAL` syncs to the robot, `SYSTEM` trusts the host clock. |
 | `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_stall_behavior(FREEZE)` with `set_max_lag_ms(0)`. |
 | `set_action_subscription(bool)` | `False` | Operator-only. Receive executed actions. |
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
@@ -264,6 +265,11 @@ robot.send_state(values, timestamp_us=None)
 op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
 ```
 
+`timestamp_us` defaults to `now_us()`, which is on the robot's clock (see
+[Time sync](#time-sync)). Pass your own to stamp a sample where it was taken,
+for example a camera's capture time. `in_reply_to_ts_us` is never touched:
+pass the robot's exact state or frame timestamp.
+
 ## Receiving data
 
 Every callback has a matching pull accessor. Use callbacks for push-driven
@@ -363,8 +369,22 @@ m.synced, m.offset_us, m.uncertainty_us
 ```
 
 Before the first sync, `now_us()` is local time and `synced` is `False`.
-`now_us()` never repeats and never goes backwards. Details are in
+`now_us()` never repeats and never goes backwards. It is the default
+timestamp for everything you send. Details are in
 [Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
+
+**Opting out.** A lab whose hosts are already synced, with PTP or
+GPS-disciplined clocks, can trust the system clock instead:
+
+```python
+cfg.set_time_sync_source(TimeSyncSource.SYSTEM)   # default: TimeSyncSource.PORTAL
+```
+
+`now_us()` is then the host's system time, still never repeating or going
+backwards, and `synced` is `True` from the start. Portal keeps running the
+exchange without applying it. A non-zero `measured_offset_us` shows a PTP
+setup that has drifted or failed, before it shows up as bad data. It is a
+per-peer choice, so `portal` and `system` peers share a room.
 
 ### Behavior worth knowing
 

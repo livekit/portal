@@ -22,7 +22,7 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::clock::{CLOCK_TOPIC, ClockActor, ClockService, SyncedClock};
+use crate::clock::{CLOCK_TOPIC, ClockActor, ClockOptions, ClockService, SyncedClock};
 use crate::config::{FieldSpec, PortalConfig};
 use crate::data::{
     ACTION_TOPIC, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot, handle_data_received,
@@ -378,7 +378,11 @@ impl Portal {
                 .collect(),
         );
 
-        let clock = Arc::new(SyncedClock::new(config.role == Role::Robot, config.clock_skew_us));
+        let clock = Arc::new(SyncedClock::new(ClockOptions {
+            is_reference: config.role == Role::Robot,
+            source: config.time_sync_source,
+            skew_us: config.clock_skew_us,
+        }));
 
         Self {
             config,
@@ -556,6 +560,7 @@ impl Portal {
             frame_video_entries: self.frame_video_entries.clone(),
             metrics: self.metrics.clone(),
             clock: clock.clone(),
+            time: self.clock.clone(),
             controller: self.controller.clone(),
             local_identity,
         };
@@ -586,6 +591,7 @@ impl Portal {
         // time — codec selection routes the spec to one list or the
         // other — and names are unique across both, so a track lives in
         // exactly one map.
+        let timestamp_us = Some(timestamp_us.unwrap_or_else(|| self.clock.now_us()));
         if let Some(publisher) = self.video_publishers.lock().get(track_name).cloned() {
             return publisher.send_frame(rgb_data, width, height, timestamp_us);
         }
@@ -607,7 +613,8 @@ impl Portal {
     /// Publish a state sample (robot only). Values are typed — build the
     /// map with `TypedValue::Bool(true)`, `0.5f32.into()`, etc. The
     /// pipeline internally widens to `f64` for carry-forward and casts
-    /// back to the declared dtype at the wire boundary.
+    /// back to the declared dtype at the wire boundary. `timestamp_us`
+    /// defaults to `now_us()`.
     pub fn send_state(
         &self,
         values: &HashMap<String, TypedValue>,
@@ -615,9 +622,10 @@ impl Portal {
     ) -> PortalResult<()> {
         let publisher =
             self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Operator))?;
+        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         // State has no echo path; drop the wire-values vector that
         // `send_map` returns for action callers.
-        publisher.send_map(values, timestamp_us, None).map(|_| ())
+        publisher.send_map(values, Some(timestamp_us), None).map(|_| ())
     }
 
     /// Publish an action (operator only).
@@ -637,9 +645,8 @@ impl Portal {
             self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Robot))?;
         // Resolve the actual send timestamp the publisher will stamp onto
         // the wire so the local echo (if any) sees the same value the
-        // robot sees. `send_map` would default `None` to `now_us()` and
-        // we'd pick a slightly later timestamp here.
-        let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
+        // robot sees.
+        let send_ts = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         let wire_values = publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
         // Echo path. LiveKit does not fan out a publisher's own data
         // packets, so without this an active operator would never see its
@@ -1267,6 +1274,7 @@ struct EventContext {
     frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>>,
     metrics: Arc<MetricsRegistry>,
     clock: Arc<ClockService>,
+    time: Arc<SyncedClock>,
     /// Multi-controller state, shared with `Portal` so attribute and
     /// participant lifecycle events can update it directly without going
     /// through the Portal struct.
@@ -1462,6 +1470,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
                 gate_sender,
+                ctx.time.now_us(),
             );
             if !output.is_empty() {
                 ctx.obs_sink.dispatch(output);

@@ -319,18 +319,21 @@ key or all traffic fails to decrypt, silently. See [E2EE](e2ee.md).
 
 ## Timestamps and clocks
 
-Every timestamp on the wire is `u64` microseconds since the Unix epoch, taken from
-the sender's wall clock, little-endian. State, action, frame video, and RTT all use
-this unit.
+Every timestamp on the wire is `u64` microseconds since the Unix epoch,
+little-endian. State, action, frame video, and clock packets all use this unit.
+
+Portal stamps state, frames and actions with `now_us()`: the robot's clock on
+the robot, and the time sync estimate of it everywhere else (see [Clock](#clock)).
+A peer may pass its own timestamps instead.
 
 The operator's synchronization compares a state timestamp against each video frame
 timestamp, so **the robot must stamp its state packets and its frames from the same
 clock.** Two different clocks on the robot is the one mistake that breaks matching
 in a way that looks like network trouble.
 
-Operator and robot clocks do not need to be tightly synchronized for the gate to
-work. Large skew does shift which frames match which state, so keep both peers on
-NTP.
+Operator and robot clocks do not need to be synchronized for the gate to work.
+Time sync puts actions on the robot's timeline anyway, so recordings from
+several peers line up without NTP.
 
 ## Minimal implementation checklist
 

@@ -192,6 +192,18 @@ sync.
 A steadily climbing `samples_rejected` with no resync means the samples disagree
 with each other, usually because the link is very jittery.
 
+## `observer`
+
+`Observer` only, while or after it records with `record_to`. Filled in by the
+Python recorder rather than the Rust core.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `recording` | `bool` | Whether a sink is being fed. |
+| `frames_written` | `int` | Video frames handed to the sink. |
+| `frames_dropped` | `int` | Video frames dropped because the sink fell behind. State, actions and keypoints are never dropped. |
+| `queued` | `int` | Records waiting for the writer thread. |
+
 ## `policy`
 
 The one that measures your actual loop. Populated on whichever side **receives**

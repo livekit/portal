@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use crate::config::{ChunkSpec, FieldSpec};
+use crate::config::FieldSpec;
 use crate::dtype::DType;
 use crate::error::PortalError;
-use crate::types::ChunkColumn;
 
 /// Plain-stream wire prefix: 4-byte schema fingerprint + 8-byte
 /// `timestamp_us`. Used by `portal_state`.
 const HEADER_LEN: usize = 4 + 8;
 
 /// Correlated-stream wire prefix: plain header plus an 8-byte
-/// `in_reply_to_ts_us` slot. `0` = no correlation. Used by `portal_action`
-/// and the chunk byte-stream topic.
+/// `in_reply_to_ts_us` slot. `0` = no correlation. Used by `portal_action`.
 const CORRELATED_HEADER_LEN: usize = HEADER_LEN + 8;
 
 /// Mixed into the action stream's fingerprint so a v2 peer rejects a v1
@@ -33,11 +29,6 @@ const CORRELATED_HEADER_LEN: usize = HEADER_LEN + 8;
 /// silently mis-parsing 8 bytes of payload as timing metadata. Symmetric:
 /// both sides apply the same xor, so v2-to-v2 still agrees.
 const ACTION_STREAM_TAG: u32 = 0xa1c0_b001;
-
-/// Mixed into the chunk stream's fingerprint for the same reason. Distinct
-/// from `ACTION_STREAM_TAG` so a chunk schema and an action schema with
-/// otherwise identical fields can never collide.
-const CHUNK_STREAM_TAG: u32 = 0xc1c0_b001;
 
 /// Stable 32-bit fingerprint of a state/action schema (ordered names +
 /// dtype tags). Used at runtime to detect peers whose schemas disagree.
@@ -71,26 +62,6 @@ pub(crate) fn schema_fingerprint(schema: &[FieldSpec]) -> u32 {
 /// fingerprints disagree, and the receive path drops cleanly.
 pub(crate) fn action_fingerprint(schema: &[FieldSpec]) -> u32 {
     schema_fingerprint(schema) ^ ACTION_STREAM_TAG
-}
-
-/// Stable per-chunk fingerprint over name + horizon + fields. Includes the
-/// chunk stream tag so a chunk and an action with the same schema never
-/// collide. The receiver dispatches incoming chunk packets by this
-/// fingerprint, so changing the algorithm breaks every existing peer.
-pub(crate) fn chunk_fingerprint(spec: &ChunkSpec) -> u32 {
-    const FNV_PRIME: u32 = 0x01000193;
-    let mut h = schema_fingerprint(&spec.fields);
-    for byte in spec.name.as_bytes() {
-        h ^= *byte as u32;
-        h = h.wrapping_mul(FNV_PRIME);
-    }
-    h ^= 0xff;
-    h = h.wrapping_mul(FNV_PRIME);
-    for byte in spec.horizon.to_le_bytes() {
-        h ^= byte as u32;
-        h = h.wrapping_mul(FNV_PRIME);
-    }
-    h ^ CHUNK_STREAM_TAG
 }
 
 /// Stable on-wire/hash tag for a dtype. Never renumber — changes break
@@ -208,95 +179,6 @@ pub(crate) fn deserialize_action(
     Ok((timestamp_us, in_reply_to_ts_us, values))
 }
 
-/// Serialize an action chunk. Layout: 20-byte correlated header
-/// (fingerprint, ts, in_reply_to_ts), then `horizon` rows each containing
-/// one value per declared field in declared order. Per-row stride is the
-/// sum of the field dtypes' byte widths.
-///
-/// `data` is `field_name -> column of length horizon`. Missing fields
-/// fill with `0.0` (caller's responsibility to provide the column —
-/// chunk schema doesn't carry-forward like scalar state/action because
-/// chunks are whole units, not partial updates). Each column's claimed
-/// dtype is validated upstream in `ChunkPublisher::send`, not here.
-///
-/// `saturated_indices` returns flat `(t * fields.len() + f)` indices so
-/// the caller can map back to `(field_name, t)` for warnings.
-pub(crate) fn serialize_chunk(
-    fingerprint: u32,
-    timestamp_us: u64,
-    in_reply_to_ts_us: Option<u64>,
-    spec: &ChunkSpec,
-    data: &HashMap<String, ChunkColumn>,
-) -> EncodeResult {
-    let row_bytes: usize = spec.fields.iter().map(|f| f.dtype.size_bytes()).sum();
-    let payload_bytes = row_bytes * spec.horizon as usize;
-    let mut buf = Vec::with_capacity(CORRELATED_HEADER_LEN + payload_bytes);
-    buf.extend_from_slice(&fingerprint.to_le_bytes());
-    buf.extend_from_slice(&timestamp_us.to_le_bytes());
-    buf.extend_from_slice(&in_reply_to_ts_us.unwrap_or(0).to_le_bytes());
-    let mut saturated_indices = Vec::new();
-    let n_fields = spec.fields.len();
-    let empty: Vec<f64> = Vec::new();
-    let columns: Vec<&Vec<f64>> = spec
-        .fields
-        .iter()
-        .map(|f| data.get(&f.name).map(|c| &c.values).unwrap_or(&empty))
-        .collect();
-    for t in 0..spec.horizon as usize {
-        for (fi, field) in spec.fields.iter().enumerate() {
-            let v = columns[fi].get(t).copied().unwrap_or(0.0);
-            if field.dtype.encode(v, &mut buf) {
-                saturated_indices.push(t * n_fields + fi);
-            }
-        }
-    }
-    EncodeResult { payload: buf, saturated_indices }
-}
-
-/// Deserialize an action chunk packet. Returns the timestamp, optional
-/// correlation, and one decoded `Vec<f64>` column per field, in declared
-/// order. The caller turns the column vec into a `HashMap` keyed by name.
-#[allow(clippy::type_complexity)]
-pub(crate) fn deserialize_chunk(
-    data: &[u8],
-    fingerprint: u32,
-    spec: &ChunkSpec,
-) -> Result<(u64, Option<u64>, Vec<Vec<f64>>), DecodeError> {
-    if data.len() < CORRELATED_HEADER_LEN {
-        return Err(DecodeError::Malformed(PortalError::Deserialization(format!(
-            "chunk packet shorter than {CORRELATED_HEADER_LEN}-byte header: got {}",
-            data.len()
-        ))));
-    }
-    let fp_got = u32::from_le_bytes(data[0..4].try_into().unwrap());
-    if fp_got != fingerprint {
-        return Err(DecodeError::SchemaMismatch { expected: fingerprint, got: fp_got });
-    }
-    let row_bytes: usize = spec.fields.iter().map(|f| f.dtype.size_bytes()).sum();
-    let expected_len = CORRELATED_HEADER_LEN + row_bytes * spec.horizon as usize;
-    if data.len() != expected_len {
-        return Err(DecodeError::Malformed(PortalError::Deserialization(format!(
-            "expected {} bytes, got {}",
-            expected_len,
-            data.len()
-        ))));
-    }
-    let timestamp_us = u64::from_le_bytes(data[4..12].try_into().unwrap());
-    let reply_raw = u64::from_le_bytes(data[12..20].try_into().unwrap());
-    let in_reply_to_ts_us = (reply_raw != 0).then_some(reply_raw);
-    let mut columns: Vec<Vec<f64>> =
-        spec.fields.iter().map(|_| Vec::with_capacity(spec.horizon as usize)).collect();
-    let mut offset = CORRELATED_HEADER_LEN;
-    for _t in 0..spec.horizon as usize {
-        for (fi, field) in spec.fields.iter().enumerate() {
-            let width = field.dtype.size_bytes();
-            columns[fi].push(field.dtype.decode(&data[offset..offset + width])?);
-            offset += width;
-        }
-    }
-    Ok((timestamp_us, in_reply_to_ts_us, columns))
-}
-
 /// Reasons a receive-side deserialize can fail. Split so the caller can
 /// tell a schema-mismatch (worth a rate-limited warn) apart from a corrupt
 /// packet (worth dropping silently or noisily).
@@ -365,7 +247,7 @@ mod tests {
     fn f64_roundtrip() {
         let s = schema(&[("a", DType::F64), ("b", DType::F64), ("c", DType::F64)]);
         let fp = schema_fingerprint(&s);
-        let values = vec![1.0, 2.5, -3.14];
+        let values = vec![1.0, 2.5, -3.25];
         let out = serialize_values(fp, 1_713_300_000_000, &values, &s);
         assert!(out.saturated_indices.is_empty());
         let (ts2, values2) = deserialize_values(&out.payload, fp, &s).unwrap();
@@ -517,92 +399,5 @@ mod tests {
             Err(DecodeError::SchemaMismatch { .. }) => {}
             other => panic!("expected SchemaMismatch, got {other:?}"),
         }
-    }
-
-    // --- Chunk wire ------------------------------------------------------
-
-    fn chunk_spec(name: &str, horizon: u32, fields: &[(&str, DType)]) -> ChunkSpec {
-        ChunkSpec::new(name, horizon, fields.iter().map(|(n, d)| FieldSpec::new(*n, *d)))
-    }
-
-    #[test]
-    fn chunk_roundtrip_uniform_dtype() {
-        let spec = chunk_spec("act", 3, &[("j1", DType::F32), ("j2", DType::F32)]);
-        let fp = chunk_fingerprint(&spec);
-        let mut data = HashMap::new();
-        data.insert("j1".to_string(), vec![0.1, 0.2, 0.3].into());
-        data.insert("j2".to_string(), vec![1.0, 1.5, 2.0].into());
-        let out = serialize_chunk(fp, 999, Some(500), &spec, &data);
-        let (ts, reply, columns) = deserialize_chunk(&out.payload, fp, &spec).unwrap();
-        assert_eq!(ts, 999);
-        assert_eq!(reply, Some(500));
-        // Order of `columns` matches `spec.fields`.
-        assert_eq!(columns.len(), 2);
-        // F32 narrowing is lossless for these values.
-        assert_eq!(columns[0], vec![0.1f32 as f64, 0.2f32 as f64, 0.3f32 as f64]);
-        assert_eq!(columns[1], vec![1.0, 1.5, 2.0]);
-    }
-
-    #[test]
-    fn chunk_roundtrip_mixed_dtype() {
-        let spec = chunk_spec(
-            "act",
-            2,
-            &[("joint", DType::F32), ("gripper", DType::Bool), ("mode", DType::I8)],
-        );
-        let fp = chunk_fingerprint(&spec);
-        let mut data = HashMap::new();
-        data.insert("joint".to_string(), vec![0.5, -0.25].into());
-        data.insert("gripper".to_string(), vec![1.0, 0.0].into());
-        data.insert("mode".to_string(), vec![3.0, -1.0].into());
-        let out = serialize_chunk(fp, 1, None, &spec, &data);
-        // Header (20) + 2 rows of (4 + 1 + 1) = 12 → 32 bytes total.
-        assert_eq!(out.payload.len(), CORRELATED_HEADER_LEN + 2 * (4 + 1 + 1));
-        let (ts, reply, columns) = deserialize_chunk(&out.payload, fp, &spec).unwrap();
-        assert_eq!(ts, 1);
-        assert_eq!(reply, None);
-        assert_eq!(columns[0], vec![0.5, -0.25]);
-        assert_eq!(columns[1], vec![1.0, 0.0]);
-        assert_eq!(columns[2], vec![3.0, -1.0]);
-    }
-
-    #[test]
-    fn chunk_missing_field_zeros() {
-        let spec = chunk_spec("act", 2, &[("j1", DType::F64), ("j2", DType::F64)]);
-        let fp = chunk_fingerprint(&spec);
-        let mut data = HashMap::new();
-        data.insert("j1".to_string(), vec![1.0, 2.0].into());
-        // j2 omitted — should serialize as zeros, not panic.
-        let out = serialize_chunk(fp, 0, None, &spec, &data);
-        let (_, _, columns) = deserialize_chunk(&out.payload, fp, &spec).unwrap();
-        assert_eq!(columns[0], vec![1.0, 2.0]);
-        assert_eq!(columns[1], vec![0.0, 0.0]);
-    }
-
-    #[test]
-    fn chunk_fingerprint_changes_with_horizon() {
-        let a = chunk_spec("act", 10, &[("j", DType::F32)]);
-        let b = chunk_spec("act", 50, &[("j", DType::F32)]);
-        assert_ne!(chunk_fingerprint(&a), chunk_fingerprint(&b));
-    }
-
-    #[test]
-    fn chunk_fingerprint_changes_with_name() {
-        let a = chunk_spec("act", 10, &[("j", DType::F32)]);
-        let b = chunk_spec("aux", 10, &[("j", DType::F32)]);
-        assert_ne!(chunk_fingerprint(&a), chunk_fingerprint(&b));
-    }
-
-    #[test]
-    fn chunk_saturation_indices_are_flat_t_times_fields_plus_f() {
-        let spec = chunk_spec("act", 3, &[("a", DType::F64), ("b", DType::I8)]);
-        let fp = chunk_fingerprint(&spec);
-        let mut data = HashMap::new();
-        data.insert("a".to_string(), vec![0.0, 0.0, 0.0].into());
-        // b at t=1 saturates.
-        data.insert("b".to_string(), vec![0.0, 500.0, 0.0].into());
-        let out = serialize_chunk(fp, 0, None, &spec, &data);
-        // n_fields=2, t=1, fi=1 → flat = 1 * 2 + 1 = 3.
-        assert_eq!(out.saturated_indices, vec![3]);
     }
 }

@@ -232,39 +232,6 @@ fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
     }
 }
 
-/// A declared action chunk: name, fixed horizon, ordered field list. The
-/// chunk's payload travels as a LiveKit byte stream (not a data packet) so
-/// it isn't bounded by the 15 KB packet limit.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct ChunkSpec {
-    pub name: String,
-    pub horizon: u32,
-    pub fields: Vec<FieldSpec>,
-}
-
-/// One column of an outgoing action chunk. Mirrors `core::ChunkColumn`:
-/// `values` is the column widened to `f64`, and `dtype` is the dtype the
-/// caller claims it holds.
-///
-/// A binding sets `dtype` when it knows the caller's intent per column, and
-/// leaves it `None` when it doesn't. The Python binding leaves it `None` and
-/// runs its own category check, for the same reason `send_action` does: a
-/// Python `int` is a legitimate `I8` *and* `I32`, so an exact claim would be
-/// invented rather than observed.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct ChunkColumn {
-    pub values: Vec<f64>,
-    pub dtype: Option<DType>,
-}
-
-fn chunk_columns_to_core(data: HashMap<String, ChunkColumn>) -> HashMap<String, core::ChunkColumn> {
-    data.into_iter()
-        .map(|(name, c)| {
-            (name, core::ChunkColumn { values: c.values, dtype: c.dtype.map(Into::into) })
-        })
-        .collect()
-}
-
 /// Where the pixels in a delivered frame came from. Mirrors
 /// `livekit_portal::FrameSource`.
 ///
@@ -364,22 +331,6 @@ pub struct Action {
     pub sender: String,
 }
 
-/// A received action chunk. `data` is `field -> column of length horizon`,
-/// each column widened to `f64` (lossless for every supported dtype).
-/// Bindings may re-cast columns into typed numpy arrays per the declared
-/// chunk schema.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct ActionChunk {
-    pub name: String,
-    pub horizon: u32,
-    pub data: HashMap<String, Vec<f64>>,
-    pub timestamp_us: u64,
-    pub in_reply_to_ts_us: Option<u64>,
-    /// Identity of the operator that produced this chunk; same semantics
-    /// as `Action::sender`.
-    pub sender: String,
-}
-
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct State {
     pub values: HashMap<String, f64>,
@@ -419,12 +370,9 @@ pub struct TransportMetrics {
     pub states_received: u64,
     pub actions_sent: u64,
     pub actions_received: u64,
-    pub action_chunks_sent: u64,
-    pub action_chunks_received: u64,
     pub frame_jitter_us: HashMap<String, u64>,
     pub state_jitter_us: u64,
     pub action_jitter_us: u64,
-    pub action_chunk_jitter_us: u64,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]
@@ -484,9 +432,6 @@ pub enum PortalError {
     #[error("unknown video track: {0}")]
     UnknownVideoTrack(String),
 
-    #[error("unknown action chunk: {0}")]
-    UnknownChunk(String),
-
     #[error("wrong frame size: expected {expected} bytes, got {got}")]
     WrongFrameSize { expected: u64, got: u64 },
 
@@ -518,7 +463,6 @@ impl From<core::PortalError> for PortalError {
             core::PortalError::NoPeer => PortalError::NoPeer,
             core::PortalError::AmbiguousPeer => PortalError::AmbiguousPeer,
             core::PortalError::UnknownVideoTrack { name } => PortalError::UnknownVideoTrack(name),
-            core::PortalError::UnknownChunk { name } => PortalError::UnknownChunk(name),
             core::PortalError::WrongFrameSize { expected, got } => {
                 PortalError::WrongFrameSize { expected: expected as u64, got: got as u64 }
             }
@@ -559,6 +503,11 @@ pub enum ConfigFileError {
     UnsupportedVersion { got: u32, supported: u32 },
     #[error("invalid config: {0}")]
     Invalid(String),
+    #[error(
+        "`action_chunks` is no longer supported: action chunks were removed in v0.3. \
+         Declare the per-step fields under `action` and call `send_action` once per control tick"
+    )]
+    ActionChunksRemoved,
 }
 
 impl From<core::ConfigFileError> for ConfigFileError {
@@ -570,6 +519,7 @@ impl From<core::ConfigFileError> for ConfigFileError {
                 ConfigFileError::UnsupportedVersion { got, supported }
             }
             core::ConfigFileError::Invalid(s) => ConfigFileError::Invalid(s),
+            core::ConfigFileError::ActionChunksRemoved => ConfigFileError::ActionChunksRemoved,
         }
     }
 }
@@ -641,9 +591,6 @@ pub trait PortalCallbacks: Send + Sync {
     fn on_observation(&self, observation: Observation);
     fn on_video_frame(&self, track_name: String, frame: VideoFrame);
     fn on_drop(&self, dropped: Vec<HashMap<String, f64>>);
-    /// Fires for every chunk received. Bindings dispatch by `chunk.name`
-    /// to per-chunk user callbacks if needed.
-    fn on_action_chunk(&self, chunk: ActionChunk);
     /// Fires when an operator joins the room (post role-attribute discovery).
     fn on_operator_joined(&self, identity: String);
     /// Fires when an operator leaves the room. The robot's
@@ -735,17 +682,6 @@ impl PortalConfig {
         self.inner.lock().add_action_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
     }
 
-    /// Declare a named action chunk: a fixed-horizon batch of typed
-    /// per-field values published as one byte stream. Use this for VLA
-    /// policies that emit a horizon of future actions per inference step.
-    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
-        self.inner.lock().add_action_chunk(
-            name,
-            horizon,
-            fields.into_iter().map(|f| (f.name, f.dtype.into())),
-        );
-    }
-
     pub fn set_fps(&self, fps: u32) {
         self.inner.lock().set_fps(fps);
     }
@@ -803,8 +739,8 @@ impl PortalConfig {
     }
 
     /// Operator-side opt-in to receiving executed actions ("HITL
-    /// recording"). Off by default. When on, `on_action` / `on_action_chunk`
-    /// / `get_action` / `get_action_chunk` fire on the operator for actions
+    /// recording"). Off by default. When on, `on_action` / `get_action`
+    /// fire on the operator for actions
     /// the active operator sends, plus a local echo when self == active.
     /// No-op on the Robot side — the robot always processes actions.
     pub fn set_action_subscription(&self, enable: bool) {
@@ -846,13 +782,6 @@ impl PortalConfig {
             .iter()
             .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
             .collect()
-    }
-
-    /// Declared action chunks. Used by bindings that load a config from
-    /// YAML and need to mirror chunk schemas into their own typed-state
-    /// tracking after construction.
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.lock().action_chunks().iter().map(chunkspec_from_core).collect()
     }
 
     /// Session name this config was built for.
@@ -928,7 +857,6 @@ pub struct Portal {
     action_fields: Vec<String>,
     video_tracks: Vec<String>,
     video_track_specs: Vec<VideoTrackSpec>,
-    action_chunks: Vec<ChunkSpec>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -944,8 +872,6 @@ impl Portal {
         let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
         let video_track_specs: Vec<VideoTrackSpec> =
             cfg.video_tracks().iter().map(videotrackspec_from_core).collect();
-        let action_chunks: Vec<ChunkSpec> =
-            cfg.action_chunks().iter().map(chunkspec_from_core).collect();
 
         let inner = core::Portal::new(cfg);
 
@@ -994,13 +920,6 @@ impl Portal {
             });
         }
 
-        for chunk_spec in &action_chunks {
-            let cb = callbacks.clone();
-            inner.on_action_chunk(&chunk_spec.name, move |chunk| {
-                cb.on_action_chunk(actionchunk_from_core(chunk));
-            });
-        }
-
         let cb = callbacks.clone();
         inner.on_operator_joined(move |id| {
             cb.on_operator_joined(id.to_string());
@@ -1021,7 +940,6 @@ impl Portal {
             action_fields,
             video_tracks,
             video_track_specs,
-            action_chunks,
         })
     }
 
@@ -1068,27 +986,6 @@ impl Portal {
         self.inner.send_action(&typed, timestamp_us, in_reply_to_ts_us).map_err(Into::into)
     }
 
-    /// Publish an action chunk on the named declaration. `data` is
-    /// `field -> column of length horizon` widened to `f64`, each column
-    /// optionally claiming a dtype the core checks against the declared
-    /// field.
-    pub fn send_action_chunk(
-        &self,
-        chunk_name: String,
-        data: HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        self.inner
-            .send_action_chunk(
-                &chunk_name,
-                &chunk_columns_to_core(data),
-                timestamp_us,
-                in_reply_to_ts_us,
-            )
-            .map_err(Into::into)
-    }
-
     pub fn get_observation(&self) -> Option<Observation> {
         self.inner.get_observation().as_ref().map(observation_from_core)
     }
@@ -1100,10 +997,6 @@ impl Portal {
             in_reply_to_ts_us: a.in_reply_to_ts_us,
             sender: a.sender,
         })
-    }
-
-    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
-        self.inner.get_action_chunk(&chunk_name).map(|c| actionchunk_from_core(&c))
     }
 
     pub fn get_state(&self) -> Option<State> {
@@ -1151,10 +1044,6 @@ impl Portal {
             .filter(|s| !core::Codec::from(s.codec).is_webrtc())
             .cloned()
             .collect()
-    }
-
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.action_chunks.clone()
     }
 
     // --- Multi-controller ---
@@ -1291,10 +1180,6 @@ impl RobotConfig {
         self.inner.add_action_typed(schema);
     }
 
-    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
-        self.inner.add_action_chunk(name, horizon, fields);
-    }
-
     pub fn set_fps(&self, fps: u32) {
         self.inner.set_fps(fps);
     }
@@ -1375,10 +1260,6 @@ impl RobotConfig {
 
     pub fn action_schema(&self) -> Vec<FieldSpec> {
         self.inner.action_schema()
-    }
-
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
     }
 
     pub fn session(&self) -> String {
@@ -1485,10 +1366,6 @@ impl OperatorConfig {
         self.inner.add_action_typed(schema);
     }
 
-    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
-        self.inner.add_action_chunk(name, horizon, fields);
-    }
-
     pub fn set_fps(&self, fps: u32) {
         self.inner.set_fps(fps);
     }
@@ -1572,10 +1449,6 @@ impl OperatorConfig {
         self.inner.action_schema()
     }
 
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
-    }
-
     pub fn session(&self) -> String {
         self.inner.session()
     }
@@ -1623,7 +1496,7 @@ impl OperatorConfig {
 }
 
 /// Robot-side Portal facade. Exposes publish-state/video, receive
-/// actions/chunks, and the shared control plane. Wrong-role methods
+/// actions, and the shared control plane. Wrong-role methods
 /// (`send_action`, observation getters) are absent by construction.
 #[derive(uniffi::Object)]
 pub struct Robot {
@@ -1672,10 +1545,6 @@ impl Robot {
         self.inner.get_action()
     }
 
-    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
-        self.inner.get_action_chunk(chunk_name)
-    }
-
     // -- introspection (shared) ----------------------------------------------
 
     pub fn state_fields(&self) -> Vec<String> {
@@ -1696,10 +1565,6 @@ impl Robot {
 
     pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
-    }
-
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
     }
 
     // -- multi-controller + rpc + metrics (shared) ---------------------------
@@ -1747,10 +1612,10 @@ impl Robot {
     }
 }
 
-/// Operator-side Portal facade. Exposes publish-action/chunk, receive
+/// Operator-side Portal facade. Exposes publish-action, receive
 /// observations/state/video, and the shared control plane. Wrong-role methods
 /// (`send_state`, `send_video_frame`) are absent by construction. The
-/// action-subscription getters (`get_action` / `get_action_chunk`) are
+/// action-subscription getter (`get_action`) is
 /// present but only yield values when `OperatorConfig::set_action_subscription`
 /// was enabled.
 #[derive(uniffi::Object)]
@@ -1784,16 +1649,6 @@ impl Operator {
         self.inner.send_action(values, timestamp_us, in_reply_to_ts_us)
     }
 
-    pub fn send_action_chunk(
-        &self,
-        chunk_name: String,
-        data: HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        self.inner.send_action_chunk(chunk_name, data, timestamp_us, in_reply_to_ts_us)
-    }
-
     // -- receive (operator-side) ---------------------------------------------
 
     pub fn get_state(&self) -> Option<State> {
@@ -1812,12 +1667,6 @@ impl Operator {
     /// `OperatorConfig::set_action_subscription(true)` for any value to land.
     pub fn get_action(&self) -> Option<Action> {
         self.inner.get_action()
-    }
-
-    /// Latest executed chunk for `chunk_name`, or `None`. Requires
-    /// `OperatorConfig::set_action_subscription(true)`.
-    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
-        self.inner.get_action_chunk(chunk_name)
     }
 
     // -- introspection (shared) ----------------------------------------------
@@ -1840,10 +1689,6 @@ impl Operator {
 
     pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
         self.inner.frame_video_tracks()
-    }
-
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
     }
 
     // -- multi-controller + rpc + metrics (shared) ---------------------------
@@ -1907,29 +1752,6 @@ fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
         data: f.data.to_vec(),
         timestamp_us: f.timestamp_us,
         source: f.source.into(),
-    }
-}
-
-fn chunkspec_from_core(c: &core::ChunkSpec) -> ChunkSpec {
-    ChunkSpec {
-        name: c.name.clone(),
-        horizon: c.horizon,
-        fields: c
-            .fields
-            .iter()
-            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
-            .collect(),
-    }
-}
-
-fn actionchunk_from_core(c: &core::ActionChunk) -> ActionChunk {
-    ActionChunk {
-        name: c.name.clone(),
-        horizon: c.horizon,
-        data: c.data.clone(),
-        timestamp_us: c.timestamp_us,
-        in_reply_to_ts_us: c.in_reply_to_ts_us,
-        sender: c.sender.clone(),
     }
 }
 
@@ -1999,12 +1821,9 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             states_received: m.transport.states_received,
             actions_sent: m.transport.actions_sent,
             actions_received: m.transport.actions_received,
-            action_chunks_sent: m.transport.action_chunks_sent,
-            action_chunks_received: m.transport.action_chunks_received,
             frame_jitter_us: m.transport.frame_jitter_us,
             state_jitter_us: m.transport.state_jitter_us,
             action_jitter_us: m.transport.action_jitter_us,
-            action_chunk_jitter_us: m.transport.action_chunk_jitter_us,
         },
         buffers: BufferMetrics {
             video_fill: m.buffers.video_fill.into_iter().map(|(k, v)| (k, v as u64)).collect(),

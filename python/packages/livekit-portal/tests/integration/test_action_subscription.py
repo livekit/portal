@@ -15,9 +15,9 @@
 """Integration tests for v0.2 HITL recording.
 
 Covers the operator-side action subscription feature, the propagation
-timing of `lk.portal.active_operator`, and the `Action.sender` /
-`ActionChunk.sender` attribution. Skipped automatically when
-`LIVEKIT_URL` is unset (matches `conftest.py`).
+timing of `lk.portal.active_operator`, and the `Action.sender`
+attribution. Skipped automatically when `LIVEKIT_URL` is unset (matches
+`conftest.py`).
 
 Spec coverage: cases 30-46 in `spec.md`.
 """
@@ -33,7 +33,6 @@ import pytest
 
 from livekit.portal import (
     Action,
-    ActionChunk,
     DType,
     Operator,
     OperatorConfig,
@@ -81,12 +80,10 @@ _ACTION_SCHEMA = [("a", DType.F32)]
 _STATE_SCHEMA = [("s", DType.F32)]
 
 
-def _make_robot(room: str, *, with_chunk: bool = False) -> Robot:
+def _make_robot(room: str) -> Robot:
     cfg = RobotConfig(room)
     cfg.add_state_typed(_STATE_SCHEMA)
     cfg.add_action_typed(_ACTION_SCHEMA)
-    if with_chunk:
-        cfg.add_action_chunk("ck", horizon=4, fields=_ACTION_SCHEMA)
     return Robot(cfg)
 
 
@@ -95,13 +92,10 @@ def _make_operator(
     identity: str,
     *,
     subscribe: bool = False,
-    with_chunk: bool = False,
 ) -> Operator:
     cfg = OperatorConfig(room)
     cfg.add_state_typed(_STATE_SCHEMA)
     cfg.add_action_typed(_ACTION_SCHEMA)
-    if with_chunk:
-        cfg.add_action_chunk("ck", horizon=4, fields=_ACTION_SCHEMA)
     if subscribe:
         cfg.set_action_subscription(True)
     return Operator(cfg)
@@ -601,45 +595,14 @@ async def test_sender_set_on_every_delivered_action():
 
 
 @pytest.mark.asyncio
-async def test_chunk_subscription_works():
-    """Spec 40: action chunks subscription delivers chunks to the recorder
-    with `chunk.sender` populated.
-    """
-    room = _room_name()
-    robot = _make_robot(room, with_chunk=True)
-    active = _make_operator(room, "x", with_chunk=True)
-    rec = _make_operator(room, "rec", subscribe=True, with_chunk=True)
-    seen: List[ActionChunk] = []
-    rec.on_action_chunk("ck", lambda c: seen.append(c))
-    try:
-        await robot.connect(URL, _make_token("robot", room))
-        await active.connect(URL, _make_token("x", room))
-        await rec.connect(URL, _make_token("rec", room))
-        assert await _wait_for(
-            lambda: {"x", "rec"} <= set(robot.operators())
-        )
-        await active.set_active_operator("x")
-        assert await _wait_for(lambda: rec.active_operator() == "x")
-
-        active.send_action_chunk("ck", {"a": [1.0, 2.0, 3.0, 4.0]})
-        assert await _wait_for(lambda: len(seen) >= 1, timeout=2.0)
-        assert seen[0].sender == "x"
-        assert list(seen[0].raw_data["a"]) == [1.0, 2.0, 3.0, 4.0]
-    finally:
-        await active.disconnect()
-        await rec.disconnect()
-        await robot.disconnect()
-
-
-@pytest.mark.asyncio
 async def test_pull_surface_populates_on_operator_side():
-    """Spec 41: `get_action()` and `get_action_chunk(name)` return the
-    latest gate-passed values on the recorder.
+    """Spec 41: `get_action()` returns the latest gate-passed value on the
+    recorder.
     """
     room = _room_name()
-    robot = _make_robot(room, with_chunk=True)
-    active = _make_operator(room, "x", with_chunk=True)
-    rec = _make_operator(room, "rec", subscribe=True, with_chunk=True)
+    robot = _make_robot(room)
+    active = _make_operator(room, "x")
+    rec = _make_operator(room, "rec", subscribe=True)
     try:
         await robot.connect(URL, _make_token("robot", room))
         await active.connect(URL, _make_token("x", room))
@@ -658,14 +621,7 @@ async def test_pull_surface_populates_on_operator_side():
             lambda: rec.get_action() is not None
             and rec.get_action().values["a"] == pytest.approx(9.5)
         )
-
-        active.send_action_chunk("ck", {"a": [10.0, 20.0, 30.0, 40.0]})
-        assert await _wait_for(
-            lambda: rec.get_action_chunk("ck") is not None,
-            timeout=2.0,
-        )
-        chunk = rec.get_action_chunk("ck")
-        assert chunk.sender == "x"
+        assert rec.get_action().sender == "x"
     finally:
         await active.disconnect()
         await rec.disconnect()

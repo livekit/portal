@@ -13,7 +13,7 @@ connecting.
 
 Encryption is applied by libwebrtc on each RTP frame and on every data channel
 packet. That means it covers everything Portal sends: WebRTC video, byte-stream
-frame video, state, actions, action chunks, and RPC.
+frame video, state, actions, and RPC.
 
 Portal does not implement any of this itself. It passes your key to the LiveKit
 SDK, which handles the rest.
@@ -72,7 +72,6 @@ Do not hardcode keys in source, and do not commit them next to your config.
 | Byte-stream video (MJPEG, PNG, RAW) | Yes |
 | State packets | Yes |
 | Action packets | Yes |
-| Action chunk byte streams | Yes |
 | RPC calls and replies | Yes |
 | Participant identities and room metadata | No |
 | Track names and signaling | No |

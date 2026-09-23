@@ -43,6 +43,11 @@ use crate::video::{VideoPublisher, VideoReceiver, VideoTrackSlots};
 /// application-level attributes the user may also be setting.
 pub const ROLE_ATTR_KEY: &str = "lk.portal.role";
 pub const ACTIVE_OPERATOR_ATTR_KEY: &str = "lk.portal.active_operator";
+/// Wire protocol version every peer publishes. Peers only recognise each
+/// other when it matches, so a mixed-version room fails loudly instead of
+/// exchanging packets neither side can read.
+pub const PROTOCOL_VERSION_ATTR_KEY: &str = "lk.portal.version";
+pub const PROTOCOL_VERSION: &str = "3";
 const ROLE_VALUE_ROBOT: &str = "robot";
 const ROLE_VALUE_OPERATOR: &str = "operator";
 /// RPC method registered by Robot-side Portals so any participant can request
@@ -79,6 +84,10 @@ pub(crate) struct ControllerState {
     /// attribute. Operators use this to address `set_active_operator` RPCs.
     pub(crate) robot_identity: Mutex<Option<String>>,
 
+    /// Identities already warned about for a protocol version mismatch, so
+    /// each one is logged once rather than on every attribute change.
+    version_mismatch_warned: Mutex<HashSet<String>>,
+
     on_operator_joined: Mutex<Option<IdentityCb>>,
     on_operator_left: Mutex<Option<IdentityCb>>,
     on_active_operator_changed: Mutex<Option<OptIdentityCb>>,
@@ -90,6 +99,7 @@ impl ControllerState {
             active_operator: Mutex::new(None),
             operators: Mutex::new(HashSet::new()),
             robot_identity: Mutex::new(None),
+            version_mismatch_warned: Mutex::new(HashSet::new()),
             on_operator_joined: Mutex::new(None),
             on_operator_left: Mutex::new(None),
             on_active_operator_changed: Mutex::new(None),
@@ -153,13 +163,19 @@ impl ControllerState {
 }
 
 /// Classify a participant by their `lk.portal.role` attribute. Returns
-/// `None` if the attribute is absent or has an unknown value.
+/// `None` if the attribute is absent, has an unknown value, or the
+/// participant speaks a different protocol version.
 fn classify_role(attrs: &HashMap<String, String>) -> Option<Role> {
-    match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
-        Some(ROLE_VALUE_ROBOT) => Some(Role::Robot),
-        Some(ROLE_VALUE_OPERATOR) => Some(Role::Operator),
-        _ => None,
-    }
+    let role = match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
+        Some(ROLE_VALUE_ROBOT) => Role::Robot,
+        Some(ROLE_VALUE_OPERATOR) => Role::Operator,
+        _ => return None,
+    };
+    is_compatible(attrs).then_some(role)
+}
+
+fn is_compatible(attrs: &HashMap<String, String>) -> bool {
+    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str) == Some(PROTOCOL_VERSION)
 }
 
 /// Drains the buffers returned by `SyncBuffer::push_*` and dispatches them to
@@ -451,6 +467,7 @@ impl Portal {
         };
         let mut role_attrs = HashMap::new();
         role_attrs.insert(ROLE_ATTR_KEY.to_string(), role_value.to_string());
+        role_attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), PROTOCOL_VERSION.to_string());
         if let Err(e) = local_participant.set_attributes(role_attrs).await {
             // Most common cause: the token grant did not include
             // `canUpdateOwnMetadata`. Surface a clear error so callers fix
@@ -1276,8 +1293,19 @@ fn classify_and_update(
             }
         }
         None => {
-            // Role attribute not yet visible; wait for a follow-up
-            // ParticipantAttributesChanged event.
+            // Either the role attribute isn't visible yet (a follow-up
+            // ParticipantAttributesChanged event will bring it) or the peer
+            // speaks another protocol version and stays out of the rosters.
+            if attrs.contains_key(ROLE_ATTR_KEY)
+                && !is_compatible(attrs)
+                && controller.version_mismatch_warned.lock().insert(id.clone())
+            {
+                log::warn!(
+                    "[version-mismatch] ignoring '{id}': it speaks Portal protocol {:?}, this \
+                     peer speaks {PROTOCOL_VERSION:?}; upgrade both sides to the same release",
+                    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str).unwrap_or("<none>"),
+                );
+            }
         }
     }
 }
@@ -1366,6 +1394,11 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                     let sender_id = p.identity().as_str().to_string();
                     let active = ctx.controller.active_operator.lock().clone();
                     if active.as_deref() != Some(sender_id.as_str()) {
+                        return;
+                    }
+                    // A pointer seeded from a token or set over RPC can name
+                    // any identity; only a recognised operator may drive.
+                    if !ctx.controller.operators.lock().contains(&sender_id) {
                         return;
                     }
                     sender_id
@@ -1508,5 +1541,46 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             ctx.controller.clear_for_reconnect();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attrs(role: &str, version: Option<&str>) -> HashMap<String, String> {
+        let mut attrs = HashMap::from([(ROLE_ATTR_KEY.to_string(), role.to_string())]);
+        if let Some(v) = version {
+            attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), v.to_string());
+        }
+        attrs
+    }
+
+    #[test]
+    fn matching_version_is_classified() {
+        assert_eq!(classify_role(&attrs("robot", Some(PROTOCOL_VERSION))), Some(Role::Robot));
+        assert_eq!(classify_role(&attrs("operator", Some(PROTOCOL_VERSION))), Some(Role::Operator));
+    }
+
+    #[test]
+    fn missing_or_other_version_is_ignored() {
+        assert_eq!(classify_role(&attrs("operator", None)), None);
+        assert_eq!(classify_role(&attrs("operator", Some("2"))), None);
+        assert_eq!(classify_role(&attrs("robot", Some(""))), None);
+        assert_eq!(classify_role(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn mismatched_peer_stays_out_of_rosters() {
+        let controller = ControllerState::new();
+        let id = ParticipantIdentity::from("old-operator".to_string());
+        classify_and_update(&controller, Role::Robot, &id, &attrs("operator", None));
+        classify_and_update(&controller, Role::Robot, &id, &attrs("operator", Some("2")));
+        assert!(controller.operators.lock().is_empty());
+        assert!(controller.version_mismatch_warned.lock().contains("old-operator"));
+
+        let robot = ParticipantIdentity::from("old-robot".to_string());
+        classify_and_update(&controller, Role::Operator, &robot, &attrs("robot", Some("2")));
+        assert!(controller.robot_identity.lock().is_none());
     }
 }

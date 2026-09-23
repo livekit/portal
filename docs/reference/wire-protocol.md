@@ -41,17 +41,23 @@ The room name and participant identities come from the access token, not from
 Portal. The `session` string in Portal config is a local log label and is never
 compared against the room name. Pick identities at token-mint time.
 
-On connect, every Portal peer self-sets one participant attribute.
+On connect, every Portal peer self-sets its role and protocol version.
 
 | Attribute key | Value | Set by |
 |---|---|---|
 | `lk.portal.role` | `"robot"` or `"operator"` | every peer, on connect |
+| `lk.portal.version` | protocol version, currently `"3"` | every peer, on connect |
 | `lk.portal.active_operator` | active operator identity, or `""` | robot only |
 
 Discovery falls out of that. The robot is the remote participant with
 `lk.portal.role == "robot"`, and there is at most one. Operators are every
 participant with `lk.portal.role == "operator"`. A participant with no
 `lk.portal.role` is not a Portal peer and should be ignored.
+
+Peers only recognise each other when `lk.portal.version` matches exactly. A
+peer with a missing or different version is logged as `[version-mismatch]` and
+left out of every roster. A robot also drops actions from any sender that is not
+a recognised operator, even if the active-operator pointer names it.
 
 Both are plain participant attributes. Read them from the
 participant-attributes-changed event, and from the initial participant list on
@@ -311,7 +317,7 @@ NTP.
 To act as an **operator** against a Portal robot:
 
 1. Connect with a token granting `can_update_own_metadata`. Set your own
-   `lk.portal.role` attribute to `"operator"`.
+   `lk.portal.role` attribute to `"operator"` and `lk.portal.version` to `"3"`.
 2. Find the robot: the remote participant with `lk.portal.role == "robot"`.
 3. Subscribe to its video tracks by name. For WebRTC tracks, read `user_timestamp`
    from each frame's packet trailer. For byte-stream tracks, read

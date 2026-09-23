@@ -342,7 +342,7 @@ impl Drop for FrameVideoPublisher {
 pub(crate) fn dispatch_frame_payload(
     payload: Bytes,
     entries: &HashMap<String, Arc<FrameVideoTrackEntry>>,
-    sync_buffer: &Arc<Mutex<SyncBuffer>>,
+    sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     obs_sink: &Arc<ObservationSink>,
 ) {
     let wire_len = payload.len();
@@ -420,6 +420,9 @@ pub(crate) fn dispatch_frame_payload(
     }
     *entry.slots.latest.lock() = Some((*frame).clone());
 
+    let Some(sync_buffer) = sync_buffer else {
+        return;
+    };
     let output = sync_buffer.lock().push_frame(track_name_for_dispatch, frame);
     if !output.is_empty() {
         obs_sink.dispatch(output);

@@ -140,6 +140,8 @@ struct ConfigFileV1 {
     #[serde(default)]
     time_sync_source: Option<String>,
     #[serde(default)]
+    observation_sync: Option<bool>,
+    #[serde(default)]
     action_subscription: Option<ActionSubscriptionFile>,
 
     #[serde(default)]
@@ -304,6 +306,7 @@ impl PortalConfig {
         if let Some(v) = parsed.reuse_stale_frames {
             // Deprecated alias; `stall_for` folds it into the stall behavior.
             cfg.reuse_stale_frames = v;
+            cfg.sync_options_set.insert("reuse_stale_frames");
         }
         if let Some(v) = &parsed.stall_behavior {
             cfg.set_stall_behavior(parse_stall_behavior(v, "stall_behavior")?);
@@ -319,6 +322,9 @@ impl PortalConfig {
             if let Some(ms) = v.max_lag_ms {
                 cfg.set_track_max_lag_ms(v.name.clone(), ms);
             }
+        }
+        if let Some(v) = parsed.observation_sync {
+            cfg.set_observation_sync(v);
         }
         if let Some(v) = &parsed.time_sync_source {
             cfg.set_time_sync_source(parse_time_sync_source(v)?);
@@ -498,6 +504,24 @@ action:
         }
         let yaml = "version: 1\naction_subscription: sometimes\n";
         assert!(PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).is_err());
+    }
+
+    #[test]
+    fn observation_sync_off_lists_the_sync_options_it_ignores() {
+        let yaml = "version: 1\nobservation_sync: false\nslack: 3\nstall_behavior: freeze\n\
+                    videos:\n  - { name: cam, codec: raw, max_lag_ms: 40 }\n";
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).unwrap();
+        assert!(!cfg.observation_sync());
+        assert_eq!(cfg.ignored_sync_options(), vec!["max_lag_ms", "slack", "stall_behavior"]);
+
+        let yaml = "version: 1\nslack: 3\n";
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).unwrap();
+        assert!(cfg.observation_sync(), "on by default");
+        assert!(cfg.ignored_sync_options().is_empty(), "nothing is ignored while sync is on");
+
+        let yaml = "version: 1\nobservation_sync: false\n";
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).unwrap();
+        assert!(cfg.ignored_sync_options().is_empty(), "defaults are not warned about");
     }
 
     #[test]

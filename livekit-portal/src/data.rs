@@ -379,29 +379,27 @@ pub(crate) fn handle_data_received(
     received_at_us: u64,
 ) -> SyncOutput {
     match (config_role, topic) {
-        (Role::Robot, ACTION_TOPIC) | (Role::Operator, ACTION_TOPIC) => {
-            match deserialize_action(payload, action_fp, action_schema) {
-                Ok((send_ts, in_reply_to_ts_us, values)) => {
-                    let now = received_at_us;
-                    metrics.record_received(DataStream::Action, send_ts, now);
-                    metrics.record_e2e(in_reply_to_ts_us, now);
-                    action.deliver(build_action(
-                        send_ts,
-                        in_reply_to_ts_us,
-                        action_schema,
-                        &values,
-                        origin,
-                    ));
-                }
-                Err(DecodeError::SchemaMismatch { expected, got }) => {
-                    action.warn_mismatch(topic, expected, got);
-                }
-                Err(DecodeError::Malformed(e)) => {
-                    log::warn!("[bad-payload] action deserialize failed: {e}");
-                }
+        (_, ACTION_TOPIC) => match deserialize_action(payload, action_fp, action_schema) {
+            Ok((send_ts, in_reply_to_ts_us, values)) => {
+                let now = received_at_us;
+                metrics.record_received(DataStream::Action, send_ts, now);
+                metrics.record_e2e(in_reply_to_ts_us, now);
+                action.deliver(build_action(
+                    send_ts,
+                    in_reply_to_ts_us,
+                    action_schema,
+                    &values,
+                    origin,
+                ));
             }
-        }
-        (Role::Operator, STATE_TOPIC) => {
+            Err(DecodeError::SchemaMismatch { expected, got }) => {
+                action.warn_mismatch(topic, expected, got);
+            }
+            Err(DecodeError::Malformed(e)) => {
+                log::warn!("[bad-payload] action deserialize failed: {e}");
+            }
+        },
+        (Role::Operator | Role::Observer, STATE_TOPIC) => {
             match deserialize_values(payload, state_fp, state_schema) {
                 Ok((timestamp_us, values)) => {
                     metrics.record_received(DataStream::State, timestamp_us, received_at_us);

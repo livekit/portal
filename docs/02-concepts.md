@@ -2,33 +2,36 @@
 
 > The mental model behind Portal. Roles, observations, and control handoff.
 
-Four ideas cover almost everything. There are two roles. The robot publishes,
-operators subscribe. Observations arrive pre-fused. One operator holds control
-at a time.
+Four ideas cover almost everything. There are three roles. The robot publishes,
+operators drive, observers watch. Observations arrive pre-fused. One operator
+holds control at a time.
 
 This page explains each one. It is the shortest path to understanding what
 Portal actually does for you.
 
 ## Roles
 
-Portal has exactly two roles, and you pick one by choosing a class.
+Portal has three roles, and you pick one by choosing a class.
 
 | Class | Publishes | Subscribes to |
 |---|---|---|
 | `Robot` | video frames, state | actions |
 | `Operator` | actions | video frames and state, fused into observations |
+| `Observer` | nothing | video frames, state and executed actions, raw |
 
-There is **one robot per session**. There can be **any number of operators**.
-A human teleoperating, a policy running inference, a recorder logging data, and
-a supervisor routing control are all operators in the same room.
+There is **one robot per session**. There can be **any number of operators and
+observers**. A human teleoperating and a policy running inference are
+operators. A recorder logging data and a supervisor routing control are
+observers: they see everything in the room but never send actions, and they
+may still move the active operator.
 
 Both sides declare the same schema, using `add_video`, `add_state_typed`, and
 `add_action_typed`. Camera names, field names, field order, and per-field
 dtypes must all match. A mismatch is detected and the traffic is dropped, so
 this is the first thing to check when nothing arrives.
 
-Role is fixed at construction. Calling `send_action` on a `Robot` raises
-`PortalError.WrongRole`.
+Role is fixed at construction. Calling `send_action` on a `Robot` or an
+`Observer` raises `PortalError.WrongRole`.
 
 ## The observation model
 

@@ -45,14 +45,16 @@ On connect, every Portal peer self-sets its role and protocol version.
 
 | Attribute key | Value | Set by |
 |---|---|---|
-| `lk.portal.role` | `"robot"` or `"operator"` | every peer, on connect |
+| `lk.portal.role` | `"robot"`, `"operator"` or `"observer"` | every peer, on connect |
 | `lk.portal.version` | protocol version, currently `"3"` | every peer, on connect |
 | `lk.portal.active_operator` | active operator identity, or `""` | robot only |
 
 Discovery falls out of that. The robot is the remote participant with
 `lk.portal.role == "robot"`, and there is at most one. Operators are every
-participant with `lk.portal.role == "operator"`. A participant with no
-`lk.portal.role` is not a Portal peer and should be ignored.
+participant with `lk.portal.role == "operator"`, and observers every participant
+with `lk.portal.role == "observer"`. Observers never publish state or actions;
+they subscribe like operators. A participant with no `lk.portal.role` is not a
+Portal peer and should be ignored.
 
 Peers only recognise each other when `lk.portal.version` matches exactly. A
 peer with a missing or different version is logged as `[version-mismatch]` and
@@ -287,7 +289,10 @@ pointer.
 The robot's handler writes its attribute and updates its internal pointer, and the
 change propagates to everyone through the normal attribute-changed event. On
 failure the handler returns an RPC error: code `2001` if the robot is not
-connected, `2002` if the attribute write failed.
+connected, `2002` if the attribute write failed, `2003` if the caller is neither
+an operator nor an observer. A caller's role attribute can reach the robot after
+its RPC does, so the robot waits up to 1.5 s for an unknown caller to appear
+before refusing.
 
 When the active operator disconnects, the robot leaves the pointer pinned at that
 identity, so a reconnect with the same identity resumes control. To reassign, any

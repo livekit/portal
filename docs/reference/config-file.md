@@ -103,8 +103,8 @@ max_lag_ms: 166              # wait this long first; default is slack / fps
 # Clock
 time_sync_source: portal     # portal (sync to the robot) | system (trust the host clock)
 
-# Operator-only opt-in
-action_subscription: false   # receive executed actions, for HITL recording
+# Operator-side
+action_subscription: none    # none | active | all: which actions reach on_action
 
 # Video tracks
 videos:
@@ -139,7 +139,7 @@ action:
 | `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |
 | `reuse_stale_frames` | bool | `false` | Deprecated. Alias for `stall_behavior: freeze` with `max_lag_ms: 0`. |
 | `time_sync_source` | string | `portal` | Where `now_us()` comes from. `portal` syncs to the robot's clock. `system` trusts the host clock, for hosts kept in step by PTP or GPS. |
-| `action_subscription` | bool | `false` | Operator-side opt-in for receiving executed actions. No-op on the robot. |
+| `action_subscription` | string | `none` | Operator-side: which received actions reach `on_action`. `active` is the active operator's, `all` is every operator's, tagged with `active`. A bool is an error. No-op on the robot. |
 | `videos` | list | `[]` | Declared video tracks. |
 | `state` | list | `[]` | Declared state schema. |
 | `action` | list | `[]` | Declared action schema. |

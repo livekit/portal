@@ -32,6 +32,7 @@ use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{
     FRAME_VIDEO_TOPIC, FrameVideoPublisher, FrameVideoTrackEntry, dispatch_frame_payload,
 };
+use crate::keypoint::{KEYPOINT_TOPIC, Keypoint, KeypointSlot};
 use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
 use crate::serialization::{action_fingerprint, schema_fingerprint};
@@ -144,6 +145,13 @@ impl ControllerState {
                 log::error!("[callback-panic] on_active_operator_changed callback panicked");
             }
         }
+    }
+
+    /// Whether `id` is a recognised Portal peer of any role.
+    fn is_known_peer(&self, id: &str) -> bool {
+        self.robot_identity.lock().as_deref() == Some(id)
+            || self.operators.lock().contains(id)
+            || self.observers.lock().contains(id)
     }
 
     fn clear(&self) {
@@ -349,6 +357,8 @@ pub struct Portal {
 
     // Outlives connections so `now_us()` stays continuous across reconnects.
     clock: Arc<SyncedClock>,
+
+    keypoints: Arc<KeypointSlot>,
 }
 
 impl Portal {
@@ -430,6 +440,7 @@ impl Portal {
             local_participant: Arc::new(Mutex::new(None)),
             controller: Arc::new(ControllerState::new()),
             clock,
+            keypoints: Arc::new(KeypointSlot::new()),
             runtime_handle: Mutex::new(None),
         }
     }
@@ -587,6 +598,7 @@ impl Portal {
             metrics: self.metrics.clone(),
             clock: clock.clone(),
             time: self.clock.clone(),
+            keypoints: self.keypoints.clone(),
             controller: self.controller.clone(),
             local_identity,
         };
@@ -1292,6 +1304,40 @@ impl Portal {
         self.clock.now_us()
     }
 
+    /// Send an annotation to everyone in the room, including this peer's own
+    /// `on_keypoint`. `timestamp_us` is where the mark belongs and defaults to
+    /// `now_us()`; a teleoperator passes the timestamp of the frame on screen.
+    ///
+    /// Portal doesn't interpret `kind` or `payload`. Returns the observers
+    /// that were present, so an empty list tells the sender no one recorded
+    /// the mark.
+    pub async fn send_keypoint(
+        &self,
+        kind: &str,
+        payload: serde_json::Map<String, serde_json::Value>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
+        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
+        let packet = DataPacket {
+            payload: crate::keypoint::encode(kind, &payload, timestamp_us),
+            topic: Some(KEYPOINT_TOPIC.to_string()),
+            reliable: true,
+            destination_identities: Vec::new(),
+        };
+        lp.publish_data(packet).await.map_err(|e| PortalError::Room(e.to_string()))?;
+        // LiveKit doesn't fan a publisher's own packets back, and a recorder
+        // that marks its own takes still has to see them.
+        let sender = lp.identity().as_str().to_string();
+        self.keypoints.deliver(&Keypoint { kind: kind.to_string(), payload, timestamp_us, sender });
+        Ok(self.observers())
+    }
+
+    /// Fire on every keypoint in the room, this peer's own included.
+    pub fn on_keypoint(&self, callback: impl Fn(&Keypoint) + Send + Sync + 'static) {
+        self.keypoints.set_callback(Box::new(callback));
+    }
+
     /// Fires on the first sync with the robot's clock, and after each resync.
     pub fn on_time_synced(&self, callback: impl Fn() + Send + Sync + 'static) {
         self.clock.set_on_synced(Box::new(callback));
@@ -1334,6 +1380,7 @@ struct EventContext {
     metrics: Arc<MetricsRegistry>,
     clock: Arc<ClockService>,
     time: Arc<SyncedClock>,
+    keypoints: Arc<KeypointSlot>,
     /// Multi-controller state, shared with `Portal` so attribute and
     /// participant lifecycle events can update it directly without going
     /// through the Portal struct.
@@ -1527,6 +1574,16 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             if topic == CLOCK_TOPIC {
                 if let Some(p) = &participant {
                     ctx.clock.handle_packet(&payload, p.identity().as_str());
+                }
+                return;
+            }
+            if topic == KEYPOINT_TOPIC {
+                let Some(p) = &participant else {
+                    return;
+                };
+                let sender = p.identity().as_str().to_string();
+                if ctx.controller.is_known_peer(&sender) {
+                    ctx.keypoints.handle_packet(&payload, sender);
                 }
                 return;
             }

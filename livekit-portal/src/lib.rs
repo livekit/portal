@@ -20,6 +20,7 @@ mod data;
 pub mod dtype;
 pub mod error;
 mod frame_video;
+mod keypoint;
 pub mod metrics;
 mod placeholder;
 mod portal;
@@ -35,6 +36,7 @@ pub use config_file::ConfigFileError;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
 pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
+pub use keypoint::Keypoint;
 pub use metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
     TransportMetrics,

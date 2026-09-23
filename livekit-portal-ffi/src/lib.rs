@@ -395,6 +395,35 @@ pub struct Action {
     pub active: bool,
 }
 
+/// A keypoint. `payload_json` is a JSON object: UniFFI has no dynamic value
+/// type, so the payload crosses as text and bindings decode it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Keypoint {
+    pub kind: String,
+    pub payload_json: String,
+    pub timestamp_us: u64,
+    pub sender: String,
+}
+
+impl From<&core::Keypoint> for Keypoint {
+    fn from(k: &core::Keypoint) -> Self {
+        Self {
+            kind: k.kind.clone(),
+            payload_json: serde_json::Value::Object(k.payload.clone()).to_string(),
+            timestamp_us: k.timestamp_us,
+            sender: k.sender.clone(),
+        }
+    }
+}
+
+fn keypoint_payload(json: &str) -> PortalResult<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::from_str(json) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        Ok(_) => Err(PortalError::InvalidKeypoint("payload must be a JSON object".into())),
+        Err(e) => Err(PortalError::InvalidKeypoint(format!("payload is not valid JSON: {e}"))),
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct State {
     pub values: HashMap<String, f64>,
@@ -526,6 +555,9 @@ pub enum PortalError {
 
     #[error("observation sync is off on this peer")]
     ObservationSyncDisabled,
+
+    #[error("invalid keypoint: {0}")]
+    InvalidKeypoint(String),
 
     #[error("field '{field}' declared as {expected:?} but sent as {got}")]
     DtypeMismatch { field: String, expected: DType, got: String },
@@ -683,6 +715,8 @@ pub trait PortalCallbacks: Send + Sync {
     fn on_active_operator_changed(&self, identity: Option<String>);
     /// First sync with the robot's clock, and after each resync.
     fn on_time_synced(&self);
+    /// Every keypoint in the room, this peer's own included.
+    fn on_keypoint(&self, keypoint: Keypoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1067,8 @@ impl Portal {
         });
         let cb = callbacks.clone();
         inner.on_time_synced(move || cb.on_time_synced());
+        let cb = callbacks.clone();
+        inner.on_keypoint(move |kp| cb.on_keypoint(kp.into()));
 
         Arc::new(Self {
             inner,
@@ -1115,6 +1151,17 @@ impl Portal {
 
     pub fn metrics(&self) -> PortalMetrics {
         metrics_from_core(self.inner.metrics())
+    }
+
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        let payload = keypoint_payload(&payload_json)?;
+        Ok(self.inner.send_keypoint(&kind, payload, timestamp_us).await?)
     }
 
     /// Now on the robot's clock, in microseconds.
@@ -1743,6 +1790,16 @@ impl Robot {
         self.inner.metrics()
     }
 
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        self.inner.send_keypoint(kind, payload_json, timestamp_us).await
+    }
+
     /// Now on the robot's clock, in microseconds.
     pub fn now_us(&self) -> u64 {
         self.inner.now_us()
@@ -1882,6 +1939,16 @@ impl Operator {
 
     pub fn metrics(&self) -> PortalMetrics {
         self.inner.metrics()
+    }
+
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        self.inner.send_keypoint(kind, payload_json, timestamp_us).await
     }
 
     /// Now on the robot's clock, in microseconds.
@@ -2207,6 +2274,16 @@ impl Observer {
 
     pub fn metrics(&self) -> PortalMetrics {
         self.inner.metrics()
+    }
+
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        self.inner.send_keypoint(kind, payload_json, timestamp_us).await
     }
 
     /// Now on the robot's clock, in microseconds.

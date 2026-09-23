@@ -39,6 +39,7 @@ delivery, frame-video frames are codec-decoded to RGB. Use
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import numbers
 import os
@@ -261,6 +262,21 @@ class Action:
 
 
 @dataclass(frozen=True, slots=True)
+class Keypoint:
+    """An annotation: `{type, payload}`, and that is all Portal defines.
+
+    Portal delivers keypoints but never interprets them. `timestamp_us` is
+    where the mark belongs, on the robot's clock. `sender` is the identity
+    of the participant that sent it.
+    """
+
+    type: str
+    payload: Dict[str, Any]
+    timestamp_us: int
+    sender: str
+
+
+@dataclass(frozen=True, slots=True)
 class State:
     """A state sample received from the robot.
 
@@ -358,6 +374,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._operator_left_cb: Optional[Callable[[str], Any]] = None
         self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
         self._time_synced_cb: Optional[Callable[[], Any]] = None
+        self._keypoint_cb: Optional[Callable[[Keypoint], Any]] = None
         # Schemas are frozen at Portal construction and read by the wrap
         # helpers below on every delivery.
         self._action_schema = action_schema
@@ -427,6 +444,19 @@ class _Dispatcher(_ffi.PortalCallbacks):
         if cb is not None:
             self._schedule(cb)
 
+    def on_keypoint(self, keypoint: _ffi.Keypoint) -> None:
+        cb = self._keypoint_cb
+        if cb is not None:
+            self._schedule(
+                cb,
+                Keypoint(
+                    type=keypoint.kind,
+                    payload=json.loads(keypoint.payload_json),
+                    timestamp_us=keypoint.timestamp_us,
+                    sender=keypoint.sender,
+                ),
+            )
+
     # --- Registration (from Python user thread) -----------------------------
 
     def set_action(self, cb: Callable[[Action], Any]) -> None:
@@ -455,6 +485,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
 
     def set_time_synced(self, cb: Callable[[], Any]) -> None:
         self._time_synced_cb = cb
+
+    def set_keypoint(self, cb: Callable[[Keypoint], Any]) -> None:
+        self._keypoint_cb = cb
 
 
 _uniffi_bound_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1236,6 +1269,36 @@ class Portal:
         """
         self._dispatcher.set_time_synced(callback)
 
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to everyone in the room, this peer included.
+
+        A keypoint is `{type, payload}`: `type` is any string and `payload`
+        any JSON object (default `{}`). Portal never interprets either.
+        `timestamp_us` is where the mark belongs and defaults to `now_us()`;
+        a teleoperator passes the timestamp of the frame on screen.
+
+        Returns the observers that were present. An empty list means no one
+        recorded the mark.
+        """
+        if not isinstance(type, str):
+            raise TypeError(f"keypoint type must be a str, got {type.__class__.__name__}")
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise TypeError(f"keypoint payload must be a dict, got {payload.__class__.__name__}")
+        return list(await self._inner.send_keypoint(type, json.dumps(payload), timestamp_us))
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._dispatcher.set_keypoint(callback)
+
     def register_rpc_method(
         self,
         method: str,
@@ -1730,6 +1793,21 @@ class Robot:
         """Fire on the first sync with the robot's clock, and after each resync."""
         self._portal.on_time_synced(callback)
 
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to the room. See `Portal.send_keypoint`."""
+        return await self._portal.send_keypoint(type, payload, timestamp_us)
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._portal.on_keypoint(callback)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -1892,6 +1970,21 @@ class Operator:
     def on_time_synced(self, callback: Callable[[], Any]) -> None:
         """Fire on the first sync with the robot's clock, and after each resync."""
         self._portal.on_time_synced(callback)
+
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to the room. See `Portal.send_keypoint`."""
+        return await self._portal.send_keypoint(type, payload, timestamp_us)
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._portal.on_keypoint(callback)
 
     # -- rpc -----------------------------------------------------------------
 
@@ -2061,6 +2154,21 @@ class Observer:
         """Fire on the first sync with the robot's clock, and after each resync."""
         self._portal.on_time_synced(callback)
 
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to the room. See `Portal.send_keypoint`."""
+        return await self._portal.send_keypoint(type, payload, timestamp_us)
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._portal.on_keypoint(callback)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -2115,6 +2223,7 @@ __all__ = [
     "Observation",
     "Action",
     "State",
+    "Keypoint",
     "VideoFrameData",
     "PortalMetrics",
     "SyncMetrics",

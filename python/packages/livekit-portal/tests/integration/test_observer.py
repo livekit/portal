@@ -181,3 +181,40 @@ async def test_observer_reconnect_updates_rosters(pair):
         assert await wait_for(lambda: pair.robot.observers() == ["observer"])
     finally:
         await obs.disconnect()
+
+
+@pytest.mark.parametrize(
+    "attributes", [None, {"lk.portal.role": "operator"}], ids=["no-role", "missing-version"]
+)
+async def test_all_subscription_ignores_actions_from_strangers(pair, attributes):
+    """The gate checks the sender on every role, not only the robot: a real
+    action packet replayed by a stranger never reaches an `all` subscriber."""
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        _declare(cfg)
+    await pair.start()
+    cfg = ObserverConfig(pair.room)
+    cfg.add_state_typed([("j", DType.F32)])
+    _declare(cfg)
+    cfg.set_action_subscription("all")
+    obs = Observer(cfg)
+    seen = []
+    obs.on_action(lambda a: seen.append(a.sender))
+    raw = RawPeer(pair.room, "stranger", attributes=attributes)
+    try:
+        await obs.connect(URL, _make_token("observer", pair.room))
+        await raw.connect()
+        assert await wait_for(lambda: "operator" in obs.operators())
+        pair.operator.send_action({"a": 1.0})
+        assert await wait_for(lambda: raw.payloads("portal_action", "operator") and seen)
+        payload = raw.payloads("portal_action", "operator")[0]
+
+        for _ in range(10):
+            await raw.publish("portal_action", payload)
+            await asyncio.sleep(0.05)
+        pair.operator.send_action({"a": 2.0})
+        assert await wait_for(lambda: seen.count("operator") == 2)
+        await asyncio.sleep(0.3)
+        assert seen == ["operator", "operator"]
+    finally:
+        await raw.disconnect()
+        await obs.disconnect()

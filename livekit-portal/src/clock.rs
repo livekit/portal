@@ -271,7 +271,8 @@ pub(crate) struct MonotonicClock {
     applied_offset_us: i64,
     target_offset_us: i64,
     last_raw_us: Option<u64>,
-    last_out_us: u64,
+    /// Last value `now` handed out, `None` until the first one.
+    last_out_us: Option<u64>,
 }
 
 impl MonotonicClock {
@@ -280,12 +281,23 @@ impl MonotonicClock {
     /// monotonic with.
     pub fn set_target(&mut self, offset_us: i64) {
         self.target_offset_us = offset_us;
-        if offset_us > self.applied_offset_us || self.last_raw_us.is_none() {
+        if offset_us > self.applied_offset_us || self.last_out_us.is_none() {
             self.applied_offset_us = offset_us;
         }
     }
 
+    /// A timestamp to hand out: never repeats, never goes backwards.
     pub fn now(&mut self, raw_us: u64) -> u64 {
+        let candidate = self.estimate(raw_us);
+        let out = self.last_out_us.map_or(candidate, |last| candidate.max(last + 1));
+        self.last_out_us = Some(out);
+        out
+    }
+
+    /// Current best reading of the robot's clock, for local measurements
+    /// such as receive times. Unlike `now`, it doesn't count as handing out a
+    /// timestamp, so it never holds back a correction.
+    pub fn estimate(&mut self, raw_us: u64) -> u64 {
         let elapsed = self.last_raw_us.map_or(0, |last| raw_us.saturating_sub(last));
         self.last_raw_us = Some(raw_us);
 
@@ -298,10 +310,7 @@ impl MonotonicClock {
             let step = (elapsed / divisor).min(behind as u64) as i64;
             self.applied_offset_us -= step;
         }
-
-        let candidate = raw_us.saturating_add_signed(self.applied_offset_us);
-        self.last_out_us = candidate.max(self.last_out_us + 1);
-        self.last_out_us
+        raw_us.saturating_add_signed(self.applied_offset_us)
     }
 
     /// Offset currently in effect, which lags the target while slewing back.
@@ -373,6 +382,12 @@ impl SyncedClock {
     pub fn now_us(&self) -> u64 {
         let raw = self.raw_us();
         self.state.lock().clock.now(raw)
+    }
+
+    /// See `MonotonicClock::estimate`.
+    pub fn estimate_us(&self) -> u64 {
+        let raw = self.raw_us();
+        self.state.lock().clock.estimate(raw)
     }
 
     /// Raw local time, the clock the ping/pong timestamps are taken on.
@@ -774,6 +789,14 @@ mod tests {
         let mut clock = MonotonicClock::default();
         clock.set_target(-5 * S as i64);
         assert_eq!(clock.now(10 * S), 5 * S);
+    }
+
+    #[test]
+    fn estimates_do_not_hold_back_the_first_correction() {
+        let mut clock = MonotonicClock::default();
+        clock.estimate(10 * S);
+        clock.set_target(-5 * S as i64);
+        assert_eq!(clock.now(10 * S + 1), 5 * S + 1);
     }
 
     /// Slews from `behind` to zero in 10 ms steps, checking the clock never

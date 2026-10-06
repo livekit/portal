@@ -1611,7 +1611,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
                 origin,
-                ctx.time.now_us(),
+                ctx.time.estimate_us(),
             );
             if !output.is_empty() {
                 ctx.obs_sink.dispatch(output);

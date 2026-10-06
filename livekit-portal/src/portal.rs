@@ -1811,4 +1811,35 @@ mod tests {
         assert!(caller_may_steer(&controller, "recorder").await);
         assert!(!caller_may_steer(&controller, "stranger").await);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_strangers_do_not_hold_up_other_callers() {
+        let controller = Arc::new(ControllerState::new());
+        controller.operators.lock().insert("teleop".to_string());
+        let start = tokio::time::Instant::now();
+        let strangers: Vec<_> = (0..50)
+            .map(|i| {
+                let controller = controller.clone();
+                tokio::spawn(async move { caller_may_steer(&controller, &format!("s{i}")).await })
+            })
+            .collect();
+        let late = {
+            let controller = controller.clone();
+            tokio::spawn(async move { caller_may_steer(&controller, "late").await })
+        };
+
+        assert!(caller_may_steer(&controller, "teleop").await);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        // A caller whose role shows up during the wait is let in.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        controller.observers.lock().insert("late".to_string());
+        assert!(late.await.expect("task"));
+        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT);
+
+        for s in strangers {
+            assert!(!s.await.expect("task"));
+        }
+        // Refused together after one wait, not one wait each.
+        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT + Duration::from_millis(100));
+    }
 }

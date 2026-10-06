@@ -218,3 +218,37 @@ async def test_all_subscription_ignores_actions_from_strangers(pair, attributes)
     finally:
         await raw.disconnect()
         await obs.disconnect()
+
+
+async def test_stranger_burst_does_not_delay_real_steering(pair):
+    """Each refusal waits ~1.5 s for the caller's role to appear. A burst of
+    them must not hold up an operator's call, or each other."""
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        _declare(cfg)
+    await pair.start()
+    raw = RawPeer(pair.room, "stranger")
+    try:
+        await raw.connect()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        async def attempt():
+            with pytest.raises(Exception, match="only operators and observers"):
+                await raw.room.local_participant.perform_rpc(
+                    destination_identity="robot",
+                    method="portal.set_active_operator",
+                    payload="stranger",
+                    response_timeout=10.0,
+                )
+
+        burst = asyncio.gather(*(attempt() for _ in range(20)))
+        await asyncio.sleep(0.2)
+        before = loop.time()
+        await pair.operator.set_active_operator(None)
+        assert loop.time() - before < 1.0
+        assert pair.robot.active_operator() is None
+
+        await burst
+        assert loop.time() - started < 4.0
+    finally:
+        await raw.disconnect()

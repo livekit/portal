@@ -64,6 +64,7 @@ class RrdSink:
     | `observation/<track>` | frame timestamp (JPEG, or raw) | |
     | `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
     | `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | |
+    | `recorder/frames_dropped/<track>` | timestamp of a frame the recorder dropped | |
     | `metrics/...` | observer's `now_us()` | |
     | `portal/schema` | static: field order and dtypes, tracks, clock source | |
 
@@ -114,6 +115,12 @@ class RrdSink:
             Image.fromarray(pixels).save(buf, format="JPEG", quality=self.jpeg_quality)
             image = rr.EncodedImage(contents=buf.getvalue(), media_type="image/jpeg")
         rec.log(f"observation/{_part(track)}", image)
+
+    def write_frame_dropped(self, track: str, timestamp_us: int) -> None:
+        rec = self._stream()
+        rec.reset_time()
+        rec.set_time("robot_time", timestamp=_ts(timestamp_us))
+        rec.log(f"recorder/frames_dropped/{_part(track)}", rr.Scalars(1.0))
 
     def write_action(self, action: "Action") -> None:
         rec = self._stream()

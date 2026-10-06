@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,9 @@ class MemorySink:
     def write_frame(self, track, frame):
         time.sleep(self.frame_delay_s)
         self._record("frame", track, frame)
+
+    def write_frame_dropped(self, track, timestamp_us):
+        self._record("frame_dropped", track, timestamp_us)
 
     def write_action(self, action):
         self._record("action", action)
@@ -112,7 +116,7 @@ def test_slow_sink_drops_only_frames_and_never_blocks_the_receive_path():
     worst = 0.0
     for i in range(200):
         start = time.perf_counter()
-        rec.enqueue("frame", ("cam", i))
+        rec.enqueue("frame", ("cam", SimpleNamespace(timestamp_us=i)))
         rec.enqueue("state", i)
         if i % 20 == 0:
             rec.enqueue("keypoint", i)
@@ -126,6 +130,10 @@ def test_slow_sink_drops_only_frames_and_never_blocks_the_receive_path():
     assert names.count("state") == 200
     assert names.count("keypoint") == 10
     assert names.count("frame") == 200 - dropped
+    # Every frame is either written or marked as dropped, in order.
+    seen = [c[2].timestamp_us if c[0] == "frame" else c[2] for c in sink.calls if c[0] in ("frame", "frame_dropped")]
+    assert seen == list(range(200))
+    assert names.count("frame_dropped") == dropped
 
 
 def test_a_failing_write_is_skipped_and_recording_continues(caplog):

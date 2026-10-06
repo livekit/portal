@@ -95,6 +95,7 @@ def _record(tmp_path, jpeg_quality=95):
     sink.open(_session())
     sink.write_state(State(values={}, raw_values={"shoulder": 0.5, "elbow": -1.0}, timestamp_us=1 * US))
     sink.write_frame("cam", _frame(1 * US))
+    sink.write_frame_dropped("cam", 1 * US + 33_000)
     # Two actions answering the same frame, one shadow action, one unsolicited.
     sink.write_action(_action(1 * US + 10, reply=1 * US, a=1.0))
     sink.write_action(_action(1 * US + 20, reply=1 * US, a=2.0))
@@ -151,6 +152,12 @@ def test_keypoints_keep_payload_and_sender(tmp_path):
     assert _us(kp, "robot_time") == 1 * US
     assert json.loads(kp["payload"][0]) == {"task_description": "stack"}
     assert kp["sender"] == ["teleop"]
+
+
+def test_dropped_frames_are_marked_on_robot_time(tmp_path):
+    _, rows = _record(tmp_path)
+    (row,) = rows["/recorder/frames_dropped/cam"]
+    assert _us(row, "robot_time") == 1 * US + 33_000
 
 
 def test_metrics_use_the_observer_clock(tmp_path):

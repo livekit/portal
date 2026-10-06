@@ -121,6 +121,17 @@ await op.set_active_operator(op.local_identity())
 If you are on the lerobot plugins with `auto_claim_control=False`, something else
 has to claim on your behalf.
 
+If the pointer is right, the robot may not count the sender as an operator. It
+only takes actions from a participant whose `lk.portal.role` is `"operator"` and
+whose `lk.portal.version` matches its own. Check the robot's roster:
+
+```python
+print(robot.operators())        # the sender must be listed
+```
+
+If it is missing, look for a [`version-mismatch`](#version-mismatch) line and
+upgrade every peer to the same release.
+
 ### `ImportError` or `ffi not initialized`
 
 The native library did not load. Rebuild it:
@@ -146,6 +157,25 @@ If it is populated and large, decompose it. Subtract RTT to get everything that
 is not network. Compare the remainder against your inference time. Frame video
 adds a per-chunk floor on top, covered in
 [Frame video](05-frame-video.md#the-latency-floor).
+
+### Time sync never completes
+
+`metrics().time_sync.synced` stays `False` and `on_time_synced` never fires.
+Every peer except the robot syncs to the robot, so nothing can sync until the
+robot is in the room. Once it is, the first sync takes about a second.
+
+The other `time_sync` fields tell you how good the estimate is:
+
+- **`uncertainty_us`** is half the round trip of the best sample in the last
+  10 s. A large value means a slow or congested link, not a bug.
+- **`samples_rejected`** counts samples more than 1 s away from the estimate.
+  A few are normal. A steady climb followed by a `resyncs` increment means the
+  robot's clock moved while it stayed in the room.
+- **With `time_sync_source: system`**, `synced` is `True` from the start. Watch
+  `measured_offset_us` instead. A value far from zero means the hosts' PTP or
+  NTP has drifted.
+
+See [Time sync](03-portal-api.md#time-sync).
 
 ### Frames arrive at a resolution that changes mid-session
 
@@ -380,6 +410,19 @@ continues.
 
 **Fix.** Usually a transport hiccup or version skew between peers. If it persists,
 confirm both ends run the same Portal version and the same schema.
+
+### version-mismatch
+
+```
+[version-mismatch] ignoring 'teleop': it speaks Portal protocol "2", this peer speaks "3"; upgrade both sides to the same release
+```
+
+A peer's `lk.portal.version` is missing or different. It is left out of the
+rosters, so its actions, keypoints and `set_active_operator` calls are ignored.
+Logged once per identity.
+
+**Fix.** Run the same Portal release on every peer. See
+[Migrating to v0.3](09-migrating-to-v0.3.md).
 
 ### callback-panic
 

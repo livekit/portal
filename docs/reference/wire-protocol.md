@@ -104,7 +104,9 @@ Field bytes follow in declared schema order. Each field's width is fixed by its
 dtype. There is no per-field tag and no per-field length. **The schema, shared out
 of band, is the only thing that makes the payload parseable.**
 
-`timestamp_us` is microseconds since the Unix epoch on the sender's clock.
+`timestamp_us` is microseconds since the Unix epoch on the robot's clock. It is
+the sender's `now_us()` unless the caller passed one. See
+[Timestamps and clocks](#timestamps-and-clocks).
 
 `in_reply_to_ts_us` lets an operator stamp which observation an action answers.
 `0` is the no-correlation sentinel, which is safe because a real epoch timestamp
@@ -216,7 +218,7 @@ Two requirements bind a Portal-compatible publisher.
 ends must negotiate the same codec, so AV1 and H.265 depend on peer support.
 
 **Per-frame timestamp.** Every published frame must carry `user_timestamp` in its
-LiveKit packet-trailer metadata, in microseconds on the sender's clock. The
+LiveKit packet-trailer metadata, in microseconds on the robot's clock. The
 publisher must enable `PacketTrailerFeatures.user_timestamp` on the track.
 
 That second one is **mandatory, not optional.** The operator's synchronization

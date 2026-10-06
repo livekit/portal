@@ -46,9 +46,10 @@ packets ride a data channel with none of that. On the receiver they surface as
 separate event streams arriving out of phase. Video typically runs 30 to 80 ms
 behind a state packet stamped at the same instant.
 
-Portal closes that gap. Every outgoing frame and state packet carries the
-**sender's clock**. On the operator side, a per-session buffer matches them by
-that timestamp and hands you one object:
+Portal closes that gap. Every outgoing frame and state packet is stamped on the
+**robot's clock**, which every peer shares through
+[time sync](03-portal-api.md#time-sync). On the operator side, a per-session
+buffer matches them by that timestamp and hands you one object:
 
 ```python
 Observation(

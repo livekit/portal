@@ -12,8 +12,6 @@ Usage:
 """
 from __future__ import annotations
 
-import time
-
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -158,13 +156,13 @@ def main() -> None:
 
             obs = robot.get_observation()
 
-            # Anchor rerun's timeline to the sender's wall clock so scrubbing
+            # Anchor rerun's timeline to the robot's clock so scrubbing
             # reflects what happened on the physical robot, not receive time.
             if ts_us := robot.last_observation_timestamp_us:
                 rr.set_time("robot_time", timestamp=ts_us / 1e6)
                 # End-to-end staleness: how old is the obs we're acting on?
                 # Includes sender→receiver transport + Portal sync buffering.
-                age_ms = (time.time() * 1e6 - ts_us) / 1e3
+                age_ms = (robot.now_us() - ts_us) / 1e3
                 rr.log("metrics/obs_age_ms", rr.Scalars(age_ms))
 
             log_rerun("observation", obs or {})

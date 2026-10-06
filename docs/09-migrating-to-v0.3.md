@@ -116,4 +116,4 @@ None of these break anything, but they are why v0.3 exists:
   that don't consume bundles live, like a teleoperator or a recorder.
 - [**Recording**](03-portal-api.md#recording) from an observer to a sink, with
   `RrdSink` writing Rerun archives. See
-  [`examples/python/recording`](../examples/python/recording).
+  [`examples/python/basic`](../examples/python/basic).

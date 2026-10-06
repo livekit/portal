@@ -74,7 +74,8 @@ async def main() -> None:
         for i in range(n_frames):
             phase = i / fps
             frame = _make_frame(width, height, phase)
-            ts_us = int(time.time() * 1_000_000)
+            # One stamp for the frame and the state, so they match exactly.
+            ts_us = robot_portal.now_us()
             robot_portal.send_video_frame(TRACK_NAME, frame, timestamp_us=ts_us)
             robot_portal.send_state(
                 {

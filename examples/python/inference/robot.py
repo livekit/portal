@@ -116,7 +116,7 @@ async def main() -> None:
     try:
         for i in range(n_ticks):
             phase = i / fps
-            ts_us = int(time.time() * 1_000_000)
+            ts_us = robot_portal.now_us()
 
             # Publish a frame and current joint state. The state's
             # timestamp_us becomes the operator's `obs.timestamp_us`,

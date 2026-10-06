@@ -15,6 +15,9 @@ build/
 .venv/
 .pytest_cache/
 
+# Recordings written by the examples' recorder.
+*.rrd
+
 # Env files — keep `.env.example` as a committed template.
 .env
 .env.*

@@ -74,7 +74,6 @@ async def main() -> None:
         next_tick = start
         for i in range(n_ticks):
             phase = i / fps
-            ts_us = int(time.time() * 1_000_000)
             op.send_action(
                 {
                     "j1": 0.5 * math.sin(phase * 2),
@@ -83,7 +82,6 @@ async def main() -> None:
                     "gripper": int(phase) % 2 == 0,
                     "mode": i % 4,
                 },
-                timestamp_us=ts_us,
             )
             next_tick += interval
             sleep_for = next_tick - time.monotonic()

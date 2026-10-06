@@ -160,10 +160,9 @@ under [`examples/python/`](examples/python).
 
 | Example | Hardware | What it shows |
 |---|---|---|
-| [`basic/`](examples/python/basic) | none | The whole API end to end, with synthetic video. Also ships a YAML-config variant. Start here. |
+| [`basic/`](examples/python/basic) | none | The whole API end to end, with synthetic video. Also ships a YAML-config variant, and observers that record the session to a Rerun archive and hand control between operators. Start here. |
 | [`inference/`](examples/python/inference) | none | A VLA-shaped loop that plans a horizon and streams one action per tick, with true end-to-end latency metrics. |
 | [`modal-mock-inference/`](examples/python/modal-mock-inference) | none | Runs the policy on [Modal](https://modal.com) and measures real glass-to-glass latency with a QR clock. |
-| [`recording/`](examples/python/recording) | none | Observers recording the basic example to a Rerun archive and handing control between operators, with keypoints marking each take. |
 | [`so101/`](examples/python/so101) | 2x SO-101 | A physical SO-101 follower driven by a remote SO-101 leader, rendered in [rerun](https://rerun.io). |
 
 ```bash

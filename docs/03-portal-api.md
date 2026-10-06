@@ -391,6 +391,8 @@ m.synced, m.offset_us, m.uncertainty_us
 ```
 
 Before the first sync, `now_us()` is local time and `synced` is `False`.
+Anything you send in that window is stamped on your own clock, so a recorder or
+an orchestrator should wait for `on_time_synced` before it starts.
 `now_us()` never repeats and never goes backwards. It is the default
 timestamp for everything you send. Details are in
 [Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).

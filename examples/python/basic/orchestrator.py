@@ -41,8 +41,9 @@ async def main() -> None:
             if take * take_s > duration:
                 break
             operators = obs.operators()
-            if obs.robot_identity() is None or not operators:
-                print("[orchestrator] waiting for the robot and an operator")
+            # Keypoints sent before the first sync would be on this host's clock.
+            if not obs.metrics().time_sync.synced or not operators:
+                print("[orchestrator] waiting for the robot's clock and an operator")
                 await asyncio.sleep(1)
                 continue
             driver = operators[(take - 1) % len(operators)]

@@ -262,8 +262,10 @@ the first estimate. A sample implying a jump of more than 1 s is ignored unless
 estimate starts over.
 
 The estimate never moves timestamps backwards. A forward correction applies at
-once. A backward correction is absorbed gradually: the clock runs at 95% of real
-speed until it has caught up.
+once, and so does any correction made before the peer has handed out a
+timestamp. Otherwise a backward correction is absorbed gradually: the clock runs
+at half speed while it is more than 100 ms behind, then at 95% until it has
+caught up. A 10 s step back takes about 22 s to absorb.
 
 A packet with an unknown kind or the wrong length is ignored. A peer that does
 not implement time sync can ignore the topic; it just keeps timestamping on its

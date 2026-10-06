@@ -57,6 +57,10 @@ const JUMP_AGREEMENT_US: u64 = 100_000;
 /// A backward correction removes at most `elapsed / SLEW_DIVISOR` per step,
 /// so the clock keeps running at no less than 95% of real speed.
 const SLEW_DIVISOR: u64 = 20;
+/// Further behind than this (a resync, or a restarted robot), the clock runs
+/// at half speed instead, so a 10 s step back takes ~20 s to absorb, not ~200 s.
+const FAST_SLEW_ABOVE_US: u64 = 100_000;
+const FAST_SLEW_DIVISOR: u64 = 2;
 const CLOCK_QUEUE_CAP: usize = 64;
 
 // --- Wire ---
@@ -271,9 +275,12 @@ pub(crate) struct MonotonicClock {
 }
 
 impl MonotonicClock {
+    /// Applies a forward correction at once. A backward one is slewed, unless
+    /// no timestamp has been handed out yet and there is nothing to stay
+    /// monotonic with.
     pub fn set_target(&mut self, offset_us: i64) {
         self.target_offset_us = offset_us;
-        if offset_us > self.applied_offset_us {
+        if offset_us > self.applied_offset_us || self.last_raw_us.is_none() {
             self.applied_offset_us = offset_us;
         }
     }
@@ -284,7 +291,11 @@ impl MonotonicClock {
 
         let behind = self.applied_offset_us - self.target_offset_us;
         if behind > 0 {
-            let step = (elapsed / SLEW_DIVISOR).min(behind as u64) as i64;
+            let divisor = match behind as u64 > FAST_SLEW_ABOVE_US {
+                true => FAST_SLEW_DIVISOR,
+                false => SLEW_DIVISOR,
+            };
+            let step = (elapsed / divisor).min(behind as u64) as i64;
             self.applied_offset_us -= step;
         }
 
@@ -759,10 +770,18 @@ mod tests {
     }
 
     #[test]
-    fn backward_correction_is_absorbed_gradually() {
+    fn first_backward_correction_applies_immediately() {
         let mut clock = MonotonicClock::default();
-        clock.set_target(S as i64);
-        let mut raw = 10 * S;
+        clock.set_target(-5 * S as i64);
+        assert_eq!(clock.now(10 * S), 5 * S);
+    }
+
+    /// Slews from `behind` to zero in 10 ms steps, checking the clock never
+    /// runs slower than `min_speed_pct`. Returns the time it took.
+    fn absorb(behind: u64, min_speed_pct: u64) -> u64 {
+        let mut clock = MonotonicClock::default();
+        clock.set_target(behind as i64);
+        let mut raw = 100 * S;
         let mut last = clock.now(raw);
         clock.set_target(0);
 
@@ -772,13 +791,26 @@ mod tests {
             raw += step;
             elapsed += step;
             let out = clock.now(raw);
-            assert!(out - last >= step * 19 / 20, "clock ran slower than 95%");
+            assert!(out - last >= step * min_speed_pct / 100, "clock ran too slow");
             last = out;
-            assert!(elapsed <= 21 * S, "took too long to absorb");
+            assert!(elapsed <= 60 * S, "never caught up");
         }
-        assert!(elapsed >= 19 * S, "absorbed faster than the slew rate allows");
         raw += step;
         assert_eq!(clock.now(raw), raw);
+        elapsed
+    }
+
+    #[test]
+    fn small_backward_correction_is_absorbed_gradually() {
+        let elapsed = absorb(50 * MS, 95);
+        assert!((950 * MS..=1_050 * MS).contains(&elapsed), "{elapsed}");
+    }
+
+    #[test]
+    fn large_backward_correction_is_absorbed_at_half_speed() {
+        // ~19.8 s at half speed down to 100 ms, then ~2 s at 95%.
+        let elapsed = absorb(10 * S, 50);
+        assert!((21 * S..=23 * S).contains(&elapsed), "{elapsed}");
     }
 
     #[test]

@@ -67,6 +67,10 @@ class Sink(Protocol):
     def open(self, session: SessionInfo) -> None: ...
     def write_state(self, state: "State") -> None: ...
     def write_frame(self, track: str, frame: "VideoFrameData") -> None: ...
+    def write_frame_dropped(self, track: str, timestamp_us: int) -> None:
+        """A frame the recorder dropped because the sink fell behind, so a
+        reader can tell a gap in the recording from a stalled camera."""
+        ...
     def write_action(self, action: "Action") -> None: ...
     def write_keypoint(self, keypoint: "Keypoint") -> None: ...
     def write_metrics(self, metrics: "PortalMetrics") -> None: ...
@@ -147,6 +151,9 @@ class Recorder:
             if kind == "frame":
                 if self._counters.queued_frames >= self._max_queued_frames:
                     self._counters.frames_dropped += 1
+                    track, frame = item
+                    self._queue.append(("frame_dropped", (track, frame.timestamp_us)))
+                    self._cond.notify()
                     return
                 self._counters.queued_frames += 1
             self._queue.append((kind, item))
@@ -201,6 +208,8 @@ class Recorder:
                 track, frame = item
                 self._sink.write_frame(track, frame)
                 self._counters.frames_written += 1
+            elif kind == "frame_dropped":
+                self._sink.write_frame_dropped(*item)
             elif kind == "action":
                 self._sink.write_action(self._convert.action(item))
             elif kind == "keypoint":

@@ -61,13 +61,26 @@ async def test_operator_syncs_to_skewed_robot(pair):
 
 
 async def test_operator_syncs_to_robot_behind_it(pair):
-    # The first correction is backward here, the case a robot ahead never hits.
+    """The first correction is backward here, the case a robot ahead never
+    hits. The robot streams state throughout, so the operator is receiving
+    (and timing) packets before it has synced."""
     pair.robot_cfg._set_clock_skew_us(-SKEW_US)
     await pair.start()
-    assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
-    m = pair.operator.metrics().time_sync
-    assert abs(m.offset_us + SKEW_US) < 50_000
-    assert _offset_error_us(pair.robot, pair.operator) <= m.uncertainty_us + 5_000
+
+    async def stream():
+        while True:
+            pair.robot.send_state({"j": 0.0})
+            await asyncio.sleep(1 / 30)
+
+    streaming = asyncio.create_task(stream())
+    try:
+        assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
+        m = pair.operator.metrics().time_sync
+        assert pair.operator.metrics().transport.states_received > 0
+        assert abs(m.offset_us + SKEW_US) < 50_000
+        assert _offset_error_us(pair.robot, pair.operator) <= m.uncertainty_us + 5_000
+    finally:
+        streaming.cancel()
 
 
 async def test_observer_syncs_to_skewed_robot(pair):

@@ -100,7 +100,6 @@ async def main() -> None:
         next_tick = start
         for i in range(n_ticks):
             phase = i / fps
-            ts_us = int(time.time() * 1_000_000)
             # Send Python floats; the publisher casts bool/int fields at
             # the wire boundary. `mode=5` fits in I8; out-of-range values
             # would saturate and log once per field.
@@ -112,7 +111,6 @@ async def main() -> None:
                     "gripper": int(phase) % 2 == 0,
                     "mode": i % 4,
                 },
-                timestamp_us=ts_us,
             )
             next_tick += interval
             sleep_for = next_tick - time.monotonic()

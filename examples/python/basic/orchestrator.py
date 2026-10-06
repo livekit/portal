@@ -3,7 +3,8 @@
 An observer never drives, but it may move the active operator. Every
 `PORTAL_TAKE_SECONDS` this one hands control to the next operator in the room
 and brackets the take with `recording` / `idle` keypoints, which the recorder
-writes into the archive on the robot's clock.
+writes into the archive on the robot's clock. Run it next to `robot.py`,
+`teleoperator.py` and `recorder.py`.
 
 Usage:
     cp .env.example .env  # fill in API_KEY / API_SECRET

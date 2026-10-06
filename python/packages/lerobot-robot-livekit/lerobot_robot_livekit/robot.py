@@ -296,9 +296,16 @@ class LiveKitRobot(Robot):
 
     @property
     def last_observation_timestamp_us(self) -> int | None:
-        """Sender's system time in µs (epoch) for the most recent observation
-        returned by :meth:`get_observation`, or ``None`` if none yet."""
+        """Robot-clock time in µs for the most recent observation returned by
+        :meth:`get_observation`, or ``None`` if none yet."""
         return self._last_observation_timestamp_us
+
+    def now_us(self) -> int | None:
+        """Current time on the robot's clock in µs, comparable with
+        :attr:`last_observation_timestamp_us`. ``None`` when disconnected."""
+        if self._portal is None:
+            return None
+        return self._portal.now_us()
 
     def metrics(self):
         """Snapshot of the underlying Portal's metrics (RTT, sync delta, jitter,

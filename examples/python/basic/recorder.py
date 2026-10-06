@@ -1,8 +1,8 @@
 """Record everything in the room to a Rerun `.rrd` archive.
 
 An observer sees the robot's state and video and the actions the robot
-executes, plus every keypoint. It never drives. Run it next to
-`../basic/robot.py` and `../basic/teleoperator.py`.
+executes, plus every keypoint. It never drives. Run it next to `robot.py`
+and `teleoperator.py`.
 
 Usage:
     cp .env.example .env  # fill in API_KEY / API_SECRET

@@ -1310,7 +1310,8 @@ impl Portal {
     ///
     /// Portal doesn't interpret `kind` or `payload`. Returns the observers
     /// that were present, so an empty list tells the sender no one recorded
-    /// the mark.
+    /// the mark. The encoded keypoint must fit in one data packet (about
+    /// 64 KB on a default server); a larger one fails with the transport's error.
     pub async fn send_keypoint(
         &self,
         kind: &str,

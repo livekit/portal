@@ -32,7 +32,12 @@ async def main() -> None:
     obs = Observer(ObserverConfig.from_yaml_file(CONFIG_PATH, room))
     obs.on_keypoint(lambda kp: print(f"[recorder] keypoint {kp.type} {kp.payload} from {kp.sender}"))
 
+    synced = asyncio.Event()
+    obs.on_time_synced(synced.set)
     await obs.connect(url, mint_token(IDENTITY, room))
+    # Start once on the robot's clock, so the archive is too from its first row.
+    print("[recorder] waiting for the robot's clock")
+    await synced.wait()
     sink = RrdSink(out_dir)
     obs.record_to(sink)
     print(f"[recorder] recording to {sink.path} for {duration:.0f}s")

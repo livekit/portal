@@ -24,7 +24,7 @@ import struct
 
 import pytest
 
-from livekit.portal import Operator, OperatorConfig, Robot, RobotConfig
+from livekit.portal import Observer, ObserverConfig, Operator, OperatorConfig, Robot, RobotConfig
 
 from .conftest import URL, RawPeer, _make_token, wait_for
 
@@ -58,6 +58,45 @@ async def test_operator_syncs_to_skewed_robot(pair):
 
     robot_m = pair.robot.metrics().time_sync
     assert robot_m.synced and robot_m.offset_us == 0 and robot_m.uncertainty_us == 0
+
+
+async def test_operator_syncs_to_robot_behind_it(pair):
+    """The first correction is backward here, the case a robot ahead never
+    hits. The robot streams state throughout, so the operator is receiving
+    (and timing) packets before it has synced."""
+    pair.robot_cfg._set_clock_skew_us(-SKEW_US)
+    await pair.start()
+
+    async def stream():
+        while True:
+            pair.robot.send_state({"j": 0.0})
+            await asyncio.sleep(1 / 30)
+
+    streaming = asyncio.create_task(stream())
+    try:
+        assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
+        m = pair.operator.metrics().time_sync
+        assert pair.operator.metrics().transport.states_received > 0
+        assert abs(m.offset_us + SKEW_US) < 50_000
+        assert _offset_error_us(pair.robot, pair.operator) <= m.uncertainty_us + 5_000
+    finally:
+        streaming.cancel()
+
+
+async def test_observer_syncs_to_skewed_robot(pair):
+    pair.robot_cfg._set_clock_skew_us(SKEW_US)
+    await pair.start()
+    obs = Observer(ObserverConfig(pair.room))
+    synced = asyncio.Event()
+    obs.on_time_synced(synced.set)
+    try:
+        await obs.connect(URL, _make_token("observer", pair.room))
+        await asyncio.wait_for(synced.wait(), timeout=3)
+        m = obs.metrics().time_sync
+        before, now, after = pair.robot.now_us(), obs.now_us(), pair.robot.now_us()
+        assert abs(now - (before + after) // 2) <= m.uncertainty_us + 5_000
+    finally:
+        await obs.disconnect()
 
 
 async def test_rtt_comes_from_time_sync(pair):

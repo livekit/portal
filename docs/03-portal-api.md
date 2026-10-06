@@ -391,6 +391,8 @@ m.synced, m.offset_us, m.uncertainty_us
 ```
 
 Before the first sync, `now_us()` is local time and `synced` is `False`.
+Anything you send in that window is stamped on your own clock, so a recorder or
+an orchestrator should wait for `on_time_synced` before it starts.
 `now_us()` never repeats and never goes backwards. It is the default
 timestamp for everything you send. Details are in
 [Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
@@ -455,7 +457,13 @@ obs.on_keypoint(lambda kp: ...)   # kp.type, kp.payload, kp.timestamp_us, kp.sen
 - **`send_keypoint` returns the observers that were present.** An empty list
   tells the sender that no one recorded the mark.
 - `type` must be a `str` and `payload` a `dict`; anything else raises
-  `TypeError` before sending. A keypoint must fit in one data packet.
+  `TypeError` before sending.
+- **A keypoint must fit in one data packet**: about 64 KB of JSON on a default
+  LiveKit server. Portal doesn't check the size itself, because the limit is
+  negotiated per connection. A larger keypoint raises `PortalError.Room` with
+  the server's message, for example `exceeds the negotiated maximum message
+  size (64000 bytes)`. Keep bulky data, such as images or long transcripts, out
+  of the payload and reference it instead.
 
 ## Multi-operator patterns
 
@@ -784,6 +792,7 @@ class JsonlSink:
     def open(self, session: SessionInfo) -> None: ...   # session, schemas, tracks, time sync source
     def write_state(self, state) -> None: ...
     def write_frame(self, track, frame) -> None: ...
+    def write_frame_dropped(self, track, timestamp_us) -> None: ...   # the recorder fell behind
     def write_action(self, action) -> None: ...
     def write_keypoint(self, keypoint) -> None: ...
     def write_metrics(self, metrics) -> None: ...
@@ -799,8 +808,9 @@ obs.stop_recording()   # or disconnect(): writes what is queued, then close()
   heard them, with `open` first and `close` last.
 - **Only video frames are dropped when the sink falls behind.** Once
   `max_queued_frames` frames are waiting, new ones are dropped and counted in
-  `metrics().observer.frames_dropped`. State, actions and keypoints are never
-  dropped.
+  `metrics().observer.frames_dropped`, and the sink gets `write_frame_dropped`
+  with each one's timestamp, so a reader can tell a gap in the recording from a
+  stalled camera. State, actions and keypoints are never dropped.
 - `record_to` calls `open` right away and raises what it raises. A write that
   raises is logged once per kind and skipped, so one bad record doesn't end the
   recording.
@@ -831,6 +841,7 @@ Two timelines, both on the robot's clock:
 | `observation/<track>` | frame timestamp (JPEG) | — |
 | `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
 | `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | — |
+| `recorder/frames_dropped/<track>` | timestamp of a frame the recorder dropped | — |
 | `metrics/*` | observer's `now_us()` | — |
 | `portal/schema` | static: field order and dtypes, tracks, time sync source | — |
 

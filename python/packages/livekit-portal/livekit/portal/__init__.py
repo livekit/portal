@@ -1306,6 +1306,10 @@ class Portal:
 
         Returns the observers that were present. An empty list means no one
         recorded the mark.
+
+        The encoded keypoint must fit in one data packet, about 64 KB on a
+        default LiveKit server. A larger one raises `PortalError.Room` with the
+        server's limit; put bulky data elsewhere and reference it.
         """
         if not isinstance(type, str):
             raise TypeError(f"keypoint type must be a str, got {type.__class__.__name__}")

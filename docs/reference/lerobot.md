@@ -262,6 +262,7 @@ Operator-only, on `LiveKitRobotConfig`:
 | `camera_height` | `480` | Shape advertised in `observation_features`. Metadata only, Portal accepts any resolution at runtime. |
 | `camera_width` | `640` | As above. |
 | `observation_features` | `None` | Full state schema when the robot reports more than the action keys. Replaces the mirror assumption. |
+| `time_sync_source` | `PORTAL` | `PORTAL` syncs to the robot's clock. `SYSTEM` trusts this host's clock, for hosts already synced by PTP or GPS. See [Time sync](../03-portal-api.md#time-sync). |
 
 The room identity comes from the LiveKit token you mint, via `with_identity(...)`,
 not from any config field.
@@ -328,7 +329,7 @@ reconstruct the plugin. On the operator side, prefer declaring
 | Observations always empty, state only | State schema mismatch. The two sides declared different motor keys. A `WARNING` fires on the first dropped sync naming the missing and unexpected fields. Declare `observation_features` explicitly. |
 | High `states_dropped` | The encoder is throttling, or a camera stopped publishing. Compare `frames_received` on the operator against `frames_sent` on the robot. |
 | `WrongRole` | You called `send_action` on the robot side, or `send_state` and `send_video_frame` on the operator side. |
-| Robot receives no actions, no errors | `active_operator` is unset or pointing elsewhere. The plugin auto-claims by default. With `auto_claim_control=False`, claim via `plugin._portal.set_active_operator(...)` or have a peer do it. |
+| Robot receives no actions, no errors | `active_operator` is unset or pointing elsewhere. The plugin auto-claims by default. With `auto_claim_control=False`, claim via `plugin._portal.set_active_operator(...)` or have a peer do it. If the pointer is right, look for a `[version-mismatch]` log line: both sides must run the same Portal release. |
 | `InvalidFrameDimensions` | Frame width or height is odd. Both must be even. |
 | `ValueError: ... cannot infer schema` | The constructor got neither a local instance nor `motors` and `camera_names`. Pass one or the other. |
 

@@ -37,6 +37,7 @@ from livekit.portal import (
     DType,
     Operator as PortalOperator,
     OperatorConfig as PortalOperatorConfig,
+    TimeSyncSource,
     VideoCodec,
     frame_bytes_to_numpy_rgb,
 )
@@ -97,6 +98,9 @@ class LiveKitRobotConfig(RobotConfig):
     state_reliable: bool = True
     action_reliable: bool = True
     reuse_stale_frames: bool = False
+    # `PORTAL` syncs to the robot's clock. `SYSTEM` trusts this host's clock,
+    # for labs already synced by PTP or GPS.
+    time_sync_source: TimeSyncSource = TimeSyncSource.PORTAL
 
     # Full observation schema when the remote robot reports state beyond the
     # action schema (e.g. {"shoulder.pos": float, "slider.pos": float}).
@@ -225,6 +229,7 @@ class LiveKitRobot(Robot):
         self._portal_cfg.set_state_reliable(self.config.state_reliable)
         self._portal_cfg.set_action_reliable(self.config.action_reliable)
         self._portal_cfg.set_reuse_stale_frames(self.config.reuse_stale_frames)
+        self._portal_cfg.set_time_sync_source(self.config.time_sync_source)
 
         self._portal = PortalOperator(self._portal_cfg)
         self._run(self._portal.connect(self.config.url, self.config.token))

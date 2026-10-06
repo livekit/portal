@@ -457,7 +457,13 @@ obs.on_keypoint(lambda kp: ...)   # kp.type, kp.payload, kp.timestamp_us, kp.sen
 - **`send_keypoint` returns the observers that were present.** An empty list
   tells the sender that no one recorded the mark.
 - `type` must be a `str` and `payload` a `dict`; anything else raises
-  `TypeError` before sending. A keypoint must fit in one data packet.
+  `TypeError` before sending.
+- **A keypoint must fit in one data packet**: about 64 KB of JSON on a default
+  LiveKit server. Portal doesn't check the size itself, because the limit is
+  negotiated per connection. A larger keypoint raises `PortalError.Room` with
+  the server's message, for example `exceeds the negotiated maximum message
+  size (64000 bytes)`. Keep bulky data, such as images or long transcripts, out
+  of the payload and reference it instead.
 
 ## Multi-operator patterns
 

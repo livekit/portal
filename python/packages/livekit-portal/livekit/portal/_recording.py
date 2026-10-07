@@ -62,15 +62,15 @@ class Sink(Protocol):
     Portal calls a sink from its own writer thread, behind a bounded queue,
     so a slow disk never stalls the receive path. Calls arrive in the order
     the observer heard them. `open` comes first and `close` last.
+
+    Optionally, a sink can define `write_frame_dropped(track, timestamp_us)`
+    to hear about each frame the recorder dropped because the sink fell
+    behind, so a reader can tell a gap in the recording from a stalled camera.
     """
 
     def open(self, session: SessionInfo) -> None: ...
     def write_state(self, state: "State") -> None: ...
     def write_frame(self, track: str, frame: "VideoFrameData") -> None: ...
-    def write_frame_dropped(self, track: str, timestamp_us: int) -> None:
-        """A frame the recorder dropped because the sink fell behind, so a
-        reader can tell a gap in the recording from a stalled camera."""
-        ...
     def write_action(self, action: "Action") -> None: ...
     def write_keypoint(self, keypoint: "Keypoint") -> None: ...
     def write_metrics(self, metrics: "PortalMetrics") -> None: ...
@@ -129,6 +129,7 @@ class Recorder:
         if max_queued_frames < 1:
             raise ValueError("max_queued_frames must be at least 1")
         self._sink = sink
+        self._write_frame_dropped = getattr(sink, "write_frame_dropped", None)
         self._convert = convert
         self._max_queued_frames = max_queued_frames
         self._metrics_interval_s = metrics_interval_s
@@ -151,9 +152,10 @@ class Recorder:
             if kind == "frame":
                 if self._counters.queued_frames >= self._max_queued_frames:
                     self._counters.frames_dropped += 1
-                    track, frame = item
-                    self._queue.append(("frame_dropped", (track, frame.timestamp_us)))
-                    self._cond.notify()
+                    if self._write_frame_dropped is not None:
+                        track, frame = item
+                        self._queue.append(("frame_dropped", (track, frame.timestamp_us)))
+                        self._cond.notify()
                     return
                 self._counters.queued_frames += 1
             self._queue.append((kind, item))
@@ -209,7 +211,7 @@ class Recorder:
                 self._sink.write_frame(track, frame)
                 self._counters.frames_written += 1
             elif kind == "frame_dropped":
-                self._sink.write_frame_dropped(*item)
+                self._write_frame_dropped(*item)
             elif kind == "action":
                 self._sink.write_action(self._convert.action(item))
             elif kind == "keypoint":

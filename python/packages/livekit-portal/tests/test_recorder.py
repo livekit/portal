@@ -15,6 +15,7 @@
 """The recorder's queue, ordering and failure handling, driven directly."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -26,9 +27,13 @@ from livekit.portal._recording import Recorder, SessionInfo, _Converters
 
 
 class MemorySink:
-    def __init__(self, *, frame_delay_s: float = 0.0, fail_on: str = "") -> None:
+    def __init__(
+        self, *, frame_delay_s: float = 0.0, fail_on: str = "", gate: threading.Event | None = None
+    ) -> None:
         self.calls: list[tuple] = []
         self.frame_delay_s = frame_delay_s
+        # When set, `write_frame` blocks until the event is, like a stuck disk.
+        self.gate = gate
         self.fail_on = fail_on
         self.lock = threading.Lock()
 
@@ -46,6 +51,8 @@ class MemorySink:
 
     def write_frame(self, track, frame):
         time.sleep(self.frame_delay_s)
+        if self.gate is not None:
+            assert self.gate.wait(timeout=5), "test never released the sink"
         self._record("frame", track, frame)
 
     def write_frame_dropped(self, track, timestamp_us):
@@ -110,22 +117,24 @@ def test_stop_writes_everything_already_queued():
     assert sink.names()[-1] == "close"
 
 
-def test_slow_sink_drops_only_frames_and_never_blocks_the_receive_path():
-    sink = MemorySink(frame_delay_s=0.02)
+def test_stuck_sink_drops_only_frames_and_never_blocks_the_receive_path():
+    gate = threading.Event()
+    sink = MemorySink(gate=gate)
     rec = _recorder(sink, max_queued_frames=4)
-    worst = 0.0
+    start = time.perf_counter()
     for i in range(200):
-        start = time.perf_counter()
         rec.enqueue("frame", ("cam", SimpleNamespace(timestamp_us=i)))
         rec.enqueue("state", i)
         if i % 20 == 0:
             rec.enqueue("keypoint", i)
-        worst = max(worst, time.perf_counter() - start)
+    # Every enqueue returned while the sink was stuck in `write_frame`.
+    elapsed = time.perf_counter() - start
     dropped = rec.metrics().frames_dropped
+    gate.set()
     rec.stop()
 
-    assert worst < 0.001, f"enqueue took {worst * 1000:.2f} ms"
-    assert dropped > 0
+    assert elapsed < 0.5, f"200 enqueues took {elapsed * 1000:.0f} ms"
+    assert dropped >= 200 - 4 - 1, "at most the queue and the frame in flight survive"
     names = sink.names()
     assert names.count("state") == 200
     assert names.count("keypoint") == 10
@@ -134,6 +143,24 @@ def test_slow_sink_drops_only_frames_and_never_blocks_the_receive_path():
     seen = [c[2].timestamp_us if c[0] == "frame" else c[2] for c in sink.calls if c[0] in ("frame", "frame_dropped")]
     assert seen == list(range(200))
     assert names.count("frame_dropped") == dropped
+
+
+def test_a_sink_without_write_frame_dropped_still_drops_quietly(caplog):
+    class PlainSink(MemorySink):
+        write_frame_dropped = None
+
+    gate = threading.Event()
+    sink = PlainSink(gate=gate)
+    rec = _recorder(sink, max_queued_frames=2)
+    for i in range(50):
+        rec.enqueue("frame", ("cam", SimpleNamespace(timestamp_us=i)))
+    dropped = rec.metrics().frames_dropped
+    gate.set()
+    rec.stop()
+
+    assert dropped > 0
+    assert sink.names().count("frame") == 50 - dropped
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_a_failing_write_is_skipped_and_recording_continues(caplog):

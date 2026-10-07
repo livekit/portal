@@ -75,6 +75,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::clock::anchored_now_us;
 use crate::codec::{Codec, decode_frame, encode_frame_into, estimated_encoded_size};
 use crate::config::VideoTrackSpec;
 use crate::error::{PortalError, PortalResult};
@@ -395,7 +396,7 @@ pub(crate) fn dispatch_frame_payload(
         }
     };
 
-    entry.metrics.record_received_bytes(timestamp_us, now_us(), wire_len);
+    entry.metrics.record_received_bytes(timestamp_us, anchored_now_us(), wire_len);
 
     let frame = Arc::new(VideoFrameData {
         width: decoded.width,

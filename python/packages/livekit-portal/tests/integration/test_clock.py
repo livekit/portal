@@ -24,7 +24,7 @@ import struct
 
 import pytest
 
-from livekit.portal import Observer, ObserverConfig, Operator, OperatorConfig, Robot, RobotConfig
+from livekit.portal import DType, Observer, ObserverConfig, Operator, OperatorConfig, Robot, RobotConfig
 
 from .conftest import URL, RawPeer, _make_token, wait_for
 
@@ -62,23 +62,32 @@ async def test_operator_syncs_to_skewed_robot(pair):
 
 async def test_operator_syncs_to_robot_behind_it(pair):
     """The first correction is backward here, the case a robot ahead never
-    hits. The robot streams state throughout, so the operator is receiving
-    (and timing) packets before it has synced."""
+    hits. The robot streams state and the operator sends actions throughout,
+    so it hands out timestamps and times packets before it has synced, as a
+    teleop loop does."""
     pair.robot_cfg._set_clock_skew_us(-SKEW_US)
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        cfg.add_action_typed([("a", DType.F32)])
     await pair.start()
+    assert not pair.operator.metrics().time_sync.synced
 
     async def stream():
         while True:
             pair.robot.send_state({"j": 0.0})
+            pair.operator.send_action({"a": 0.0})
             await asyncio.sleep(1 / 30)
 
     streaming = asyncio.create_task(stream())
     try:
+        assert await wait_for(lambda: pair.operator.metrics().transport.actions_sent > 0)
         assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
         m = pair.operator.metrics().time_sync
         assert pair.operator.metrics().transport.states_received > 0
         assert abs(m.offset_us + SKEW_US) < 50_000
         assert _offset_error_us(pair.robot, pair.operator) <= m.uncertainty_us + 5_000
+        # The 5 s step is a clock correction, not network jitter.
+        await asyncio.sleep(0.2)
+        assert pair.operator.metrics().transport.state_jitter_us < 50_000
     finally:
         streaming.cancel()
 

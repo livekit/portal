@@ -31,6 +31,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::clock::anchored_now_us;
 use crate::codec::Codec;
 use crate::config::DEFAULT_H264_MAX_BITRATE_KBPS;
 use crate::error::{PortalError, PortalResult};
@@ -332,7 +333,7 @@ impl VideoReceiver {
                 let frame_data = convert_frame(&frame, timestamp_us);
                 let frame_arc = Arc::new(frame_data);
 
-                metrics.record_received(timestamp_us, now_us());
+                metrics.record_received(timestamp_us, anchored_now_us());
 
                 // Freshest-frame slot for `get_video_frame`. Updated on the
                 // drain so polling consumers see the newest frame even when

@@ -261,11 +261,15 @@ the first estimate. A sample implying a jump of more than 1 s is ignored unless
 30 in a row agree, which counts as a resync. When the robot leaves the room the
 estimate starts over.
 
-The estimate never moves timestamps backwards. A forward correction applies at
-once, and so does any correction made before the peer has handed out a
-timestamp. Otherwise a backward correction is absorbed gradually: the clock runs
-at half speed while it is more than 100 ms behind, then at 95% until it has
-caught up. A 10 s step back takes about 22 s to absorb.
+The first estimate applies at once, in either direction: until then the peer
+stamps with its own clock, a different timeline, and slewing over to the
+robot's would stamp everything ahead of it for as long as that takes. After
+that the estimate never moves timestamps backwards. A forward correction
+applies at once. A backward correction is absorbed gradually: the clock runs at
+half speed while it is more than 100 ms behind, then at 95% until it has caught
+up. A 10 s step back takes about 22 s to absorb. While it does, this peer's
+timestamps advance slower than real time, so intervals computed from them read
+short.
 
 A packet with an unknown kind or the wrong length is ignored. A peer that does
 not implement time sync can ignore the topic; it just keeps timestamping on its

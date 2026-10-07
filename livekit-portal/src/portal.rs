@@ -1298,8 +1298,9 @@ impl Portal {
     }
 
     /// Now, in microseconds on the robot's clock. On the robot this is its
-    /// own clock. Before the first sync it is local time. Never repeats and
-    /// never goes backwards.
+    /// own clock. Before the first sync it is local time, and at the first
+    /// sync it switches to the robot's clock in one step, possibly backwards.
+    /// After that it never repeats and never goes backwards.
     pub fn now_us(&self) -> u64 {
         self.clock.now_us()
     }

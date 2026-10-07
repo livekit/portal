@@ -461,7 +461,8 @@ pub(crate) struct JitterState {
 
 impl JitterState {
     /// RFC 3550 inter-arrival jitter: `J = J + (|D| − J) / 16`, where
-    /// `D = (recv − last_recv) − (send − last_send)`.
+    /// `D = (recv − last_recv) − (send − last_send)`. `recv` must be on a
+    /// local clock that never steps, or a sync correction reads as jitter.
     pub fn sample(&mut self, send_ts_us: u64, recv_ts_us: u64) {
         if let (Some(ls), Some(lr)) = (self.last_send_ts, self.last_recv_ts) {
             let d_recv = recv_ts_us as i128 - lr as i128;

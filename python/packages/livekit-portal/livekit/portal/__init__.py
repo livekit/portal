@@ -1278,8 +1278,9 @@ class Portal:
 
     def now_us(self) -> int:
         """Now, in microseconds on the robot's clock. On the robot this is its
-        own clock; before the first sync it is local time. Never repeats and
-        never goes backwards.
+        own clock; before the first sync it is local time. At the first sync it
+        switches to the robot's clock in one step, possibly backwards; after
+        that it never repeats and never goes backwards.
         """
         return self._inner.now_us()
 

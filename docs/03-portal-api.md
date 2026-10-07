@@ -794,7 +794,7 @@ class JsonlSink:
     def open(self, session: SessionInfo) -> None: ...   # session, schemas, tracks, time sync source
     def write_state(self, state) -> None: ...
     def write_frame(self, track, frame) -> None: ...
-    def write_frame_dropped(self, track, timestamp_us) -> None: ...   # the recorder fell behind
+    def write_frame_dropped(self, track, timestamp_us) -> None: ...   # optional: the recorder fell behind
     def write_action(self, action) -> None: ...
     def write_keypoint(self, keypoint) -> None: ...
     def write_metrics(self, metrics) -> None: ...
@@ -810,9 +810,10 @@ obs.stop_recording()   # or disconnect(): writes what is queued, then close()
   heard them, with `open` first and `close` last.
 - **Only video frames are dropped when the sink falls behind.** Once
   `max_queued_frames` frames are waiting, new ones are dropped and counted in
-  `metrics().observer.frames_dropped`, and the sink gets `write_frame_dropped`
-  with each one's timestamp, so a reader can tell a gap in the recording from a
-  stalled camera. State, actions and keypoints are never dropped.
+  `metrics().observer.frames_dropped`. A sink that defines the optional
+  `write_frame_dropped` gets each one's timestamp, so a reader can tell a gap
+  in the recording from a stalled camera. State, actions and keypoints are
+  never dropped.
 - `record_to` calls `open` right away and raises what it raises. A write that
   raises is logged once per kind and skipped, so one bad record doesn't end the
   recording.

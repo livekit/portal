@@ -91,6 +91,14 @@ jobs:
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
 
+      # yuv-sys renames libyuv's symbols only when it first copies libyuv into
+      # OUT_DIR. A run cancelled mid-rename gets cached (cache-on-failure), and
+      # every build from that cache then fails with "use of undeclared
+      # identifier 'rs_...'". Drop the copy so the build script redoes it.
+      - name: Drop cached yuv-sys sources
+        run: rm -rf target/*/build/yuv-sys-*/out/libyuv
+        shell: bash
+
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true

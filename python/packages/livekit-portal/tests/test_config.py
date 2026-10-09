@@ -16,6 +16,7 @@
 import pytest
 
 from livekit.portal import (
+    ActionSubscription,
     DEFAULT_MJPEG_QUALITY,
     DType,
     FieldSpec,
@@ -155,7 +156,7 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.state_reliable is True
     assert cfg.action_reliable is True
     assert cfg.reuse_stale_frames is False
-    assert cfg.action_subscription is False
+    assert cfg.action_subscription == ActionSubscription.NONE
     assert cfg.has_e2ee_key is False
 
     cfg.set_fps(60)
@@ -164,7 +165,7 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     cfg.set_state_reliable(False)
     cfg.set_action_reliable(False)
     cfg.set_reuse_stale_frames(True)
-    cfg.set_action_subscription(True)
+    cfg.set_action_subscription("all")
     cfg.set_e2ee_key(b"0" * 32)
 
     assert cfg.fps == 60
@@ -173,7 +174,7 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
     assert cfg.reuse_stale_frames is True
-    assert cfg.action_subscription is True
+    assert cfg.action_subscription == ActionSubscription.ALL
     # Presence only — the key bytes are deliberately not readable back.
     assert cfg.has_e2ee_key is True
 
@@ -271,6 +272,7 @@ def test_action_wrapper_values_are_typed_by_default():
         timestamp_us=100,
         in_reply_to_ts_us=None,
         sender="",
+        active=True,
     )
     action = _wrap_action(ffi_action, portal._action_schema)
     assert action.timestamp_us == 100
@@ -337,6 +339,7 @@ def test_wrapper_drops_fields_missing_from_payload():
         timestamp_us=0,
         in_reply_to_ts_us=None,
         sender="",
+        active=True,
     )
     action = _wrap_action(ffi_action, portal._action_schema)
     # Partial payload → wrapper returns only the fields that were sent.
@@ -482,3 +485,20 @@ def test_reuse_stale_frames_still_works():
     cfg = RobotConfig("demo")
     cfg.set_reuse_stale_frames(True)
     assert cfg.reuse_stale_frames is True
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_action_subscription_rejects_bool(value):
+    cfg = OperatorConfig("demo")
+    with pytest.raises(TypeError, match="'none', 'active', 'all'"):
+        cfg.set_action_subscription(value)
+
+
+def test_action_subscription_accepts_enum_and_name():
+    cfg = OperatorConfig("demo")
+    cfg.set_action_subscription(ActionSubscription.ACTIVE)
+    assert cfg.action_subscription == ActionSubscription.ACTIVE
+    cfg.set_action_subscription("ALL")
+    assert cfg.action_subscription == ActionSubscription.ALL
+    with pytest.raises(ValueError):
+        cfg.set_action_subscription("sometimes")

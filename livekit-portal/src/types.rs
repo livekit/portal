@@ -145,6 +145,11 @@ pub struct Action {
     /// `Portal::active_operator()` to label rows so the label cannot
     /// race with a handoff.
     pub sender: String,
+    /// Whether `sender` was the active operator when the action passed the
+    /// gate. `false` marks a shadow action the robot ignored; only operators
+    /// subscribed with `ActionSubscription::All` see those. It says the
+    /// action passed the gate, not that the robot carried it out.
+    pub active: bool,
 }
 
 /// One state sample received from the robot. Surfaces in `on_state` and
@@ -235,6 +240,21 @@ pub enum StallBehavior {
     /// `frames[name]` never fails. Falls back to `Drop` before the track's
     /// first frame, when its frame geometry is not yet known.
     Omit,
+}
+
+/// Which actions reach `on_action` / `get_action` on an operator (and, later,
+/// an observer). Actions are broadcast to the whole room either way, so this
+/// is a local filter and `All` costs nothing extra on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActionSubscription {
+    /// Nothing. The default for operators, which are usually pure controllers.
+    #[default]
+    None,
+    /// Only the active operator's actions: what the robot executes.
+    Active,
+    /// Every operator's actions, including the ones the gate dropped
+    /// (`Action::active == false`), e.g. to record a shadow policy.
+    All,
 }
 
 /// Where `now_us()` comes from on a peer other than the robot.

@@ -14,7 +14,9 @@
 
 use crate::codec::Codec;
 use crate::dtype::DType;
-use crate::types::{Role, StallBehavior, StallConfig, SyncConfig, TimeSyncSource};
+use crate::types::{
+    ActionSubscription, Role, StallBehavior, StallConfig, SyncConfig, TimeSyncSource,
+};
 use std::collections::HashMap;
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
@@ -157,17 +159,9 @@ pub struct PortalConfig {
     pub(crate) track_stall_behavior: HashMap<String, StallBehavior>,
     pub(crate) track_max_lag_ms: HashMap<String, u32>,
     pub(crate) shared_key: Option<Vec<u8>>,
-    /// Operator-side: subscribe to executed actions. Off by default —
-    /// most operators are pure controllers and do not want the bandwidth
-    /// or callback noise. Recorders, shadow eval policies, and live
-    /// monitoring opt in. When on:
-    ///   * `(Role::Operator, ACTION_TOPIC)` packets are deserialized and
-    ///     fired through `on_action` / `get_action`, gated by
-    ///     `sender == active_operator` (same gate the robot applies)
-    ///   * `send_action` echoes a local copy after
-    ///     publish when `local_identity == active_operator`, since
-    ///     LiveKit does not fan out a publisher's own data packets
-    pub(crate) action_subscription: bool,
+    /// Operator-side: which received actions reach `on_action`. See
+    /// `set_action_subscription`.
+    pub(crate) action_subscription: ActionSubscription,
 }
 
 impl PortalConfig {
@@ -191,21 +185,23 @@ impl PortalConfig {
             track_stall_behavior: HashMap::new(),
             track_max_lag_ms: HashMap::new(),
             shared_key: None,
-            action_subscription: false,
+            action_subscription: ActionSubscription::None,
         }
     }
 
-    /// Operator-side opt-in for receiving executed actions. Off by default.
-    /// When on, the operator subscribes to actions from the
-    /// active operator and gets a local echo of its own sends when active.
-    /// Used by recorders, shadow eval policies, and monitoring UIs.
-    /// No-op on the Robot side — the robot always processes actions.
-    pub fn set_action_subscription(&mut self, enable: bool) {
-        self.action_subscription = enable;
+    /// Operator-side: which actions reach `on_action` / `get_action`.
+    /// `None` (default) delivers nothing, `Active` the active operator's
+    /// actions, `All` every operator's, each tagged with `Action::active`.
+    /// A local filter, not part of the wire contract. Since LiveKit does
+    /// not fan out a publisher's own data packets, `send_action` also
+    /// echoes a local copy when the subscription would have delivered it.
+    /// No-op on the Robot side, which always processes the active
+    /// operator's actions.
+    pub fn set_action_subscription(&mut self, subscription: ActionSubscription) {
+        self.action_subscription = subscription;
     }
 
-    /// Whether action subscription is enabled for this config.
-    pub fn action_subscription(&self) -> bool {
+    pub fn action_subscription(&self) -> ActionSubscription {
         self.action_subscription
     }
 

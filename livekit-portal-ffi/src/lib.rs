@@ -521,6 +521,9 @@ pub enum PortalError {
     #[error("operation not available for role {0:?}")]
     WrongRole(Role),
 
+    #[error("observation sync is off on this peer")]
+    ObservationSyncDisabled,
+
     #[error("field '{field}' declared as {expected:?} but sent as {got}")]
     DtypeMismatch { field: String, expected: DType, got: String },
 
@@ -546,6 +549,7 @@ impl From<core::PortalError> for PortalError {
             core::PortalError::Deserialization(s) => PortalError::Deserialization(s),
             core::PortalError::Codec(s) => PortalError::Codec(s),
             core::PortalError::WrongRole(r) => PortalError::WrongRole(r.into()),
+            core::PortalError::ObservationSyncDisabled => PortalError::ObservationSyncDisabled,
             core::PortalError::DtypeMismatch { field, expected, got } => {
                 PortalError::DtypeMismatch {
                     field,
@@ -791,6 +795,16 @@ impl PortalConfig {
         self.inner.lock().time_sync_source().into()
     }
 
+    /// Operator-side: bundle state and frames into observations. On by
+    /// default for operators.
+    pub fn set_observation_sync(&self, enable: bool) {
+        self.inner.lock().set_observation_sync(enable);
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.lock().observation_sync()
+    }
+
     #[allow(deprecated)]
     pub fn set_reuse_stale_frames(&self, enable: bool) {
         self.inner.lock().set_reuse_stale_frames(enable);
@@ -972,10 +986,14 @@ impl Portal {
                 timestamp_us: state.timestamp_us,
             });
         });
-        let cb = callbacks.clone();
-        inner.on_observation(move |obs| {
-            cb.on_observation(observation_from_core(obs));
-        });
+        if inner.observation_sync() {
+            let cb = callbacks.clone();
+            inner
+                .on_observation(move |obs| {
+                    cb.on_observation(observation_from_core(obs));
+                })
+                .expect("observation sync is on");
+        }
         let cb = callbacks.clone();
         inner.on_drop(move |dropped| {
             // Cross with raw f64 maps. Python wraps to typed on receipt.
@@ -1066,8 +1084,12 @@ impl Portal {
         self.inner.send_action(&typed, timestamp_us, in_reply_to_ts_us).map_err(Into::into)
     }
 
-    pub fn get_observation(&self) -> Option<Observation> {
-        self.inner.get_observation().as_ref().map(observation_from_core)
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
+        Ok(self.inner.get_observation()?.as_ref().map(observation_from_core))
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
     }
 
     pub fn get_action(&self) -> Option<Action> {
@@ -1490,6 +1512,14 @@ impl OperatorConfig {
         self.inner.time_sync_source()
     }
 
+    pub fn set_observation_sync(&self, enable: bool) {
+        self.inner.set_observation_sync(enable);
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
+    }
+
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
         self.inner.set_e2ee_key(key);
     }
@@ -1755,8 +1785,12 @@ impl Operator {
         self.inner.get_state()
     }
 
-    pub fn get_observation(&self) -> Option<Observation> {
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
         self.inner.get_observation()
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
     }
 
     pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {

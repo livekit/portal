@@ -848,6 +848,25 @@ class PortalConfig:
         """Test hook: shift this peer's local clock by `skew_us`."""
         self._inner.set_clock_skew_us(skew_us)
 
+    def set_observation_sync(self, enable: bool) -> None:
+        """Bundle state and frames into observations. On by default for
+        operators. Only a peer that consumes bundles live needs it, in
+        practice a policy: a teleoperator flies on the newest frame and a
+        recorder stores raw streams for offline alignment.
+
+        Off means the sync buffer never runs: `on_observation` and
+        `get_observation` raise `PortalError.ObservationSyncDisabled`,
+        `on_drop` never fires, `metrics().sync` stays empty, and `slack`,
+        `tolerance`, `stall_behavior` and `max_lag_ms` do nothing (Portal
+        warns once if you set them). Frames and states still arrive through
+        `on_video_frame` and `on_state`.
+        """
+        self._inner.set_observation_sync(enable)
+
+    @property
+    def observation_sync(self) -> bool:
+        return self._inner.observation_sync()
+
     def set_time_sync_source(self, source: "TimeSyncSource") -> None:
         """Where `now_us()` comes from. `TimeSyncSource.PORTAL` (default)
         syncs to the robot's clock. `TimeSyncSource.SYSTEM` trusts the host
@@ -1115,6 +1134,11 @@ class Portal:
         self._dispatcher.set_state(callback)
 
     def on_observation(self, callback: Callable[[Observation], Any]) -> None:
+        if not self._inner.observation_sync():
+            raise PortalError.ObservationSyncDisabled(
+                "observation sync is off on this peer; turn it on with "
+                "set_observation_sync(True), or use on_state and on_video_frame"
+            )
         self._dispatcher.set_observation(callback)
 
     def on_video_frame(
@@ -1514,6 +1538,25 @@ class OperatorConfig(_RoleConfigBase):
 
     def __init__(self, session: str) -> None:
         super().__init__(_ffi.OperatorConfig(session), session, Role.OPERATOR)
+
+    def set_observation_sync(self, enable: bool) -> None:
+        """Bundle state and frames into observations. On by default for
+        operators. Only a peer that consumes bundles live needs it, in
+        practice a policy: a teleoperator flies on the newest frame and a
+        recorder stores raw streams for offline alignment.
+
+        Off means the sync buffer never runs: `on_observation` and
+        `get_observation` raise `PortalError.ObservationSyncDisabled`,
+        `on_drop` never fires, `metrics().sync` stays empty, and `slack`,
+        `tolerance`, `stall_behavior` and `max_lag_ms` do nothing (Portal
+        warns once if you set them). Frames and states still arrive through
+        `on_video_frame` and `on_state`.
+        """
+        self._inner.set_observation_sync(enable)
+
+    @property
+    def observation_sync(self) -> bool:
+        return self._inner.observation_sync()
 
     @classmethod
     def from_yaml_str(cls, yaml: str, session: str) -> "OperatorConfig":

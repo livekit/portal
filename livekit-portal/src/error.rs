@@ -57,6 +57,12 @@ pub enum PortalError {
     WrongRole(Role),
 
     #[error(
+        "observation sync is off on this peer, so no observations are built; turn it on with \
+         set_observation_sync(true), or consume on_state and on_video_frame directly"
+    )]
+    ObservationSyncDisabled,
+
+    #[error(
         "field '{field}' declared as {expected:?} but sent as {got}; use the matching TypedValue variant or redeclare the dtype"
     )]
     DtypeMismatch { field: String, expected: DType, got: &'static str },

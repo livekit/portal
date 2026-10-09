@@ -10,6 +10,10 @@ budget, or extend it.
 For the knobs, see [Tuning](../04-tuning.md). For the short version, see
 [Concepts](../02-concepts.md#the-observation-model).
 
+All of this runs only on peers with observation sync on, which is the default
+for operators. With `set_observation_sync(False)` the sync buffer is never
+built, and state and frames reach `on_state` and `on_video_frame` unmatched.
+
 ## The problem
 
 A policy expects one bundle per step: at time T, here are my camera frames and

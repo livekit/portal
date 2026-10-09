@@ -105,6 +105,7 @@ role-specific is a no-op on the wrong side.
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
 | `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
 | `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
+| `set_observation_sync(bool)` | `True` | Operator-only. Bundle state and frames into observations. Off skips the sync buffer entirely. |
 | `set_time_sync_source(TimeSyncSource)` | `PORTAL` | Where `now_us()` comes from: `PORTAL` syncs to the robot, `SYSTEM` trusts the host clock. |
 | `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_stall_behavior(FREEZE)` with `set_max_lag_ms(0)`. |
 | `set_action_subscription(str)` | `"none"` | Operator-only. Which received actions reach `on_action`: `"none"`, `"active"` or `"all"`. |
@@ -294,6 +295,27 @@ latest-wins, so a slow reader sees the freshest value rather than a backlog.
 `on_state` and `on_video_frame` are raw firehoses. They fire on arrival with no
 matching at all. Use them for a preview pane or a debug log. Use
 `on_observation` for anything that needs frames and state to agree.
+
+**Bundling is optional.** Only a peer that consumes bundles live needs it, in
+practice a policy. A teleoperator flies on the newest frame, and a recorder
+stores raw streams and aligns them offline. Turn it off on those:
+
+```python
+cfg.set_observation_sync(False)   # default: True
+```
+
+| Peer | Needs bundling? | Why |
+|---|---|---|
+| Policy | yes | It was trained on matched rows and has to be fed matched rows. |
+| Teleoperator | no | It flies on the newest frame and anchors actions with `in_reply_to_ts_us`. |
+| Recorder | no | It records raw streams, which are aligned offline. |
+
+Off means the sync buffer never runs. `on_observation` and `get_observation`
+raise `ObservationSyncDisabled`, `on_drop` never fires, and `metrics().sync`
+stays empty. `slack`, `tolerance`, `stall_behavior` and `max_lag_ms` only apply
+while it is on, and Portal warns once if they are set while it is off. It is a
+local preference, not part of the wire contract, so peers with and without it
+share a room.
 
 `on_drop` receives a **list** of state dicts, not a single state:
 
@@ -631,6 +653,7 @@ sender's side. Check `op.active_operator()`.
 | `WrongFrameSize` | Buffer length is not `width * height * 3`. |
 | `InvalidFrameDimensions` | Width or height is odd. |
 | `WrongRole` | `send_action` on a robot, or `send_state` on an operator. |
+| `ObservationSyncDisabled` | `on_observation` or `get_observation` on a peer with `set_observation_sync(False)`. |
 | `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
 | `Deserialization` | A received payload could not be parsed. |
 | `Codec` | Frame encode or decode failed. |

@@ -35,7 +35,7 @@ use tokio::task::JoinHandle;
 
 use crate::metrics::{MetricsRegistry, TimeSyncMetrics};
 use crate::portal::ControllerState;
-use crate::types::Role;
+use crate::types::{Role, TimeSyncSource};
 
 pub(crate) const CLOCK_TOPIC: &str = "portal_clock";
 
@@ -299,15 +299,20 @@ impl MonotonicClock {
     }
 }
 
-/// Local time for the clock: wall time at first use, advanced by a monotonic
-/// `Instant` so host clock steps (NTP) never reach Portal timestamps.
-fn raw_now_us() -> u64 {
+/// Local time for the clock in `portal` mode: wall time at first use,
+/// advanced by a monotonic `Instant` so host clock steps (NTP) never reach
+/// Portal timestamps.
+fn anchored_now_us() -> u64 {
     static ANCHOR: OnceLock<(Instant, u64)> = OnceLock::new();
-    let (instant, wall_us) = ANCHOR.get_or_init(|| {
-        let wall = SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before 1970");
-        (Instant::now(), wall.as_micros() as u64)
-    });
+    let (instant, wall_us) = ANCHOR.get_or_init(|| (Instant::now(), system_now_us()));
     wall_us + instant.elapsed().as_micros() as u64
+}
+
+/// Local time in `system` mode: the host clock as is, which a lab trusts
+/// because PTP or GPS already keeps it in step with the other hosts.
+fn system_now_us() -> u64 {
+    let wall = SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before 1970");
+    wall.as_micros() as u64
 }
 
 // --- Shared handle ---
@@ -322,24 +327,29 @@ struct ClockState {
     robot_identity: Option<String>,
 }
 
+pub(crate) struct ClockOptions {
+    /// True on the robot: its own clock is the timeline, so it is synced
+    /// from the start.
+    pub is_reference: bool,
+    pub source: TimeSyncSource,
+    /// Shifts the raw clock, for tests that simulate hosts whose clocks
+    /// disagree.
+    pub skew_us: i64,
+}
+
 /// The clock a `Portal` reads. Outlives connections so `now_us()` stays
 /// continuous across a reconnect.
 pub(crate) struct SyncedClock {
-    is_reference: bool,
-    skew_us: i64,
+    options: ClockOptions,
     state: Mutex<ClockState>,
     on_synced: Mutex<Option<TimeSyncedCb>>,
 }
 
 impl SyncedClock {
-    /// `is_reference` is true on the robot: its own clock is the timeline,
-    /// so it is synced from the start. `skew_us` shifts the raw clock and
-    /// exists for tests that simulate hosts with different clocks.
-    pub fn new(is_reference: bool, skew_us: i64) -> Self {
-        let estimator = OffsetEstimator { synced: is_reference, ..Default::default() };
+    pub fn new(options: ClockOptions) -> Self {
+        let estimator = OffsetEstimator { synced: options.is_reference, ..Default::default() };
         Self {
-            is_reference,
-            skew_us,
+            options,
             state: Mutex::new(ClockState {
                 clock: MonotonicClock::default(),
                 estimator,
@@ -350,16 +360,22 @@ impl SyncedClock {
     }
 
     pub fn now_us(&self) -> u64 {
-        let raw = raw_now_us().saturating_add_signed(self.skew_us);
+        let raw = self.raw_us();
         self.state.lock().clock.now(raw)
     }
 
     /// Raw local time, the clock the ping/pong timestamps are taken on.
     fn raw_us(&self) -> u64 {
-        raw_now_us().saturating_add_signed(self.skew_us)
+        let raw = match self.options.source {
+            TimeSyncSource::Portal => anchored_now_us(),
+            TimeSyncSource::System => system_now_us(),
+        };
+        raw.saturating_add_signed(self.options.skew_us)
     }
 
-    pub fn is_synced(&self) -> bool {
+    /// Whether the exchange has produced an estimate yet, applied or not.
+    /// Drives the ping rate.
+    fn has_estimate(&self) -> bool {
         self.state.lock().estimator.is_synced()
     }
 
@@ -369,12 +385,20 @@ impl SyncedClock {
 
     pub fn metrics(&self) -> TimeSyncMetrics {
         let state = self.state.lock();
+        let trusted = self.options.is_reference || self.options.source == TimeSyncSource::System;
         TimeSyncMetrics {
-            synced: state.estimator.is_synced(),
+            source: self.options.source,
+            synced: trusted || state.estimator.is_synced(),
             offset_us: state.clock.applied_offset_us(),
-            uncertainty_us: match self.is_reference {
-                true => Some(0),
-                false => state.estimator.uncertainty_us(),
+            uncertainty_us: match (self.options.is_reference, self.options.source) {
+                (true, _) => Some(0),
+                // Nothing is applied, so Portal can't bound the host clock's error.
+                (false, TimeSyncSource::System) => None,
+                (false, TimeSyncSource::Portal) => state.estimator.uncertainty_us(),
+            },
+            measured_offset_us: match self.options.is_reference {
+                true => None,
+                false => state.estimator.offset_us(),
             },
             resyncs: state.estimator.resyncs(),
             samples_rejected: state.estimator.samples_rejected(),
@@ -400,13 +424,19 @@ impl SyncedClock {
             state.robot_identity = Some(robot_identity.to_string());
         }
         let event = state.estimator.push(sample);
-        if let Some(offset) = state.estimator.offset_us() {
+        // In system mode the estimate is only measured, never applied.
+        if self.options.source == TimeSyncSource::Portal
+            && let Some(offset) = state.estimator.offset_us()
+        {
             state.clock.set_target(offset);
         }
         event
     }
 
     fn fire_synced(&self) {
+        if self.options.source == TimeSyncSource::System {
+            return;
+        }
         if let Some(cb) = self.on_synced.lock().as_ref()
             && catch_unwind(AssertUnwindSafe(cb)).is_err()
         {
@@ -484,7 +514,7 @@ impl ClockActor {
                 _ = tokio::time::sleep_until(next_ping), if pings => {
                     self.send_ping(seq).await;
                     seq = seq.wrapping_add(1);
-                    let interval = match self.clock.is_synced() {
+                    let interval = match self.clock.has_estimate() {
                         true => SYNCED_PING_INTERVAL,
                         false => UNSYNCED_PING_INTERVAL,
                     };
@@ -753,23 +783,56 @@ mod tests {
 
     #[test]
     fn reference_clock_starts_synced() {
-        let robot = SyncedClock::new(true, 0);
+        let robot = SyncedClock::new(options(true, TimeSyncSource::Portal));
         assert!(robot.metrics().synced);
         assert_eq!(robot.metrics().uncertainty_us, Some(0));
-        let operator = SyncedClock::new(false, 0);
+        let operator = SyncedClock::new(options(false, TimeSyncSource::Portal));
         assert!(!operator.metrics().synced);
         assert_eq!(operator.metrics().uncertainty_us, None);
     }
 
     #[test]
     fn new_robot_restarts_estimate() {
-        let clock = SyncedClock::new(false, 0);
+        let clock = SyncedClock::new(options(false, TimeSyncSource::Portal));
         for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
             clock.record("robot-a", exchange(i * 250 * MS, 2 * S as i64, MS, MS, 0));
         }
-        assert!(clock.is_synced());
+        assert!(clock.has_estimate());
         let event = clock.record("robot-b", exchange(2 * S, 7 * S as i64, MS, MS, 0));
         assert_eq!(event, EstimatorEvent::Pending);
-        assert!(!clock.is_synced());
+        assert!(!clock.has_estimate());
+    }
+
+    #[test]
+    fn system_mode_measures_but_does_not_apply() {
+        let clock = SyncedClock::new(options(false, TimeSyncSource::System));
+        let m = clock.metrics();
+        assert!(m.synced, "system mode trusts the host clock from the start");
+        assert_eq!((m.uncertainty_us, m.measured_offset_us), (None, None));
+
+        for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
+            clock.record("robot", exchange(i * 250 * MS, 3 * S as i64, MS, MS, 0));
+        }
+        let m = clock.metrics();
+        assert_eq!(m.offset_us, 0);
+        assert_eq!(m.measured_offset_us, Some(3 * S as i64));
+
+        let before = system_now_us();
+        let now = clock.now_us();
+        assert!(now.abs_diff(before) < S, "system mode reads the host clock unshifted");
+    }
+
+    #[test]
+    fn portal_mode_applies_the_estimate() {
+        let clock = SyncedClock::new(options(false, TimeSyncSource::Portal));
+        for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
+            clock.record("robot", exchange(i * 250 * MS, 3 * S as i64, MS, MS, 0));
+        }
+        let m = clock.metrics();
+        assert_eq!((m.offset_us, m.measured_offset_us), (3 * S as i64, Some(3 * S as i64)));
+    }
+
+    fn options(is_reference: bool, source: TimeSyncSource) -> ClockOptions {
+        ClockOptions { is_reference, source, skew_us: 0 }
     }
 }

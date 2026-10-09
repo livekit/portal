@@ -237,6 +237,18 @@ pub enum StallBehavior {
     Omit,
 }
 
+/// Where `now_us()` comes from on a peer other than the robot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeSyncSource {
+    /// Sync to the robot's clock over `portal_clock`.
+    #[default]
+    Portal,
+    /// Trust the host clock as is, for labs whose hosts are already synced
+    /// (PTP, GPS). The exchange still runs, so drift shows up in
+    /// `metrics().time_sync.measured_offset_us`.
+    System,
+}
+
 /// Per-track stall handling: how long to wait for a silent track, and how
 /// to resolve the moment when the wait is over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

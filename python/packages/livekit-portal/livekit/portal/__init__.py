@@ -60,6 +60,7 @@ DType = _ffi.DType
 VideoCodec = _ffi.VideoCodec
 FrameSource = _ffi.FrameSource
 StallBehavior = _ffi.StallBehavior
+TimeSyncSource = _ffi.TimeSyncSource
 FieldSpec = _ffi.FieldSpec
 VideoTrackSpec = _ffi.VideoTrackSpec
 # Deprecated alias. `FrameVideoSpec` was the byte-stream-only record; there is
@@ -825,6 +826,17 @@ class PortalConfig:
         """Test hook: shift this peer's local clock by `skew_us`."""
         self._inner.set_clock_skew_us(skew_us)
 
+    def set_time_sync_source(self, source: "TimeSyncSource") -> None:
+        """Where `now_us()` comes from. `TimeSyncSource.PORTAL` (default)
+        syncs to the robot's clock. `TimeSyncSource.SYSTEM` trusts the host
+        clock, for hosts already kept in step by PTP or GPS.
+        """
+        self._inner.set_time_sync_source(source)
+
+    @property
+    def time_sync_source(self) -> "TimeSyncSource":
+        return self._inner.time_sync_source()
+
     def set_e2ee_key(self, key: bytes) -> None:
         """Set a shared E2EE key. Both peers must call this with the same key
         before connecting. The key is used as a GCM-AES shared secret for all
@@ -1399,6 +1411,17 @@ class _RoleConfigBase:
         """Test hook: shift this peer's local clock by `skew_us`."""
         self._inner.set_clock_skew_us(skew_us)
 
+    def set_time_sync_source(self, source: "TimeSyncSource") -> None:
+        """Where `now_us()` comes from. `TimeSyncSource.PORTAL` (default)
+        syncs to the robot's clock. `TimeSyncSource.SYSTEM` trusts the host
+        clock, for hosts already kept in step by PTP or GPS.
+        """
+        self._inner.set_time_sync_source(source)
+
+    @property
+    def time_sync_source(self) -> "TimeSyncSource":
+        return self._inner.time_sync_source()
+
     def set_e2ee_key(self, key: bytes) -> None:
         self._inner.set_e2ee_key(bytes(key))
 
@@ -1804,6 +1827,7 @@ __all__ = [
     "BufferMetrics",
     "RttMetrics",
     "TimeSyncMetrics",
+    "TimeSyncSource",
     "PolicyMetrics",
     "PortalError",
     "ConfigFileError",

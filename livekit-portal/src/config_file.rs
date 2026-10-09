@@ -35,7 +35,7 @@ use serde::Deserialize;
 use crate::codec::Codec;
 use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig};
 use crate::dtype::DType;
-use crate::types::{Role, StallBehavior};
+use crate::types::{Role, StallBehavior, TimeSyncSource};
 
 /// Errors raised by `PortalConfig::from_yaml_*`.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +76,16 @@ fn parse_stall_behavior(s: &str, context: &str) -> Result<StallBehavior, ConfigF
     }
 }
 
+fn parse_time_sync_source(s: &str) -> Result<TimeSyncSource, ConfigFileError> {
+    match s {
+        "portal" => Ok(TimeSyncSource::Portal),
+        "system" => Ok(TimeSyncSource::System),
+        other => Err(ConfigFileError::Invalid(format!(
+            "time_sync_source: expected one of portal, system — got '{other}'"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFileV1 {
@@ -100,6 +110,8 @@ struct ConfigFileV1 {
     /// derive it from `slack` and `fps`.
     #[serde(default)]
     max_lag_ms: Option<u32>,
+    #[serde(default)]
+    time_sync_source: Option<String>,
     #[serde(default)]
     action_subscription: Option<bool>,
 
@@ -281,6 +293,9 @@ impl PortalConfig {
                 cfg.set_track_max_lag_ms(v.name.clone(), ms);
             }
         }
+        if let Some(v) = &parsed.time_sync_source {
+            cfg.set_time_sync_source(parse_time_sync_source(v)?);
+        }
         if let Some(v) = parsed.action_subscription {
             cfg.set_action_subscription(v);
         }
@@ -379,6 +394,7 @@ tolerance: 1.0
 state_reliable: false
 action_reliable: false
 reuse_stale_frames: true
+time_sync_source: system
 action_subscription: true
 videos:
   - { name: front, codec: h264, max_bitrate_kbps: 4000 }
@@ -421,6 +437,7 @@ action:
         assert!(!cfg.state_reliable());
         assert!(!cfg.action_reliable());
         assert!(cfg.reuse_stale_frames());
+        assert_eq!(cfg.time_sync_source(), TimeSyncSource::System);
         assert!(cfg.action_subscription());
         assert!(!cfg.has_e2ee_key());
     }
@@ -440,7 +457,15 @@ action:
         assert!(cfg.state_reliable());
         assert!(cfg.action_reliable());
         assert!(!cfg.reuse_stale_frames());
+        assert_eq!(cfg.time_sync_source(), TimeSyncSource::Portal);
         assert!(!cfg.action_subscription());
+    }
+
+    #[test]
+    fn unknown_time_sync_source_is_rejected() {
+        let yaml = "version: 1\ntime_sync_source: ntp\n";
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        assert!(err.to_string().contains("portal, system"), "{err}");
     }
 
     #[test]

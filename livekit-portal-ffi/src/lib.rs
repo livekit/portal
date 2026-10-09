@@ -398,12 +398,23 @@ pub struct RttMetrics {
     pub pongs_received: u64,
 }
 
+/// Clock sync with the robot. `reset_metrics()` only zeroes the counters.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct TimeSyncMetrics {
+    pub synced: bool,
+    pub offset_us: i64,
+    pub uncertainty_us: Option<u64>,
+    pub resyncs: u64,
+    pub samples_rejected: u64,
+}
+
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct PortalMetrics {
     pub sync: SyncMetrics,
     pub transport: TransportMetrics,
     pub buffers: BufferMetrics,
     pub rtt: RttMetrics,
+    pub time_sync: TimeSyncMetrics,
     pub policy: PolicyMetrics,
 }
 
@@ -600,6 +611,8 @@ pub trait PortalCallbacks: Send + Sync {
     /// the Robot side, when the local pointer is updated). Empty string
     /// means the pointer was cleared.
     fn on_active_operator_changed(&self, identity: Option<String>);
+    /// First sync with the robot's clock, and after each resync.
+    fn on_time_synced(&self);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,8 +715,9 @@ impl PortalConfig {
         self.inner.lock().set_action_reliable(reliable);
     }
 
-    pub fn set_ping_ms(&self, ms: u64) {
-        self.inner.lock().set_ping_ms(ms);
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.lock().set_clock_skew_us(skew_us);
     }
 
     #[allow(deprecated)]
@@ -807,11 +821,6 @@ impl PortalConfig {
     /// Frame-match window, in tick intervals at `fps`. Defaults to 1.5.
     pub fn tolerance(&self) -> f32 {
         self.inner.lock().tolerance()
-    }
-
-    /// RTT ping cadence in milliseconds; `0` means active pinging is off.
-    pub fn ping_ms(&self) -> u64 {
-        self.inner.lock().ping_ms()
     }
 
     /// Whether state packets are published on the reliable channel.
@@ -932,6 +941,8 @@ impl Portal {
         inner.on_active_operator_changed(move |id| {
             cb.on_active_operator_changed(id.map(|s| s.to_string()));
         });
+        let cb = callbacks.clone();
+        inner.on_time_synced(move || cb.on_time_synced());
 
         Arc::new(Self {
             inner,
@@ -1009,6 +1020,11 @@ impl Portal {
 
     pub fn metrics(&self) -> PortalMetrics {
         metrics_from_core(self.inner.metrics())
+    }
+
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
     }
 
     pub fn reset_metrics(&self) {
@@ -1200,8 +1216,9 @@ impl RobotConfig {
         self.inner.set_action_reliable(reliable);
     }
 
-    pub fn set_ping_ms(&self, ms: u64) {
-        self.inner.set_ping_ms(ms);
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.set_clock_skew_us(skew_us);
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -1280,10 +1297,6 @@ impl RobotConfig {
 
     pub fn tolerance(&self) -> f32 {
         self.inner.tolerance()
-    }
-
-    pub fn ping_ms(&self) -> u64 {
-        self.inner.ping_ms()
     }
 
     pub fn state_reliable(&self) -> bool {
@@ -1386,8 +1399,9 @@ impl OperatorConfig {
         self.inner.set_action_reliable(reliable);
     }
 
-    pub fn set_ping_ms(&self, ms: u64) {
-        self.inner.set_ping_ms(ms);
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.set_clock_skew_us(skew_us);
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -1467,10 +1481,6 @@ impl OperatorConfig {
 
     pub fn tolerance(&self) -> f32 {
         self.inner.tolerance()
-    }
-
-    pub fn ping_ms(&self) -> u64 {
-        self.inner.ping_ms()
     }
 
     pub fn state_reliable(&self) -> bool {
@@ -1607,6 +1617,11 @@ impl Robot {
         self.inner.metrics()
     }
 
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+
     pub fn reset_metrics(&self) {
         self.inner.reset_metrics();
     }
@@ -1735,6 +1750,11 @@ impl Operator {
         self.inner.metrics()
     }
 
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+
     pub fn reset_metrics(&self) {
         self.inner.reset_metrics();
     }
@@ -1836,6 +1856,13 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             rtt_us_p95: m.rtt.rtt_us_p95,
             pings_sent: m.rtt.pings_sent,
             pongs_received: m.rtt.pongs_received,
+        },
+        time_sync: TimeSyncMetrics {
+            synced: m.time_sync.synced,
+            offset_us: m.time_sync.offset_us,
+            uncertainty_us: m.time_sync.uncertainty_us,
+            resyncs: m.time_sync.resyncs,
+            samples_rejected: m.time_sync.samples_rejected,
         },
         policy: PolicyMetrics {
             e2e_us_p50: m.policy.e2e_us_p50,

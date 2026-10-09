@@ -22,6 +22,7 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::clock::{CLOCK_TOPIC, ClockActor, ClockService, SyncedClock};
 use crate::config::{FieldSpec, PortalConfig};
 use crate::data::{
     ACTION_TOPIC, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot, handle_data_received,
@@ -32,7 +33,6 @@ use crate::frame_video::{
 };
 use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
-use crate::rtt::RttService;
 use crate::serialization::{action_fingerprint, schema_fingerprint};
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
 use crate::types::*;
@@ -256,7 +256,7 @@ impl ObservationSink {
 struct ConnectionState {
     room: Option<Room>,
     event_task: Option<JoinHandle<()>>,
-    rtt: Option<Arc<RttService>>,
+    clock: Option<Arc<ClockService>>,
 }
 
 pub struct Portal {
@@ -330,6 +330,9 @@ pub struct Portal {
     // running". We enter this handle around that call. `None` before the
     // first connect.
     runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
+
+    // Outlives connections so `now_us()` stays continuous across reconnects.
+    clock: Arc<SyncedClock>,
 }
 
 impl Portal {
@@ -375,10 +378,12 @@ impl Portal {
                 .collect(),
         );
 
+        let clock = Arc::new(SyncedClock::new(config.role == Role::Robot, config.clock_skew_us));
+
         Self {
             config,
             lifecycle: tokio::sync::Mutex::new(()),
-            conn: Mutex::new(ConnectionState { room: None, event_task: None, rtt: None }),
+            conn: Mutex::new(ConnectionState { room: None, event_task: None, clock: None }),
             video_receivers: Arc::new(Mutex::new(HashMap::new())),
             video_publishers: Mutex::new(HashMap::new()),
             frame_video_publishers: Mutex::new(HashMap::new()),
@@ -395,6 +400,7 @@ impl Portal {
             rpc_handlers: Arc::new(Mutex::new(HashMap::new())),
             local_participant: Arc::new(Mutex::new(None)),
             controller: Arc::new(ControllerState::new()),
+            clock,
             runtime_handle: Mutex::new(None),
         }
     }
@@ -522,11 +528,13 @@ impl Portal {
             return Err(e);
         }
 
-        let rtt = Arc::new(RttService::spawn(
-            local_participant.clone(),
-            self.config.ping_ms,
-            self.metrics.clone(),
-        ));
+        let clock = Arc::new(ClockService::spawn(ClockActor {
+            role: self.config.role,
+            local_participant: local_participant.clone(),
+            controller: self.controller.clone(),
+            clock: self.clock.clone(),
+            metrics: self.metrics.clone(),
+        }));
 
         log::info!("[{}] connected as {:?}", self.config.session, self.config.role);
 
@@ -547,7 +555,7 @@ impl Portal {
             video_receivers: self.video_receivers.clone(),
             frame_video_entries: self.frame_video_entries.clone(),
             metrics: self.metrics.clone(),
-            rtt: rtt.clone(),
+            clock: clock.clone(),
             controller: self.controller.clone(),
             local_identity,
         };
@@ -561,7 +569,7 @@ impl Portal {
         let mut state = self.conn.lock();
         state.room = Some(room);
         state.event_task = Some(event_handle);
-        state.rtt = Some(rtt);
+        state.clock = Some(clock);
         Ok(())
     }
 
@@ -989,7 +997,7 @@ impl Portal {
             if let Some(task) = state.event_task.take() {
                 task.abort();
             }
-            state.rtt = None;
+            state.clock = None;
         }
         *self.local_participant.lock() = None;
         // Multi-controller state (operators, robot_identity, active_operator
@@ -1200,11 +1208,27 @@ impl Portal {
             }
             None => (HashMap::new(), 0),
         };
-        self.metrics.snapshot(video_fill, state_fill)
+        let mut snapshot = self.metrics.snapshot(video_fill, state_fill);
+        snapshot.time_sync = self.clock.metrics();
+        snapshot
     }
 
+    /// Resets counters. Time sync state is kept: see `TimeSyncMetrics`.
     pub fn reset_metrics(&self) {
         self.metrics.reset();
+        self.clock.reset_counters();
+    }
+
+    /// Now, in microseconds on the robot's clock. On the robot this is its
+    /// own clock. Before the first sync it is local time. Never repeats and
+    /// never goes backwards.
+    pub fn now_us(&self) -> u64 {
+        self.clock.now_us()
+    }
+
+    /// Fires on the first sync with the robot's clock, and after each resync.
+    pub fn on_time_synced(&self, callback: impl Fn() + Send + Sync + 'static) {
+        self.clock.set_on_synced(Box::new(callback));
     }
 }
 
@@ -1242,7 +1266,7 @@ struct EventContext {
     /// tasks bumps a refcount instead of cloning the map.
     frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>>,
     metrics: Arc<MetricsRegistry>,
-    rtt: Arc<RttService>,
+    clock: Arc<ClockService>,
     /// Multi-controller state, shared with `Portal` so attribute and
     /// participant lifecycle events can update it directly without going
     /// through the Portal struct.
@@ -1378,6 +1402,12 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             }
         }
         RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. } => {
+            if topic == CLOCK_TOPIC {
+                if let Some(p) = &participant {
+                    ctx.clock.handle_packet(&payload, p.identity().as_str());
+                }
+                return;
+            }
             // Active-operator gate. Drop incoming actions whose sender does
             // not match `active_operator`. Applies to both the robot (always
             // processes ACTION_TOPIC) and operators with subscription on
@@ -1431,7 +1461,6 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 &ctx.state,
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
-                &ctx.rtt,
                 gate_sender,
             );
             if !output.is_empty() {
@@ -1513,6 +1542,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             let mut robot_slot = ctx.controller.robot_identity.lock();
             if robot_slot.as_deref() == Some(id_str.as_str()) {
                 *robot_slot = None;
+                ctx.clock.robot_left();
             }
         }
         RoomEvent::Reconnected => {

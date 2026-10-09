@@ -21,7 +21,7 @@ on a timer. Counters are cumulative since construction or the last
 Every duration is **microseconds**. Percentiles come from a rolling
 256-sample window and read `None` until enough samples land.
 
-## The five groups
+## The six groups
 
 | Group | Answers |
 |---|---|
@@ -29,6 +29,7 @@ Every duration is **microseconds**. Percentiles come from a rolling
 | [`transport`](#transport) | Is data getting across? |
 | [`buffers`](#buffers) | Are we running out of headroom? |
 | [`rtt`](#rtt) | How far away is the peer? |
+| [`time_sync`](#time_sync) | Do we agree with the robot on the time? |
 | [`policy`](#policy) | How long does the full loop take? |
 
 ## What to watch first
@@ -151,7 +152,8 @@ the combination that matters. See
 
 ## `rtt`
 
-Both sides. Populated only if `ping_ms` is non-zero on this side.
+Every side except the robot, which answers pings but never sends them.
+Measured by the [time sync](#time_sync) exchange.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -167,6 +169,26 @@ does.
 
 RTT is pure network round trip on an unreliable channel. It is **not** your
 control-loop latency. For that, use `policy`.
+
+## `time_sync`
+
+Every side. On the robot it always reads synced, with a zero offset and zero
+uncertainty, because the robot's clock is the reference.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `synced` | `bool` | Whether `now_us()` is on the robot's clock yet. |
+| `offset_us` | `int` | Robot clock minus local clock, as applied to `now_us()`. |
+| `uncertainty_us` | `int \| None` | How far off `now_us()` could be: half the round trip of the sample the offset came from. `None` until synced. |
+| `resyncs` | `int` | Times 30 agreeing samples moved the timeline by more than 1 s. |
+| `samples_rejected` | `int` | Samples ignored for implying a jump of more than 1 s. |
+
+`reset_metrics()` zeroes `resyncs` and `samples_rejected` but leaves the rest
+alone, since zeroing `offset_us` or `synced` would look like the clock just lost
+sync.
+
+A steadily climbing `samples_rejected` with no resync means the samples disagree
+with each other, usually because the link is very jittery.
 
 ## `policy`
 

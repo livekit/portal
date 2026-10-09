@@ -152,7 +152,6 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.fps == 30
     assert cfg.slack == 5
     assert cfg.tolerance == pytest.approx(1.5)
-    assert cfg.ping_ms == 1000
     assert cfg.state_reliable is True
     assert cfg.action_reliable is True
     assert cfg.reuse_stale_frames is False
@@ -162,7 +161,6 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     cfg.set_fps(60)
     cfg.set_slack(8)
     cfg.set_tolerance(0.5)
-    cfg.set_ping_ms(0)
     cfg.set_state_reliable(False)
     cfg.set_action_reliable(False)
     cfg.set_reuse_stale_frames(True)
@@ -172,7 +170,6 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.fps == 60
     assert cfg.slack == 8
     assert cfg.tolerance == pytest.approx(0.5)
-    assert cfg.ping_ms == 0
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
     assert cfg.reuse_stale_frames is True

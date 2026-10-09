@@ -48,7 +48,6 @@ YAML_FULL = textwrap.dedent(
     state_reliable: false
     action_reliable: false
     reuse_stale_frames: true
-    ping_ms: 500
     action_subscription: true
     videos:
       - { name: front, codec: h264 }
@@ -122,6 +121,12 @@ def test_from_yaml_str_role_is_supplied_at_load_time():
 def test_from_yaml_str_unknown_version_rejected():
     with pytest.raises(ConfigFileError):
         PortalConfig.from_yaml_str("version: 99\n", "demo", Role.ROBOT)
+
+
+def test_from_yaml_str_ping_ms_rejected():
+    # Time sync replaced the RTT ping in v0.3 and runs at fixed rates.
+    with pytest.raises(ConfigFileError):
+        PortalConfig.from_yaml_str("version: 1\nping_ms: 500\n", "demo", Role.ROBOT)
 
 
 def test_from_yaml_str_invalid_dtype_rejected():
@@ -229,7 +234,6 @@ def test_yaml_sync_knobs_are_readable(cfg):
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
     assert cfg.reuse_stale_frames is True
-    assert cfg.ping_ms == 500
     assert cfg.action_subscription is True
     assert cfg.has_e2ee_key is False
 

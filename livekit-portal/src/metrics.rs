@@ -26,6 +26,7 @@ pub struct PortalMetrics {
     pub transport: TransportMetrics,
     pub buffers: BufferMetrics,
     pub rtt: RttMetrics,
+    pub time_sync: TimeSyncMetrics,
     pub policy: PolicyMetrics,
 }
 
@@ -102,6 +103,19 @@ pub struct BufferMetrics {
     pub state_fill: usize,
     /// Per-video-track cumulative evictions from overflow.
     pub evictions: HashMap<String, u64>,
+}
+
+/// Clock sync with the robot. Not cleared by `reset_metrics()`, apart from
+/// the counters: zeroing `synced` or `offset_us` would look like lost sync.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimeSyncMetrics {
+    pub synced: bool,
+    /// Robot clock minus local clock, as currently applied to `now_us()`.
+    pub offset_us: i64,
+    /// How far off `now_us()` could be. `None` until synced.
+    pub uncertainty_us: Option<u64>,
+    pub resyncs: u64,
+    pub samples_rejected: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -323,6 +337,8 @@ impl MetricsRegistry {
                 pings_sent: self.pings_sent.load(Ordering::Relaxed),
                 pongs_received: self.pongs_received.load(Ordering::Relaxed),
             },
+            // Owned by the clock; `Portal::metrics` fills it in.
+            time_sync: TimeSyncMetrics::default(),
             policy: PolicyMetrics {
                 e2e_us_p50: e2e_p50,
                 e2e_us_p95: e2e_p95,

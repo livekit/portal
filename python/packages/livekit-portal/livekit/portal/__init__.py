@@ -71,6 +71,7 @@ SyncMetrics = _ffi.SyncMetrics
 TransportMetrics = _ffi.TransportMetrics
 BufferMetrics = _ffi.BufferMetrics
 RttMetrics = _ffi.RttMetrics
+TimeSyncMetrics = _ffi.TimeSyncMetrics
 PolicyMetrics = _ffi.PolicyMetrics
 PortalError = _ffi.PortalError
 ConfigFileError = _ffi.ConfigFileError
@@ -333,6 +334,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._operator_joined_cb: Optional[Callable[[str], Any]] = None
         self._operator_left_cb: Optional[Callable[[str], Any]] = None
         self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
+        self._time_synced_cb: Optional[Callable[[], Any]] = None
         # Schemas are frozen at Portal construction and read by the wrap
         # helpers below on every delivery.
         self._action_schema = action_schema
@@ -397,6 +399,11 @@ class _Dispatcher(_ffi.PortalCallbacks):
         if cb is not None:
             self._schedule(cb, identity)
 
+    def on_time_synced(self) -> None:
+        cb = self._time_synced_cb
+        if cb is not None:
+            self._schedule(cb)
+
     # --- Registration (from Python user thread) -----------------------------
 
     def set_action(self, cb: Callable[[Action], Any]) -> None:
@@ -422,6 +429,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
 
     def set_active_operator_changed(self, cb: Callable[[Optional[str]], Any]) -> None:
         self._active_operator_changed_cb = cb
+
+    def set_time_synced(self, cb: Callable[[], Any]) -> None:
+        self._time_synced_cb = cb
 
 
 _uniffi_bound_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -659,11 +669,6 @@ class PortalConfig:
         return self._inner.tolerance()
 
     @property
-    def ping_ms(self) -> int:
-        """RTT ping cadence in milliseconds; `0` means active pinging is off."""
-        return self._inner.ping_ms()
-
-    @property
     def state_reliable(self) -> bool:
         """Whether state packets go out on the reliable channel."""
         return self._inner.state_reliable()
@@ -816,8 +821,9 @@ class PortalConfig:
     def set_action_reliable(self, reliable: bool) -> None:
         self._inner.set_action_reliable(reliable)
 
-    def set_ping_ms(self, ms: int) -> None:
-        self._inner.set_ping_ms(ms)
+    def _set_clock_skew_us(self, skew_us: int) -> None:
+        """Test hook: shift this peer's local clock by `skew_us`."""
+        self._inner.set_clock_skew_us(skew_us)
 
     def set_e2ee_key(self, key: bytes) -> None:
         """Set a shared E2EE key. Both peers must call this with the same key
@@ -1150,6 +1156,21 @@ class Portal:
         """
         self._dispatcher.set_active_operator_changed(callback)
 
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock. On the robot this is its
+        own clock; before the first sync it is local time. Never repeats and
+        never goes backwards.
+        """
+        return self._inner.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each
+        resync. Runs on this Portal's asyncio loop.
+        """
+        self._dispatcher.set_time_synced(callback)
+
     def register_rpc_method(
         self,
         method: str,
@@ -1299,11 +1320,6 @@ class _RoleConfigBase:
         return self._inner.tolerance()
 
     @property
-    def ping_ms(self) -> int:
-        """RTT ping cadence in milliseconds; `0` means active pinging is off."""
-        return self._inner.ping_ms()
-
-    @property
     def state_reliable(self) -> bool:
         """Whether state packets go out on the reliable channel."""
         return self._inner.state_reliable()
@@ -1379,8 +1395,9 @@ class _RoleConfigBase:
     def set_action_reliable(self, reliable: bool) -> None:
         self._inner.set_action_reliable(reliable)
 
-    def set_ping_ms(self, ms: int) -> None:
-        self._inner.set_ping_ms(ms)
+    def _set_clock_skew_us(self, skew_us: int) -> None:
+        """Test hook: shift this peer's local clock by `skew_us`."""
+        self._inner.set_clock_skew_us(skew_us)
 
     def set_e2ee_key(self, key: bytes) -> None:
         self._inner.set_e2ee_key(bytes(key))
@@ -1557,6 +1574,16 @@ class Robot:
     ) -> None:
         self._portal.on_active_operator_changed(callback)
 
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock."""
+        return self._portal.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each resync."""
+        self._portal.on_time_synced(callback)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -1708,6 +1735,16 @@ class Operator:
     ) -> None:
         self._portal.on_active_operator_changed(callback)
 
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock."""
+        return self._portal.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each resync."""
+        self._portal.on_time_synced(callback)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -1766,6 +1803,7 @@ __all__ = [
     "TransportMetrics",
     "BufferMetrics",
     "RttMetrics",
+    "TimeSyncMetrics",
     "PolicyMetrics",
     "PortalError",
     "ConfigFileError",

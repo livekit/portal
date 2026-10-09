@@ -23,6 +23,9 @@ use crate::dtype::DType;
 pub enum Role {
     Robot,
     Operator,
+    /// Sees everything in the room but never sends state or actions. It
+    /// records, or orchestrates by handing control between operators.
+    Observer,
 }
 
 /// A value received on the wire, reconstructed to its declared dtype.

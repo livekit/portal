@@ -715,6 +715,31 @@ op.metrics() / op.reset_metrics()
 await op.connect(url, token) / await op.disconnect() / op.close()
 ```
 
+**Observer**
+
+```text
+# data: receive only, raw
+obs.on_state(cb) / obs.on_video_frame(track, cb)
+obs.on_action(cb) / obs.get_action()         # default subscription: "active"
+obs.get_state() / obs.get_video_frame(track)
+obs.on_observation(cb) / obs.get_observation()   # only with set_observation_sync(True)
+obs.send_action(...) / obs.send_state(...)   # always raise PortalError.WrongRole
+
+# control plane
+obs.active_operator() / await obs.set_active_operator(identity)   # None takes control from everyone
+obs.operators() / obs.observers() / obs.robot_identity() / obs.local_identity()
+obs.on_operator_joined(cb) / obs.on_operator_left(cb)
+obs.on_active_operator_changed(cb)
+
+# time sync, rpc, metrics, lifecycle: as on the operator
+```
+
+`ObserverConfig` has the same declarative surface as `OperatorConfig` but
+defaults to `set_action_subscription("active")` and observation sync off. The
+robot accepts `set_active_operator` from operators and observers, and every
+role has `observers()`, listed apart from `operators()` so the latter only
+holds peers that can drive.
+
 ## Using `Portal` directly
 
 `Robot` and `Operator` are facades over a unified `Portal` class, which is also

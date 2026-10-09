@@ -145,7 +145,8 @@ Set `response_timeout_ms` to bound a slow handler.
 ## The one reserved method
 
 Portal reserves `portal.set_active_operator`. It is registered on the robot and
-is how an operator asks the robot to move the active-operator pointer.
+is how an operator or observer asks the robot to move the active-operator
+pointer. Calls from anyone else are refused.
 
 Call `set_active_operator(...)` instead of invoking it by name. The high-level
 method handles the payload format and the robot-side attribute write for you.

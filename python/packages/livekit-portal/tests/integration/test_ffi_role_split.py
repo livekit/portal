@@ -51,7 +51,6 @@ class _Recorder(ffi.PortalCallbacks):
         self.states: list = []
         self.observations: list = []
         self.frames: list = []
-        self.chunks: list = []
         self.active_changes: list = []
 
     def on_action(self, action) -> None:
@@ -68,9 +67,6 @@ class _Recorder(ffi.PortalCallbacks):
 
     def on_drop(self, dropped) -> None:
         pass
-
-    def on_action_chunk(self, chunk) -> None:
-        self.chunks.append(chunk)
 
     def on_operator_joined(self, identity) -> None:
         pass

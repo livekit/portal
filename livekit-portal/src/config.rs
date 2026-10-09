@@ -124,30 +124,6 @@ impl VideoTrackSpec {
     }
 }
 
-/// Schema for one named action chunk: a fixed-horizon batch of per-field
-/// values that the operator publishes as a single packet.
-///
-/// Equivalent to a `[horizon, fields.len()]` tensor with per-field dtype.
-/// Multiple chunks can be declared on a Portal — each is dispatched to the
-/// right callback by its own schema fingerprint, so chunk names are unique
-/// per Portal but cross-Portal collisions are impossible by construction.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChunkSpec {
-    pub name: String,
-    pub horizon: u32,
-    pub fields: Vec<FieldSpec>,
-}
-
-impl ChunkSpec {
-    pub fn new(
-        name: impl Into<String>,
-        horizon: u32,
-        fields: impl IntoIterator<Item = impl Into<FieldSpec>>,
-    ) -> Self {
-        Self { name: name.into(), horizon, fields: fields.into_iter().map(Into::into).collect() }
-    }
-}
-
 /// Configuration for a Portal session. Built incrementally before connecting.
 #[derive(Debug, Clone)]
 pub struct PortalConfig {
@@ -159,7 +135,6 @@ pub struct PortalConfig {
     pub(crate) video_tracks: Vec<VideoTrackSpec>,
     pub(crate) state_schema: Vec<FieldSpec>,
     pub(crate) action_schema: Vec<FieldSpec>,
-    pub(crate) action_chunks: Vec<ChunkSpec>,
     pub(crate) state_reliable: bool,
     pub(crate) action_reliable: bool,
     pub(crate) fps: u32,
@@ -186,9 +161,7 @@ pub struct PortalConfig {
     ///   * `(Role::Operator, ACTION_TOPIC)` packets are deserialized and
     ///     fired through `on_action` / `get_action`, gated by
     ///     `sender == active_operator` (same gate the robot applies)
-    ///   * `(Role::Operator, ACTION_CHUNK_TOPIC)` byte streams are read
-    ///     and fired through `on_action_chunk` / `get_action_chunk`
-    ///   * `send_action` / `send_action_chunk` echo a local copy after
+    ///   * `send_action` echoes a local copy after
     ///     publish when `local_identity == active_operator`, since
     ///     LiveKit does not fan out a publisher's own data packets
     pub(crate) action_subscription: bool,
@@ -202,7 +175,6 @@ impl PortalConfig {
             video_tracks: Vec::new(),
             state_schema: Vec::new(),
             action_schema: Vec::new(),
-            action_chunks: Vec::new(),
             state_reliable: true,
             action_reliable: true,
             fps: 30,
@@ -220,7 +192,7 @@ impl PortalConfig {
     }
 
     /// Operator-side opt-in for receiving executed actions. Off by default.
-    /// When on, the operator subscribes to actions and chunks from the
+    /// When on, the operator subscribes to actions from the
     /// active operator and gets a local echo of its own sends when active.
     /// Used by recorders, shadow eval policies, and monitoring UIs.
     /// No-op on the Robot side — the robot always processes actions.
@@ -355,31 +327,6 @@ impl PortalConfig {
         I: IntoIterator<Item = F>,
     {
         self.action_schema.extend(schema.into_iter().map(Into::into));
-    }
-
-    /// Declare an action chunk: a named, fixed-horizon batch of typed
-    /// per-field values published as one packet. Multiple chunks can be
-    /// declared. Names must be unique within a Portal — a duplicate panics
-    /// at config time so the bug doesn't surface as a silent late-bind
-    /// dispatch ambiguity at receive time.
-    ///
-    /// Use this in place of repeated `send_action` calls when a policy
-    /// emits a horizon of future actions per inference step (the standard
-    /// VLA shape).
-    pub fn add_action_chunk(
-        &mut self,
-        name: impl Into<String>,
-        horizon: u32,
-        fields: impl IntoIterator<Item = impl Into<FieldSpec>>,
-    ) {
-        assert!(horizon > 0, "action chunk horizon must be > 0");
-        let spec = ChunkSpec::new(name, horizon, fields);
-        assert!(
-            !self.action_chunks.iter().any(|c| c.name == spec.name),
-            "duplicate action chunk name '{}'",
-            spec.name
-        );
-        self.action_chunks.push(spec);
     }
 
     /// Unified observation rate (set to the video capture rate if state and
@@ -609,11 +556,6 @@ impl PortalConfig {
     /// Full action schema.
     pub fn action_schema(&self) -> &[FieldSpec] {
         &self.action_schema
-    }
-
-    /// All declared action chunks.
-    pub fn action_chunks(&self) -> &[ChunkSpec] {
-        &self.action_chunks
     }
 
     /// Session name this config was built for.

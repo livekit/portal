@@ -1,7 +1,7 @@
 [project]
 name = "livekit-portal-inference-example"
 version = "0.1.0"
-description = "VLA-style remote inference: action chunks + observation-correlated actions over LiveKit Portal"
+description = "VLA-style remote inference: observation-correlated actions over LiveKit Portal"
 requires-python = ">=3.12"
 dependencies = [
     "livekit-portal",

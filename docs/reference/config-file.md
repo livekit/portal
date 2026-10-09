@@ -123,14 +123,6 @@ action:
   - { name: joint_pos, dtype: f32 }
   - { name: gripper, dtype: bool }
   - { name: mode, dtype: i8 }
-
-# VLA-style fixed-horizon batched actions
-action_chunks:
-  - name: vla
-    horizon: 16
-    fields:
-      - { name: joint_pos, dtype: f32 }
-      - { name: gripper, dtype: bool }
 ```
 
 ## Top level
@@ -151,7 +143,6 @@ action_chunks:
 | `videos` | list | `[]` | Declared video tracks. |
 | `state` | list | `[]` | Declared state schema. |
 | `action` | list | `[]` | Declared action schema. |
-| `action_chunks` | list | `[]` | Declared action chunks. |
 
 Anything else at the top level is a hard error. The loader uses
 `deny_unknown_fields` at every level, so a misspelled `tolarance: 1.5` raises
@@ -226,44 +217,6 @@ any rename, reorder, or dtype change drops packets at the receiver with a
 Values cast to and from the declared dtype at the wire boundary. Integer overflow
 saturates, so `mode: 500` into an `i8` arrives as `127`.
 
-## `action_chunks`
-
-A chunk is a fixed-horizon batch of typed per-field values, published as one
-payload. This is the natural shape for a VLA policy that emits several future
-timesteps per inference.
-
-```yaml
-action_chunks:
-  - name: vla
-    horizon: 16
-    fields:
-      - { name: joint_pos, dtype: f32 }
-      - { name: gripper,   dtype: bool }
-  - name: pose_targets
-    horizon: 4
-    fields:
-      - { name: x,   dtype: f32 }
-      - { name: y,   dtype: f32 }
-      - { name: yaw, dtype: f32 }
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Chunk name. Unique within this file. |
-| `horizon` | int | Timesteps per published chunk. Must be greater than `0`. |
-| `fields` | list | Per-field schema, same shape as `state` and `action`. |
-
-Multiple chunks are allowed. Each is dispatched to its own callback by schema
-fingerprint, and the fingerprint mixes in the name and horizon, so two chunks
-cannot collide.
-
-These dtypes do more than fix the wire width. Received columns arrive as NumPy
-arrays already in the declared dtype, and outgoing columns are type-checked
-against it. See [Action chunks](../03-portal-api.md#action-chunks).
-
-Chunks travel as byte streams rather than data packets, so a full horizon is not
-bounded by the 15 KB packet limit.
-
 ## What is deliberately not in the file
 
 Three things must be supplied at load time or set afterwards.
@@ -308,14 +261,13 @@ The loader produces the same config you would build by hand.
 | `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=...)` |
 | `state[]` | `cfg.add_state_typed([...])` |
 | `action[]` | `cfg.add_action_typed([...])` |
-| `action_chunks[]` | `cfg.add_action_chunk(name, horizon, fields)` |
 
 Two configs built from the same YAML and from the matching code are observably
 identical: same fingerprints, same registered tracks, same sync config.
 
 ## Errors
 
-`ConfigFileError` has four variants.
+`ConfigFileError` variants:
 
 | Variant | Raised when |
 |---|---|
@@ -324,10 +276,10 @@ identical: same fingerprints, same registered tracks, same sync config.
 | `Invalid` | Pre-flight validation failure. See the list below. |
 | `Io` | `from_yaml_file` only. The file could not be opened. |
 
-`Invalid` covers duplicate track names, duplicate chunk names, `horizon: 0`,
-MJPEG quality outside `1..=100`, `max_bitrate_kbps` on a byte-stream codec or set
-to zero, `simulcast` or `screencast` on a byte-stream codec, and `fps`, `slack`,
-or `tolerance` at zero or negative.
+`Invalid` covers duplicate track names, MJPEG quality outside `1..=100`,
+`max_bitrate_kbps` on a byte-stream codec or set to zero, `simulcast` or
+`screencast` on a byte-stream codec, and `fps`, `slack`, or `tolerance` at zero
+or negative.
 
 ```python
 from livekit.portal import ConfigFileError, RobotConfig
@@ -420,16 +372,6 @@ videos:
 ```
 
 Raises `Invalid`. The range is `1..=100`, and omitting `quality` gives you `90`.
-
-**A zero horizon.**
-
-```yaml
-version: 1
-action_chunks:
-  - { name: vla, horizon: 0, fields: [{ name: x, dtype: f32 }] }
-```
-
-Raises `Invalid("action chunk 'vla' horizon must be > 0")`.
 
 **A future file format.**
 

@@ -97,10 +97,9 @@ continuous across the cutover.
 `set_action_subscription(True)` and receives every executed action, labeled with
 `action.sender` and paired with its observation. About 50 lines.
 
-**Built for VLA inference.** Action chunks ship a `(horizon, n_fields)` tensor in
-one payload over a byte stream, with no 15 KB cap. Stamp actions with
-`in_reply_to_ts_us` and `metrics.policy.e2e_us_p95` gives you true
-observation-to-action latency rather than ping.
+**Built for VLA inference.** Stamp actions with `in_reply_to_ts_us` and
+`metrics.policy.e2e_us_p95` gives you true observation-to-action latency rather
+than ping.
 
 **Pixel-exact video when you need it.** WebRTC video is lossy and resamples
 colorspace. For inference where pixels matter, pass `RAW`, `PNG`, or `MJPEG` to
@@ -161,7 +160,7 @@ under [`examples/python/`](examples/python).
 | Example | Hardware | What it shows |
 |---|---|---|
 | [`basic/`](examples/python/basic) | none | The whole API end to end, with synthetic video. Also ships a YAML-config variant. Start here. |
-| [`inference/`](examples/python/inference) | none | A VLA-shaped loop using action chunks and true end-to-end latency metrics. |
+| [`inference/`](examples/python/inference) | none | A VLA-shaped loop that plans a horizon and streams one action per tick, with true end-to-end latency metrics. |
 | [`modal-mock-inference/`](examples/python/modal-mock-inference) | none | Runs the policy on [Modal](https://modal.com) and measures real glass-to-glass latency with a QR clock. |
 | [`so101/`](examples/python/so101) | 2x SO-101 | A physical SO-101 follower driven by a remote SO-101 leader, rendered in [rerun](https://rerun.io). |
 

@@ -30,9 +30,7 @@ pub mod types;
 mod video;
 
 pub use codec::Codec;
-pub use config::{
-    ChunkSpec, DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, VideoTrackSpec,
-};
+pub use config::{DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, VideoTrackSpec};
 pub use config_file::ConfigFileError;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
@@ -40,9 +38,12 @@ pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TransportMetrics,
 };
-pub use portal::{ACTIVE_OPERATOR_ATTR_KEY, Portal, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC};
+pub use portal::{
+    ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, Portal, ROLE_ATTR_KEY,
+    SET_ACTIVE_OPERATOR_RPC,
+};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
-    Action, ActionChunk, ChunkColumn, FrameSource, Observation, Role, StallBehavior, StallConfig,
-    State, SyncConfig, TypedValue, VideoFrameData,
+    Action, FrameSource, Observation, Role, StallBehavior, StallConfig, State, SyncConfig,
+    TypedValue, VideoFrameData,
 };

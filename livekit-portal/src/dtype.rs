@@ -36,7 +36,7 @@ pub enum DType {
 impl DType {
     /// Stable variant name, for error messages. Matches the `TypedValue`
     /// variant that carries this dtype so `DtypeMismatch` reads the same
-    /// whether it came from a scalar value or a chunk column.
+    /// as the value that was sent.
     pub fn variant_name(self) -> &'static str {
         match self {
             DType::F64 => "F64",
@@ -202,8 +202,8 @@ mod tests {
 
     #[test]
     fn f64_roundtrip() {
-        let (v, sat) = encode_decode(DType::F64, 3.14159265358979);
-        assert_eq!(v, 3.14159265358979);
+        let (v, sat) = encode_decode(DType::F64, std::f64::consts::PI);
+        assert_eq!(v, std::f64::consts::PI);
         assert!(!sat);
     }
 

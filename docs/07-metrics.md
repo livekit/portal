@@ -99,12 +99,9 @@ dicts keyed by track name.
 | `states_received` | `int` | State packets arrived. |
 | `actions_sent` | `int` | Action packets published. |
 | `actions_received` | `int` | Action packets arrived. |
-| `action_chunks_sent` | `int` | Chunk byte streams published. |
-| `action_chunks_received` | `int` | Chunk byte streams arrived. |
 | `frame_jitter_us` | `dict[str, int]` | Inter-arrival jitter per video track. |
 | `state_jitter_us` | `int` | Inter-arrival jitter for state. |
 | `action_jitter_us` | `int` | Inter-arrival jitter for actions. |
-| `action_chunk_jitter_us` | `int` | Inter-arrival jitter for chunks. |
 
 **`bytes_sent` and `bytes_received` cover frame-video tracks only.** WebRTC
 frames are encoded by libwebrtc inside its own transport, so Portal cannot
@@ -180,7 +177,7 @@ correlated actions, which is normally the robot.
 |---|---|---|
 | `e2e_us_p50` | `int \| None` | Median observation-to-action latency. |
 | `e2e_us_p95` | `int \| None` | 95th percentile of the same. |
-| `correlated_received` | `int` | Actions and chunks that carried a correlation stamp. |
+| `correlated_received` | `int` | Actions that carried a correlation stamp. |
 
 This measures from the observation timestamp the operator correlated against to
 the local receive time of the resulting action. It therefore includes the

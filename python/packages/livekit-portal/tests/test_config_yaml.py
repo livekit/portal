@@ -51,7 +51,7 @@ YAML_FULL = textwrap.dedent(
     ping_ms: 500
     action_subscription: true
     videos:
-      - { name: front, codec: h264 }
+      - { name: front, codec: h264, width: 1280, height: 720 }
       - { name: wrist, codec: mjpeg, quality: 80 }
       - { name: depth, codec: png }
     state:
@@ -100,7 +100,7 @@ def test_yaml_and_programmatic_builds_agree():
     from_yaml = PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT)
 
     built = PortalConfig("demo", Role.ROBOT)
-    built.add_video("front")
+    built.add_video("front", width=1280, height=720)
     built.add_video("wrist", VideoCodec.MJPEG, 80)
     built.add_video("depth", VideoCodec.PNG)
 

@@ -205,8 +205,8 @@ pub struct FieldSpec {
 /// One record for every track regardless of transport, mirroring the core
 /// `VideoTrackSpec` — `codec` says which transport it rides and therefore
 /// which options apply. `quality` is meaningful for `VideoCodec.Mjpeg`
-/// (1..=100); `max_bitrate_kbps`, `simulcast` and `screencast` are
-/// meaningful for the WebRTC codecs. Each is ignored by the other transport
+/// (1..=100); `max_bitrate_kbps`, `simulcast`, `screencast`, `width` and
+/// `height` are meaningful for the WebRTC codecs. Each is ignored by the other transport
 /// — the YAML loader rejects a mismatched option outright, while `add_video`
 /// accepts and ignores it, so a spec may carry a value its codec never
 /// reads. `quality` is the exception: it reads back as `0` on every codec
@@ -219,6 +219,10 @@ pub struct VideoTrackSpec {
     pub max_bitrate_kbps: Option<u32>,
     pub simulcast: bool,
     pub screencast: bool,
+    /// Frame size the encoder is set up for. Both are set or neither is;
+    /// neither means 640x480.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
@@ -229,6 +233,8 @@ fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
         max_bitrate_kbps: s.max_bitrate_kbps,
         simulcast: s.simulcast,
         screencast: s.screencast,
+        width: s.resolution.map(|r| r.width),
+        height: s.resolution.map(|r| r.height),
     }
 }
 
@@ -700,6 +706,9 @@ impl PortalConfig {
     /// source as screen content, which pins the resolution and drops frames
     /// under CPU or bandwidth pressure instead of rescaling the frame. Both
     /// apply to the WebRTC codecs only and default to `false`.
+    /// `width` and `height` are the frame size the WebRTC encoder is set up
+    /// for, given together; both `None` means 640x480. See
+    /// `core::PortalConfig::add_video`.
     /// `stall_behavior` and `max_lag_ms` are per-track overrides of
     /// [`set_stall_behavior`] / [`set_max_lag_ms`], applied at the declaration
     /// site so a track's whole configuration reads in one place. `None` on
@@ -716,9 +725,18 @@ impl PortalConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
+        let resolution = match (width, height) {
+            (Some(width), Some(height)) => Some(core::Resolution { width, height }),
+            (None, None) => None,
+            _ => panic!("width and height must be given together"),
+        };
+        let options =
+            core::VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution };
         let mut cfg = self.inner.lock();
-        cfg.add_video(name.clone(), codec.into(), quality, max_bitrate_kbps, simulcast, screencast);
+        cfg.add_video(name.clone(), codec.into(), options);
         if let Some(b) = stall_behavior {
             cfg.set_track_stall_behavior(name.clone(), b.into());
         }
@@ -1270,6 +1288,8 @@ impl RobotConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -1280,6 +1300,8 @@ impl RobotConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 
@@ -1464,6 +1486,8 @@ impl OperatorConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -1474,6 +1498,8 @@ impl OperatorConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 

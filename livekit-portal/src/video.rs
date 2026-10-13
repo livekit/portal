@@ -32,7 +32,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::codec::Codec;
-use crate::config::DEFAULT_H264_MAX_BITRATE_KBPS;
+use crate::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
 use crate::error::{PortalError, PortalResult};
 use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
@@ -71,17 +71,18 @@ fn webrtc_video_codec(codec: Codec) -> VideoCodec {
     }
 }
 
+pub(crate) struct VideoPublisherOptions<'a> {
+    pub spec: &'a VideoTrackSpec,
+    pub metrics: Arc<TrackMetrics>,
+    pub fps: u32,
+}
+
 impl VideoPublisher {
-    pub fn new(
-        name: &str,
-        metrics: Arc<TrackMetrics>,
-        fps: u32,
-        codec: Codec,
-        max_bitrate_kbps: Option<u32>,
-        simulcast: bool,
-        screencast: bool,
-    ) -> Self {
-        let resolution = VideoResolution { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+    pub fn new(options: VideoPublisherOptions<'_>) -> Self {
+        let VideoPublisherOptions { spec, metrics, fps } = options;
+        let Resolution { width, height } =
+            spec.resolution.unwrap_or(Resolution { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
+        let resolution = VideoResolution { width, height };
         // `screencast` is libwebrtc's content-type hint, and it is the only
         // handle the SDK gives us on degradation preference (there is no
         // `degradation_preference` field on `TrackPublishOptions`). Camera
@@ -90,10 +91,18 @@ impl VideoPublisher {
         // encoder, so subscribers see the resolution shift mid-session.
         // Screen content (`true`) means `MAINTAIN_RESOLUTION`, which pins the
         // geometry and sheds frames instead.
-        let source = NativeVideoSource::new(resolution, screencast);
+        let source = NativeVideoSource::new(resolution, spec.screencast);
         let rtc_source = RtcVideoSource::Native(source.clone());
-        let track = LocalVideoTrack::create_video_track(name, rtc_source);
-        Self { source, track, metrics, fps, codec, max_bitrate_kbps, simulcast }
+        let track = LocalVideoTrack::create_video_track(&spec.name, rtc_source);
+        Self {
+            source,
+            track,
+            metrics,
+            fps,
+            codec: spec.codec,
+            max_bitrate_kbps: spec.max_bitrate_kbps,
+            simulcast: spec.simulcast,
+        }
     }
 
     pub async fn publish(&self, local_participant: &LocalParticipant) -> PortalResult<()> {

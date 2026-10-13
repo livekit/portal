@@ -120,7 +120,7 @@ role-specific is a no-op on the wrong side.
 
 | Method | Default | What it does |
 |---|---|---|
-| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
 | `add_action_chunk(name, horizon, [(name, dtype), ...])` | none | Declare a fixed-horizon action batch. Fields are typed, same as the state and action schemas. |
@@ -560,6 +560,24 @@ confirm before relying on either.
 
 `max_bitrate_kbps` is a ceiling, not a target. libwebrtc still picks a lower
 operating bitrate from the content. Omit it for the 10 Mbps default.
+
+#### Frame size
+
+Pass `width` and `height` when you send frames larger than 640x480 on a WebRTC
+track.
+
+```python
+cfg.add_video("front", width=1280, height=720)
+```
+
+libwebrtc sets up the encoder when the track is published, before the first
+frame exists, so Portal has to tell it the frame size up front. Without
+`width` and `height` it sets the encoder up for 640x480. Larger frames still
+go out, but with added latency: tens of milliseconds with H.264 at 720p and
+above.
+
+Give both or neither, and both must be even. They are keyword-only and apply
+to the WebRTC codecs only.
 
 #### Simulcast and screencast
 

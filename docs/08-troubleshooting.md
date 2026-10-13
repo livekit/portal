@@ -147,6 +147,16 @@ is not network. Compare the remainder against your inference time. Frame video
 adds a per-chunk floor on top, covered in
 [Frame video](05-frame-video.md#the-latency-floor).
 
+On a WebRTC track sending frames larger than 640x480, pass the frame size to
+`add_video`. Without it the encoder is set up for 640x480, which adds tens of
+milliseconds at 720p and above with H.264:
+
+```python
+cfg.add_video("front", width=1280, height=720)
+```
+
+See [Frame size](03-portal-api.md#frame-size).
+
 ### Frames arrive at a resolution that changes mid-session
 
 This is libwebrtc adapting, not Portal resizing anything. On the WebRTC codecs

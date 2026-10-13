@@ -14,7 +14,7 @@ thiserror = "2"
 tokio = "1"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 debug = false

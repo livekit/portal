@@ -1036,13 +1036,13 @@ impl Portal {
     pub fn send_video_frame(
         &self,
         track_name: String,
-        rgb_data: Vec<u8>,
+        rgb_data: &[u8],
         width: u32,
         height: u32,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
         self.inner
-            .send_video_frame(&track_name, &rgb_data, width, height, timestamp_us)
+            .send_video_frame(&track_name, rgb_data, width, height, timestamp_us)
             .map_err(Into::into)
     }
 
@@ -1650,7 +1650,7 @@ impl Robot {
     pub fn send_video_frame(
         &self,
         track_name: String,
-        rgb_data: Vec<u8>,
+        rgb_data: &[u8],
         width: u32,
         height: u32,
         timestamp_us: Option<u64>,

@@ -33,7 +33,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::codec::Codec;
-use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig};
+use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig, Resolution, VideoOptions};
 use crate::dtype::DType;
 use crate::types::{ActionSubscription, Role, StallBehavior, TimeSyncSource};
 
@@ -185,6 +185,12 @@ struct VideoEntry {
     /// Defaults to `false`.
     #[serde(default)]
     screencast: Option<bool>,
+    /// Frame size the encoder is set up for, given together with `height`.
+    /// WebRTC codecs only. Omit for 640x480.
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,7 +284,16 @@ impl PortalConfig {
                 Codec::Mjpeg => DEFAULT_MJPEG_QUALITY,
                 _ => 0,
             });
-            cfg.add_video(&v.name, v.codec, quality, v.max_bitrate_kbps, v.simulcast, v.screencast);
+            let resolution =
+                v.width.zip(v.height).map(|(width, height)| Resolution { width, height });
+            let options = VideoOptions {
+                quality,
+                max_bitrate_kbps: v.max_bitrate_kbps,
+                simulcast: v.simulcast,
+                screencast: v.screencast,
+                resolution,
+            };
+            cfg.add_video(&v.name, v.codec, options);
         }
 
         if !parsed.state.is_empty() {
@@ -387,6 +402,33 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
                 return Err(ConfigFileError::Invalid(format!(
                     "video '{}': {field} applies to the WebRTC codecs only, not {:?}",
                     v.name, v.codec
+                )));
+            }
+        }
+        match (v.width, v.height) {
+            (None, None) => {}
+            (Some(width), Some(height)) => {
+                if !v.codec.is_webrtc() {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "video '{}': width and height apply to the WebRTC codecs only, not {:?}",
+                        v.name, v.codec
+                    )));
+                }
+                if width == 0
+                    || height == 0
+                    || !width.is_multiple_of(2)
+                    || !height.is_multiple_of(2)
+                {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "video '{}': width and height must be even and non-zero, got {width}x{height}",
+                        v.name
+                    )));
+                }
+            }
+            _ => {
+                return Err(ConfigFileError::Invalid(format!(
+                    "video '{}': width and height must be given together",
+                    v.name
                 )));
             }
         }
@@ -638,6 +680,37 @@ videos:
         match err {
             ConfigFileError::Invalid(msg) => assert!(msg.contains("screencast")),
             other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolution_parsed_and_defaults_to_none() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: a, codec: h264, width: 1280, height: 720 }
+  - { name: b, codec: vp8 }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        let t = cfg.video_tracks();
+        assert_eq!(t[0].resolution, Some(Resolution { width: 1280, height: 720 }));
+        assert_eq!(t[1].resolution, None);
+    }
+
+    #[test]
+    fn invalid_resolution_rejected() {
+        for (entry, needle) in [
+            ("{ name: cam, codec: h264, width: 1280 }", "together"),
+            ("{ name: cam, codec: h264, height: 720 }", "together"),
+            ("{ name: cam, codec: h264, width: 1279, height: 720 }", "even"),
+            ("{ name: cam, codec: h264, width: 0, height: 720 }", "even"),
+            ("{ name: cam, codec: mjpeg, width: 1280, height: 720 }", "WebRTC"),
+        ] {
+            let yaml = format!("version: 1\nvideos:\n  - {entry}\n");
+            match PortalConfig::from_yaml_str(&yaml, "demo", Role::Robot).unwrap_err() {
+                ConfigFileError::Invalid(msg) => assert!(msg.contains(needle), "{entry}: {msg}"),
+                other => panic!("expected Invalid, got {other:?}"),
+            }
         }
     }
 

@@ -38,7 +38,7 @@ use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
 use crate::serialization::{action_fingerprint, schema_fingerprint};
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
 use crate::types::*;
-use crate::video::{VideoPublisher, VideoReceiver, VideoTrackSlots};
+use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver, VideoTrackSlots};
 
 /// Participant attribute keys used by Portal for role discovery and the
 /// multi-controller pointer. Namespaced to avoid colliding with any
@@ -1183,15 +1183,11 @@ impl Portal {
             let track_name = &spec.name;
             let track_metrics =
                 self.metrics.track(track_name).expect("track metrics registered at construction");
-            let publisher = VideoPublisher::new(
-                track_name,
-                track_metrics,
-                self.config.fps,
-                spec.codec,
-                spec.max_bitrate_kbps,
-                spec.simulcast,
-                spec.screencast,
-            );
+            let publisher = VideoPublisher::new(VideoPublisherOptions {
+                spec,
+                metrics: track_metrics,
+                fps: self.config.fps,
+            });
             if let Err(e) = publisher.publish(&lp).await {
                 // Roll back any earlier publishers so their send tasks stop
                 // and connect() leaves Portal in a clean state.

@@ -257,6 +257,9 @@ impl FrameVideoPublisher {
     ) -> Self {
         let pending = Arc::new(PendingFrame::default());
         let track_name = spec.name.clone();
+        // MJPEG and PNG are already compressed, so deflating them only costs
+        // CPU. Raw usually shrinks enough to be worth it on a slow link.
+        let compress = spec.codec == Codec::Raw;
         let slot = pending.clone();
         let task_metrics = metrics.clone();
         let task = tokio::spawn(async move {
@@ -264,10 +267,8 @@ impl FrameVideoPublisher {
                 slot.ready.notified().await;
                 let Some(payload) = slot.frame.lock().take() else { continue };
                 task_metrics.record_sent_bytes(payload.len());
-                // The codecs are already compressed or, for Raw, too large to
-                // deflate inline without stalling the stream.
                 let options =
-                    StreamByteOptions::new_with_topic(FRAME_VIDEO_TOPIC).with_compress(false);
+                    StreamByteOptions::new_with_topic(FRAME_VIDEO_TOPIC).with_compress(compress);
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
                     log::warn!(
                         "[publish-failed] frame_video '{track_name}' byte stream failed: {e}"

@@ -124,8 +124,8 @@ so a slow link costs frame rate instead of latency.
 | PNG 720p | 4.1 | 336 | 8 |
 | PNG 1080p | 9.1 | 511 | 4 |
 | Raw 480p | 0.1 | 274 | 13 |
-| Raw 720p | 0.5 | 443 | 4 |
-| Raw 1080p | 1.0 | 754 | 2 |
+| Raw 720p | 0.5 | 282 | 4 |
+| Raw 1080p | 1.0 | 699 | 2 |
 
 MJPEG encodes with the libjpeg-turbo inside libwebrtc, at 4:4:4. It holds 30 fps
 through 720p. For PNG and Raw above 480p, use a WebRTC codec,
@@ -144,7 +144,7 @@ runs above.
 | AV1 1080p | 28 ms | 0.8 ms | 106 ms | 66 ms |
 | MJPEG 1080p | 64 ms | 6.4 ms | 150 ms | 253 ms |
 | PNG 720p | 38 ms | 4.1 ms | 8318 ms | 336 ms |
-| Raw 1080p | 31 ms | 1.0 ms | 12815 ms | 754 ms |
+| Raw 1080p | 31 ms | 1.0 ms | 12815 ms | 699 ms |
 
 The send call got cheaper from building the library at `opt-level = 3` instead
 of `"z"` and from passing frames into Rust without a copy. Frame-video latency

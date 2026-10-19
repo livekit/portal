@@ -203,6 +203,32 @@ async def test_observation_emits_for_frame_video_track(pair):
     assert o.frames["cam"].width == 16
 
 
+async def test_frames_cross_the_ffi_only_for_registered_tracks(pair):
+    """Each frame that crosses into Python is a full copy, so a track nobody
+    listens to must not cross at all, and neither must observations."""
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        cfg.add_video("watched", codec=VideoCodec.RAW)
+        cfg.add_video("ignored", codec=VideoCodec.RAW)
+    await pair.start()
+    dispatcher = pair.operator._portal._dispatcher
+    crossed: list[str] = []
+    real_frame = dispatcher.on_video_frame
+    real_observation = dispatcher.on_observation
+    dispatcher.on_video_frame = lambda name, f: (crossed.append(name), real_frame(name, f))
+    dispatcher.on_observation = lambda o: (crossed.append("observation"), real_observation(o))
+    received: list[VideoFrameData] = []
+    pair.operator.on_video_frame("watched", lambda name, f: received.append(f))
+
+    ts = int(time.time() * 1_000_000)
+    for track in ("watched", "ignored"):
+        pair.robot.send_video_frame(track, _gradient(16, 16), timestamp_us=ts)
+    pair.robot.send_state({"j": 0.5}, timestamp_us=ts)
+    assert await wait_for(lambda: received)
+    await asyncio.sleep(SETTLE_S)
+
+    assert set(crossed) == {"watched"}, crossed
+
+
 async def test_mixed_transports_in_one_portal(pair):
     """A Portal can declare a webrtc track and a frame-video track at the
     same time. Both feed the sync buffer; observations include both

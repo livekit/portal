@@ -1207,6 +1207,7 @@ class Portal:
                 "set_observation_sync(True), or use on_state and on_video_frame"
             )
         self._dispatcher.set_observation(callback)
+        self._inner.set_observation_delivery(callback is not None)
 
     def on_video_frame(
         self,
@@ -1214,6 +1215,18 @@ class Portal:
         callback: Callable[[str, VideoFrameData], Any],
     ) -> None:
         self._dispatcher.set_video(track_name, callback)
+        self._sync_video_delivery(track_name)
+
+    def _set_tap(self, tap: Optional[Callable[[str, Any], None]]) -> None:
+        self._dispatcher.set_tap(tap)
+        for track in self._video_tracks:
+            self._sync_video_delivery(track)
+
+    def _sync_video_delivery(self, track_name: str) -> None:
+        # Frames cross the FFI only for a track someone listens to.
+        d = self._dispatcher
+        on = d._tap is not None or d._video_cbs.get(track_name) is not None
+        self._inner.set_video_delivery(track_name, on)
 
     def on_drop(
         self,
@@ -2150,7 +2163,7 @@ class Observer:
             )
         )
         self._recorder = recorder
-        portal._dispatcher.set_tap(recorder.enqueue)
+        portal._set_tap(recorder.enqueue)
 
     def stop_recording(self) -> None:
         """Stop feeding the sink, write what is already queued, and close it.
@@ -2158,7 +2171,7 @@ class Observer:
         recorder = self._recorder
         if recorder is None:
             return
-        self._portal._dispatcher.set_tap(None)
+        self._portal._set_tap(None)
         self._recorder = None
         recorder.stop()
 

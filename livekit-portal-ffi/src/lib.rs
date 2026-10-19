@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 
@@ -1005,6 +1006,11 @@ pub struct Portal {
     action_fields: Vec<String>,
     video_tracks: Vec<String>,
     video_track_specs: Vec<VideoTrackSpec>,
+    // Frames cross into the foreign side only once it listens: each crossing
+    // copies the whole frame, and an operator's observations carry one frame
+    // per track for every state sample.
+    observation_delivery: Arc<AtomicBool>,
+    video_delivery: Arc<HashMap<String, AtomicBool>>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -1043,11 +1049,17 @@ impl Portal {
                 timestamp_us: state.timestamp_us,
             });
         });
+        let observation_delivery = Arc::new(AtomicBool::new(false));
+        let video_delivery: Arc<HashMap<String, AtomicBool>> =
+            Arc::new(video_tracks.iter().map(|t| (t.clone(), AtomicBool::new(false))).collect());
         if inner.observation_sync() {
             let cb = callbacks.clone();
+            let on = observation_delivery.clone();
             inner
                 .on_observation(move |obs| {
-                    cb.on_observation(observation_from_core(obs));
+                    if on.load(Ordering::Relaxed) {
+                        cb.on_observation(observation_from_core(obs));
+                    }
                 })
                 .expect("observation sync is on");
         }
@@ -1068,8 +1080,12 @@ impl Portal {
         for track in &video_tracks {
             let cb = callbacks.clone();
             let track_name = track.clone();
+            let delivery = video_delivery.clone();
             inner.on_video_frame(track, move |_name, frame| {
-                cb.on_video_frame(track_name.clone(), frame_from_core(frame));
+                let on = delivery.get(&track_name).is_some_and(|d| d.load(Ordering::Relaxed));
+                if on {
+                    cb.on_video_frame(track_name.clone(), frame_from_core(frame));
+                }
             });
         }
 
@@ -1097,7 +1113,23 @@ impl Portal {
             action_fields,
             video_tracks,
             video_track_specs,
+            observation_delivery,
+            video_delivery,
         })
+    }
+
+    /// Whether observations reach `PortalCallbacks::on_observation`. Off
+    /// until the foreign side registers a callback.
+    pub fn set_observation_delivery(&self, on: bool) {
+        self.observation_delivery.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether frames on `track_name` reach `PortalCallbacks::on_video_frame`.
+    /// Off until the foreign side registers a callback or a recording tap.
+    pub fn set_video_delivery(&self, track_name: String, on: bool) {
+        if let Some(d) = self.video_delivery.get(&track_name) {
+            d.store(on, Ordering::Relaxed);
+        }
     }
 
     pub async fn connect(&self, url: String, token: String) -> PortalResult<()> {
@@ -1766,6 +1798,14 @@ impl Robot {
         self.inner.video_tracks()
     }
 
+    pub fn set_observation_delivery(&self, on: bool) {
+        self.inner.set_observation_delivery(on);
+    }
+
+    pub fn set_video_delivery(&self, track_name: String, on: bool) {
+        self.inner.set_video_delivery(track_name, on);
+    }
+
     pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
         self.inner.video_track_specs()
     }
@@ -1911,6 +1951,14 @@ impl Operator {
 
     pub fn video_tracks(&self) -> Vec<String> {
         self.inner.video_tracks()
+    }
+
+    pub fn set_observation_delivery(&self, on: bool) {
+        self.inner.set_observation_delivery(on);
+    }
+
+    pub fn set_video_delivery(&self, track_name: String, on: bool) {
+        self.inner.set_video_delivery(track_name, on);
     }
 
     pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
@@ -2250,6 +2298,14 @@ impl Observer {
 
     pub fn video_tracks(&self) -> Vec<String> {
         self.inner.video_tracks()
+    }
+
+    pub fn set_observation_delivery(&self, on: bool) {
+        self.inner.set_observation_delivery(on);
+    }
+
+    pub fn set_video_delivery(&self, track_name: String, on: bool) {
+        self.inner.set_video_delivery(track_name, on);
     }
 
     pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {

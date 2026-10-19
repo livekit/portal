@@ -48,6 +48,28 @@ struct DropWarn {
     last_log: Option<Instant>,
 }
 
+/// Holds a recurring warning to one line per `DROP_WARN_INTERVAL`. Logging
+/// only, like `DropWarn`.
+#[derive(Default)]
+struct LogThrottle {
+    last_log: Option<Instant>,
+    held_back: u64,
+}
+
+impl LogThrottle {
+    /// `Some(n)` when a warning is due, `n` being how many were held back
+    /// since the last one.
+    fn due(&mut self) -> Option<u64> {
+        let now = Instant::now();
+        if self.last_log.is_some_and(|t| now.duration_since(t) < DROP_WARN_INTERVAL) {
+            self.held_back += 1;
+            return None;
+        }
+        self.last_log = Some(now);
+        Some(std::mem::take(&mut self.held_back))
+    }
+}
+
 /// Result of a `push_frame` / `push_state` call. Callers dispatch these
 /// (invoke callbacks, enqueue into the pull-based buffer) *after* releasing
 /// the SyncBuffer lock so slow consumers don't stall the hot path.
@@ -138,11 +160,10 @@ pub(crate) struct SyncBuffer {
     // frame.
     last_emitted_frames: Vec<Option<Arc<VideoFrameData>>>,
 
-    // True when the previous push_state hit state-buffer overflow. Used to
-    // suppress the warn log on consecutive overflows so a sustained halt
-    // logs once per burst instead of once per state tick. Metrics still
-    // count every drop.
-    in_overflow_burst: bool,
+    // Overflow happens at the state or frame rate whenever one outpaces the
+    // other, so its warnings are throttled. Metrics still count every drop.
+    state_overflow_warn: LogThrottle,
+    video_overflow_warn: Vec<LogThrottle>,
 
     // Rate-limiter for the unsyncable-state drop warning. Logging only —
     // see `DropWarn`.
@@ -168,6 +189,7 @@ impl SyncBuffer {
             track_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
         let video_buffers = (0..track_names.len()).map(|_| VecDeque::new()).collect();
         let cursors = vec![0; track_names.len()];
+        let video_overflow_warn = (0..track_names.len()).map(|_| LogThrottle::default()).collect();
         let matched_scratch: Vec<Option<MatchSlot>> =
             (0..track_names.len()).map(|_| None).collect();
         let last_emitted_frames = vec![None; track_names.len()];
@@ -192,7 +214,8 @@ impl SyncBuffer {
             blocker: None,
             matched_scratch,
             last_emitted_frames,
-            in_overflow_burst: false,
+            state_overflow_warn: LogThrottle::default(),
+            video_overflow_warn,
             drop_warn: DropWarn::default(),
             metrics,
         }
@@ -317,7 +340,12 @@ impl SyncBuffer {
             if let Some(tm) = self.metrics.track(track_name) {
                 tm.record_evictions(evicted as u64);
             }
-            log::warn!("[video-overflow] '{track_name}' buffer full, evicted {evicted} frame(s)");
+            if let Some(held_back) = self.video_overflow_warn[idx].due() {
+                log::warn!(
+                    "[video-overflow] '{track_name}' buffer full, evicted {evicted} frame(s) \
+                     ({held_back} more evictions since the last warning)"
+                );
+            }
         }
 
         // Skip try_sync when this push cannot have changed head-state matchability:
@@ -353,20 +381,14 @@ impl SyncBuffer {
         }
         if !overflow_drops.is_empty() {
             self.metrics.record_state_dropped(overflow_drops.len() as u64);
-            // Log once per overflow burst so a sustained halt doesn't spam
-            // at the state tick rate. The `states_dropped` metric still
-            // reflects every drop.
-            if !self.in_overflow_burst {
+            if let Some(held_back) = self.state_overflow_warn.due() {
                 log::warn!(
-                    "[state-overflow] state buffer full ({}), dropped {} oldest. \
-                     Further drops in this burst won't be re-logged.",
+                    "[state-overflow] state buffer full ({}), dropped {} oldest \
+                     ({held_back} more overflows since the last warning)",
                     self.config.state_buffer_size,
                     overflow_drops.len(),
                 );
-                self.in_overflow_burst = true;
             }
-        } else {
-            self.in_overflow_burst = false;
         }
         // If eviction (or first-ever push) changed the head state, the old blocker
         // hint no longer applies.
@@ -397,7 +419,6 @@ impl SyncBuffer {
             *slot = None;
         }
         self.blocker = None;
-        self.in_overflow_burst = false;
         self.drop_warn = DropWarn::default();
     }
 
@@ -721,6 +742,17 @@ impl SyncBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflow_warnings_log_once_per_interval_with_a_count() {
+        let mut t = LogThrottle::default();
+        assert_eq!(t.due(), Some(0));
+        assert_eq!(t.due(), None);
+        assert_eq!(t.due(), None);
+        t.last_log = Some(Instant::now() - DROP_WARN_INTERVAL);
+        assert_eq!(t.due(), Some(2));
+        assert_eq!(t.due(), None);
+    }
 
     fn make_frame(track: &str, ts: u64) -> (String, Arc<VideoFrameData>) {
         (

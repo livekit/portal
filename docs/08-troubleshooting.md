@@ -255,12 +255,12 @@ See [Choosing `tolerance`](04-tuning.md#choosing-tolerance).
 ### state-overflow
 
 ```
-[state-overflow] state buffer full (5), dropped 2 oldest. Further drops in this burst won't be re-logged.
+[state-overflow] state buffer full (5), dropped 2 oldest (40 more overflows since the last warning)
 ```
 
 The state buffer hit its cap and shed its oldest entries. States piled up with no
-frame to match against, which usually means a video track stalled completely.
-Logs once per burst.
+frame to match against, which usually means a video track stalled completely, or
+state is published faster than the video frame rate. Logs at most once every 5 s.
 
 **Fix.** Raise `slack` to tolerate longer stalls, or lower `max_lag` so stuck
 moments resolve before they pile up. Set `stall_behavior` to `FREEZE` or `OMIT` if a
@@ -270,12 +270,12 @@ robot, not in the buffer.
 ### video-overflow
 
 ```
-[video-overflow] 'front' buffer full, evicted 3 frame(s)
+[video-overflow] 'front' buffer full, evicted 1 frame(s) (148 more evictions since the last warning)
 ```
 
 A video track's buffer hit its cap and dropped its oldest frames. This is normal
 when video arrives faster than state. The newest frames are kept, so matching
-still works.
+still works. Logs at most once every 5 s per track.
 
 **Fix.** Usually nothing. If it pairs with [`sync-drop`](#sync-drop), the buffer
 is too shallow to bridge the two rates, so raise `slack`. The cumulative count is

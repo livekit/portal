@@ -114,6 +114,8 @@ async def test_recording_puts_every_peer_on_the_robot_clock(pair, skew_us):
     await pair.operator.send_keypoint("idle")
     assert await wait_for(lambda: sink.names().count("keypoint") == 1 and sink.names().count("state") == 30)
     await asyncio.sleep(0.3)
+    # The observer's clock matches the robot's only to within this.
+    uncertainty_us = obs.metrics().time_sync.uncertainty_us
     await obs.disconnect()
 
     by_kind = lambda kind: [c[-1] for c in sink.calls if c[0] == kind]
@@ -126,7 +128,7 @@ async def test_recording_puts_every_peer_on_the_robot_clock(pair, skew_us):
     (keypoint,) = by_kind("keypoint")
     assert last <= keypoint.timestamp_us <= last + 1_000_000
     info = by_kind("open")[0]
-    assert first - 1_000_000 <= info.started_at_us <= first
+    assert first - 1_000_000 <= info.started_at_us <= first + uncertainty_us
 
 
 async def test_observer_records_a_session_to_rrd(pair, tmp_path):

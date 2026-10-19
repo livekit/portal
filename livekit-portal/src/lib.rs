@@ -20,6 +20,7 @@ mod data;
 pub mod dtype;
 pub mod error;
 mod frame_video;
+mod jpeg;
 mod keypoint;
 pub mod metrics;
 mod placeholder;

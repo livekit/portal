@@ -109,17 +109,17 @@ and slowest run. Video arrived at the full 30 fps in every run on both sides.
 
 ## Frame video
 
-The byte-stream codecs have no SDK equivalent, so these are Portal alone, one
-run each. MJPEG, PNG and Raw travel as LiveKit byte streams. Those send one chunk
+The byte-stream codecs have no SDK equivalent, so these are Portal alone: the
+median of three runs for MJPEG, one run for PNG and Raw. MJPEG, PNG and Raw travel as LiveKit byte streams. Those send one chunk
 at a time and top out at about 12 MB/s on this setup, so past that rate the link
 sets the frame rate, not the encoder. Portal keeps only the newest unsent frame,
 so a slow link costs frame rate instead of latency.
 
 | | Send blocks (ms) | End-to-end (ms) | Received fps |
 |---|---|---|---|
-| MJPEG 480p | 2.5 | 16 | 30 |
-| MJPEG 720p | 5.8 | 28 | 30 |
-| MJPEG 1080p | 16 | 262 | 28 |
+| MJPEG 480p | 1.1 | 15 | 30 |
+| MJPEG 720p | 2.4 | 26 | 30 |
+| MJPEG 1080p | 6.4 | 253 | 26 |
 | PNG 480p | 1.4 | 242 | 23 |
 | PNG 720p | 4.1 | 336 | 8 |
 | PNG 1080p | 9.1 | 511 | 4 |
@@ -127,13 +127,14 @@ so a slow link costs frame rate instead of latency.
 | Raw 720p | 0.5 | 443 | 4 |
 | Raw 1080p | 1.0 | 754 | 2 |
 
-MJPEG holds 30 fps through 720p. For PNG and Raw above 480p, use a WebRTC codec,
+MJPEG encodes with the libjpeg-turbo inside libwebrtc, at 4:4:4. It holds 30 fps
+through 720p. For PNG and Raw above 480p, use a WebRTC codec,
 or lower the resolution or frame rate. See [Frame video](../05-frame-video.md).
 
 ## Since v0.2.8
 
 Same harness and machine, p50. v0.2.8 is one run; v0.3 is the median of the
-three runs above, and one run for the byte-stream codecs.
+runs above.
 
 | | v0.2.8 send blocks | v0.3 send blocks | v0.2.8 end-to-end | v0.3 end-to-end |
 |---|---|---|---|---|
@@ -141,16 +142,17 @@ three runs above, and one run for the byte-stream codecs.
 | H.264 1080p | 26 ms | 1.1 ms | 49 ms | 22 ms |
 | VP9 1080p | 26 ms | 0.8 ms | 132 ms | 85 ms |
 | AV1 1080p | 28 ms | 0.8 ms | 106 ms | 66 ms |
-| MJPEG 1080p | 64 ms | 16 ms | 150 ms | 262 ms |
+| MJPEG 1080p | 64 ms | 6.4 ms | 150 ms | 253 ms |
 | PNG 720p | 38 ms | 4.1 ms | 8318 ms | 336 ms |
 | Raw 1080p | 31 ms | 1.0 ms | 12815 ms | 754 ms |
 
 The send call got cheaper from building the library at `opt-level = 3` instead
 of `"z"` and from passing frames into Rust without a copy. Frame-video latency
 fell because the publisher used to queue up to 60 frames behind a slow link.
+MJPEG encodes with libjpeg-turbo instead of the `image` crate's encoder.
 
 MJPEG 1080p is the exception. v0.2.8 spent 64 ms encoding each frame, which held
-it to 16 fps, under what the link carries. v0.3 sends 28 fps, which fills the
+it to 16 fps, under what the link carries. v0.3 sends 26 fps, which fills the
 link, so frames wait in it instead.
 
 ## Reproduce

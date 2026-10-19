@@ -1,0 +1,876 @@
+{
+ "label": "portal-r1",
+ "started": 1792399870.566179,
+ "duration": 10.0,
+ "warmup": 8.0,
+ "scenarios": [
+  {
+   "scenario": "control-100hz",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "action_latency_ms": {
+     "n": 1000,
+     "p50": 1.939,
+     "p95": 2.6601,
+     "p99": 3.82014,
+     "mean": 1.90703
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {},
+    "frames_received_total": {},
+    "recv_overflow": {}
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "state_latency_ms": {
+     "n": 1000,
+     "p50": 1.9285,
+     "p95": 2.7261499999999996,
+     "p99": 3.7562399999999987,
+     "mean": 1.905067
+    },
+    "frames_received": 0,
+    "recv_sizes": {},
+    "recv_fps": 0.0,
+    "max_gap_ms": null,
+    "rtt_us_mean": 1880,
+    "frames_sent": {},
+    "frames_received_total": {},
+    "recv_overflow": {}
+   }
+  },
+  {
+   "scenario": "H264-480p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.5578120471909642,
+     "p95": 0.6827249540947378,
+     "p99": 0.8564466657117007,
+     "mean": 0.5353647035857042
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 11.009,
+     "p95": 48.108,
+     "p99": 59.006,
+     "mean": 16.505687707641194
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "640x480": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 39.81454181484878,
+    "rtt_us_mean": 2486,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 538
+    },
+    "recv_overflow": {
+     "cam": 533
+    }
+   }
+  },
+  {
+   "scenario": "H264-720p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 1.1383744422346354,
+     "p95": 1.513512502424419,
+     "p99": 1.7359621450304985,
+     "mean": 1.0171504854224622
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 16.515,
+     "p95": 49.484,
+     "p99": 56.464,
+     "mean": 21.719598006644517
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "1280x720": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 44.24700001254678,
+    "rtt_us_mean": 2550,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 535
+    },
+    "recv_overflow": {
+     "cam": 530
+    }
+   }
+  },
+  {
+   "scenario": "H264-1080p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 1.054062508046627,
+     "p95": 1.3480829657055438,
+     "p99": 1.5133859496563669,
+     "mean": 1.0656577170205612
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 22.068,
+     "p95": 43.727,
+     "p99": 45.939,
+     "mean": 24.684093023255816
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "1920x1080": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 42.64562507160008,
+    "rtt_us_mean": 2520,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 523
+    },
+    "recv_overflow": {
+     "cam": 518
+    }
+   }
+  },
+  {
+   "scenario": "VP8-480p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.140103860758245,
+     "p95": 0.23337494349107152,
+     "p99": 0.2771064732223749,
+     "mean": 0.15174908951545754
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 302,
+     "p50": 100.9865,
+     "p95": 108.01135,
+     "p99": 110.6504,
+     "mean": 97.6388046357616
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 302,
+    "recv_sizes": {
+     "640x480": 302
+    },
+    "recv_fps": 30.2,
+    "max_gap_ms": 42.6532921846956,
+    "rtt_us_mean": 2206,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 518
+    },
+    "recv_overflow": {
+     "cam": 513
+    }
+   }
+  },
+  {
+   "scenario": "VP8-720p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.350042013451457,
+     "p95": 0.47610270557925105,
+     "p99": 0.5228992435149844,
+     "mean": 0.34939196969692904
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 302,
+     "p50": 112.24199999999999,
+     "p95": 118.8928,
+     "p99": 121.4556,
+     "mean": 109.19811258278146
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 302,
+    "recv_sizes": {
+     "1280x720": 302
+    },
+    "recv_fps": 30.2,
+    "max_gap_ms": 42.55087487399578,
+    "rtt_us_mean": 2504,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 512
+    },
+    "recv_overflow": {
+     "cam": 507
+    }
+   }
+  },
+  {
+   "scenario": "VP8-1080p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.7024795049801469,
+     "p95": 1.0077081504277885,
+     "p99": 1.0902133397758007,
+     "mean": 0.7067994719060758
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 302,
+     "p50": 150.313,
+     "p95": 174.0473,
+     "p99": 178.08026,
+     "mean": 143.28512913907284
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 302,
+    "recv_sizes": {
+     "1920x1080": 302
+    },
+    "recv_fps": 30.2,
+    "max_gap_ms": 43.08437486179173,
+    "rtt_us_mean": 2828,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 508
+    },
+    "recv_overflow": {
+     "cam": 503
+    }
+   }
+  },
+  {
+   "scenario": "VP9-480p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.13058341573923826,
+     "p95": 0.16425595385953784,
+     "p99": 0.21077142795547837,
+     "mean": 0.1297914097085595
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 27.189,
+     "p95": 38.494,
+     "p99": 41.795,
+     "mean": 28.600355481727576
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "640x480": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 40.79345799982548,
+    "rtt_us_mean": 2031,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 529
+    },
+    "recv_overflow": {
+     "cam": 524
+    }
+   }
+  },
+  {
+   "scenario": "VP9-720p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.37456199061125517,
+     "p95": 0.5005235434509814,
+     "p99": 0.5406632018275558,
+     "mean": 0.3709039092063904
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 46.545,
+     "p95": 63.377,
+     "p99": 66.774,
+     "mean": 49.45378073089701
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "1280x720": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 41.066500125452876,
+    "rtt_us_mean": 2371,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 523
+    },
+    "recv_overflow": {
+     "cam": 518
+    }
+   }
+  },
+  {
+   "scenario": "VP9-1080p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.796792097389698,
+     "p95": 1.0809000465087593,
+     "p99": 1.2500292528420685,
+     "mean": 0.7719609855363766
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 302,
+     "p50": 75.071,
+     "p95": 82.11515,
+     "p99": 84.44896,
+     "mean": 74.57442715231788
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 302,
+    "recv_sizes": {
+     "1920x1080": 302
+    },
+    "recv_fps": 30.2,
+    "max_gap_ms": 40.8888328820467,
+    "rtt_us_mean": 2193,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 516
+    },
+    "recv_overflow": {
+     "cam": 511
+    }
+   }
+  },
+  {
+   "scenario": "AV1-480p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.4144164267927408,
+     "p95": 0.6311170058324933,
+     "p99": 0.8834020025096828,
+     "mean": 0.40686778879414004
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 300,
+     "p50": 24.3715,
+     "p95": 27.9391,
+     "p99": 29.538209999999992,
+     "mean": 24.67412333333333
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 300,
+    "recv_sizes": {
+     "640x480": 300
+    },
+    "recv_fps": 30.0,
+    "max_gap_ms": 43.81399997510016,
+    "rtt_us_mean": 2579,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 537
+    },
+    "recv_overflow": {
+     "cam": 532
+    }
+   }
+  },
+  {
+   "scenario": "AV1-720p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.3642919473350048,
+     "p95": 0.48227305524051195,
+     "p99": 0.5648501985706389,
+     "mean": 0.3563223484282692
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 14.712,
+     "p95": 44.807,
+     "p99": 48.562,
+     "mean": 20.892873754152824
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "1280x720": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 47.29691706597805,
+    "rtt_us_mean": 2288,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 528
+    },
+    "recv_overflow": {
+     "cam": 523
+    }
+   }
+  },
+  {
+   "scenario": "AV1-1080p",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.7137290667742491,
+     "p95": 0.9321296238340439,
+     "p99": 1.0253864317201076,
+     "mean": 0.7210851313235859
+    },
+    "action_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 302,
+     "p50": 54.317499999999995,
+     "p95": 69.94505,
+     "p99": 71.80196000000001,
+     "mean": 55.837271523178806
+    },
+    "state_latency_ms": {
+     "n": 0,
+     "p50": null,
+     "p95": null,
+     "p99": null,
+     "mean": null
+    },
+    "frames_received": 302,
+    "recv_sizes": {
+     "1920x1080": 302
+    },
+    "recv_fps": 30.2,
+    "max_gap_ms": 38.59820915386081,
+    "rtt_us_mean": 2402,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 514
+    },
+    "recv_overflow": {
+     "cam": 509
+    }
+   }
+  },
+  {
+   "scenario": "mixed-H264-720p+control",
+   "robot": {
+    "role": "robot",
+    "send_block_ms": {
+     "n": 300,
+     "p50": 0.5210000090301037,
+     "p95": 0.6824997486546636,
+     "p99": 0.7492778031155465,
+     "mean": 0.5153673538006842
+    },
+    "action_latency_ms": {
+     "n": 900,
+     "p50": 1.091,
+     "p95": 3.9081499999999996,
+     "p99": 5.782069999999999,
+     "mean": 1.579921111111111
+    },
+    "rtt_us_mean": null,
+    "frames_sent": {
+     "cam": 540
+    },
+    "frames_received_total": {
+     "cam": 0
+    },
+    "recv_overflow": {
+     "cam": 0
+    }
+   },
+   "operator": {
+    "role": "operator",
+    "video_latency_ms": {
+     "n": 301,
+     "p50": 13.759,
+     "p95": 47.29,
+     "p99": 53.435,
+     "mean": 19.267033222591362
+    },
+    "state_latency_ms": {
+     "n": 900,
+     "p50": 1.0495,
+     "p95": 3.9461,
+     "p99": 5.13005,
+     "mean": 1.502601111111111
+    },
+    "frames_received": 301,
+    "recv_sizes": {
+     "1280x720": 301
+    },
+    "recv_fps": 30.1,
+    "max_gap_ms": 41.899540927261114,
+    "rtt_us_mean": 2353,
+    "frames_sent": {
+     "cam": 0
+    },
+    "frames_received_total": {
+     "cam": 535
+    },
+    "recv_overflow": {
+     "cam": 172
+    }
+   }
+  }
+ ]
+}

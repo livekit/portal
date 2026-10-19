@@ -255,7 +255,8 @@ Start with the [docs index](docs/) for a guided path.
 [E2EE](docs/reference/e2ee.md) ·
 [Synchronization](docs/reference/synchronization.md) ·
 [Wire protocol](docs/reference/wire-protocol.md) ·
-[lerobot plugins](docs/reference/lerobot.md)
+[lerobot plugins](docs/reference/lerobot.md) ·
+[Benchmarks](docs/reference/benchmarks.md)
 
 ## License
 

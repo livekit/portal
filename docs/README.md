@@ -42,6 +42,7 @@ Deeper material. None of it is required reading.
 | [Synchronization](reference/synchronization.md) | The full match algorithm, cursors, fair-share, complexity. |
 | [Wire protocol](reference/wire-protocol.md) | Topics, attributes, RPC, and binary layouts for building a Portal peer in any LiveKit SDK. |
 | [lerobot plugins](reference/lerobot.md) | Optional convenience wrappers for stacks already on lerobot. |
+| [Benchmarks](reference/benchmarks.md) | Video and control latency per codec and resolution, next to the plain LiveKit SDK. |
 
 ## Find your path
 

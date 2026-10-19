@@ -93,7 +93,7 @@ dicts keyed by track name.
 |---|---|---|
 | `frames_sent` | `dict[str, int]` | Frames handed to the transport, per track. |
 | `frames_received` | `dict[str, int]` | Frames arrived, per track. |
-| `frames_dropped_publisher_full` | `dict[str, int]` | Frames dropped because the publisher's in-flight queue was at its cap. |
+| `frames_dropped_publisher_full` | `dict[str, int]` | Frames replaced by a newer frame before the publisher could send them. |
 | `bytes_sent` | `dict[str, int]` | On-wire payload bytes, per track. Frame-video tracks only. |
 | `bytes_received` | `dict[str, int]` | Same, receive side. Frame-video only. |
 | `states_sent` | `int` | State packets published. |

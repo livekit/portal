@@ -305,12 +305,13 @@ in a one-off burst.
 
 ```
 [publish-full] topic 'state' queue full (cap=1024), dropping packet
-[publish-full] frame_video 'front' queue full (cap=1024), dropping frame
 ```
 
-The outbound queue for a topic or frame-video track filled and a packet
-was dropped before leaving the machine. The link cannot ship data as fast as you
-produce it.
+The outbound queue for a topic filled and a packet was dropped before leaving
+the machine. The link cannot ship data as fast as you produce it.
+
+Frame-video tracks don't log this. They keep only the newest unsent frame, and
+each replaced frame counts in `metrics.transport.frames_dropped_publisher_full`.
 
 **Fix.** Lower the publish rate, the resolution, or the frame rate. Check the
 network. A persistent warning is sustained backpressure, not a spike. Track it

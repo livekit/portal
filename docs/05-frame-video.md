@@ -174,7 +174,7 @@ t = portal.metrics().transport
 
 t.bytes_sent["front"]                        # cumulative on-wire bytes
 t.bytes_received["front"]                    # same, operator side
-t.frames_dropped_publisher_full["front"]     # dropped, in-flight queue at cap
+t.frames_dropped_publisher_full["front"]     # replaced by a newer frame before sending
 ```
 
 Derive your actual chunk count to confirm a deployed track is in the regime you
@@ -190,8 +190,9 @@ camera has more entropy than your test fixture did. Re-check the table above
 with the real number.
 
 `frames_dropped_publisher_full` climbing means the publisher is offering frames
-faster than the link ships them. See
-[`publish-full`](08-troubleshooting.md#publish-full).
+faster than the link ships them. Each track sends one frame at a time and holds
+only the newest one waiting behind it, so a slow link costs frame rate, not
+latency. See [`publish-full`](08-troubleshooting.md#publish-full).
 
 Full field list in [Metrics](07-metrics.md#transport).
 

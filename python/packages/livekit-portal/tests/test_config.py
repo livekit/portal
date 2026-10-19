@@ -20,6 +20,7 @@ from livekit.portal import (
     DEFAULT_MJPEG_QUALITY,
     DType,
     FieldSpec,
+    ObserverConfig,
     OperatorConfig,
     Portal,
     PortalConfig,
@@ -119,8 +120,17 @@ def test_video_track_specs_read_back_webrtc_options():
     assert spec.screencast is False
 
 
-def test_video_track_specs_read_back_frame_size():
-    cfg = PortalConfig("demo", Role.ROBOT)
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: PortalConfig("demo", Role.ROBOT),
+        lambda: RobotConfig("demo"),
+        lambda: OperatorConfig("demo"),
+        lambda: ObserverConfig("demo"),
+    ],
+)
+def test_video_track_specs_read_back_frame_size(make):
+    cfg = make()
     cfg.add_video("hd", width=1280, height=720)
     cfg.add_video("default")
     hd, default = cfg.video_track_specs

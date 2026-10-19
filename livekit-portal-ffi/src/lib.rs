@@ -2023,6 +2023,8 @@ impl ObserverConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -2033,6 +2035,8 @@ impl ObserverConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 

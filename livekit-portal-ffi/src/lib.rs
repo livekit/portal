@@ -224,7 +224,9 @@ pub struct VideoTrackSpec {
     pub screencast: bool,
     /// Frame size the encoder is set up for. Both are set or neither is;
     /// neither means 640x480.
+    #[uniffi(default = None)]
     pub width: Option<u32>,
+    #[uniffi(default = None)]
     pub height: Option<u32>,
 }
 

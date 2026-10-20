@@ -586,8 +586,7 @@ to the WebRTC codecs only.
 Portal receives WebRTC video with zero playout delay: libwebrtc hands each frame
 over as soon as it is decoded, instead of holding it back to smooth playback.
 That keeps VP8, VP9 and AV1 at 12 to 16 ms on a local server, where a room with
-default settings holds them at 45 to 146 ms at 1080p. See
-[Benchmarks](reference/benchmarks.md).
+default settings holds them at 45 to 146 ms at 1080p.
 
 The setting covers the whole process and has to be in place before its first
 LiveKit connection. Portal sets it on connect. If something else in the process

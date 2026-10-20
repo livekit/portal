@@ -373,12 +373,48 @@ impl From<core::TimeSyncSource> for TimeSyncSource {
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
+    pub data: FrameBytes,
     pub timestamp_us: u64,
     /// Whether these pixels are a live match, a reused earlier frame, or a
     /// synthesized placeholder. Always `Live` outside of `Observation`.
     pub source: FrameSource,
 }
+
+/// Frame pixels. Crosses the FFI exactly like `Vec<u8>` (foreign bindings see
+/// `bytes`), but uniffi writes a `Vec<u8>` one element at a time: about 3 ms
+/// per 1080p frame. This writes it with one copy, straight from the core's
+/// shared buffer.
+#[derive(Debug, Clone)]
+pub struct FrameBytes(bytes::Bytes);
+
+// SAFETY: the FFI type, the serialized layout (a big-endian `i32` length,
+// then the bytes) and the type metadata are all `Vec<u8>`'s, so foreign code
+// reads and writes it as `bytes`.
+unsafe impl uniffi::FfiConverter<crate::UniFfiTag> for FrameBytes {
+    uniffi::ffi_converter_rust_buffer_lift_and_lower!(crate::UniFfiTag);
+
+    fn write(obj: Self, buf: &mut Vec<u8>) {
+        let len = i32::try_from(obj.0.len()).expect("frame larger than 2 GiB");
+        buf.reserve(4 + obj.0.len());
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&obj.0);
+    }
+
+    fn try_read(buf: &mut &[u8]) -> uniffi::Result<Self> {
+        uniffi::check_remaining(buf, 4)?;
+        let (len, rest) = buf.split_at(4);
+        let len = usize::try_from(i32::from_be_bytes(len.try_into()?))?;
+        uniffi::check_remaining(rest, len)?;
+        let (data, rest) = rest.split_at(len);
+        *buf = rest;
+        Ok(Self(bytes::Bytes::copy_from_slice(data)))
+    }
+
+    const TYPE_ID_META: uniffi::MetadataBuffer =
+        <Vec<u8> as uniffi::TypeId<crate::UniFfiTag>>::TYPE_ID_META;
+}
+
+uniffi::derive_ffi_traits!(local FrameBytes);
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Observation {
@@ -2337,7 +2373,7 @@ fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
     VideoFrame {
         width: f.width,
         height: f.height,
-        data: f.data.to_vec(),
+        data: FrameBytes(f.data.clone()),
         timestamp_us: f.timestamp_us,
         source: f.source.into(),
     }
@@ -2439,5 +2475,34 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             e2e_us_p95: m.policy.e2e_us_p95,
             correlated_received: m.policy.correlated_received,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uniffi::{Lift, Lower};
+
+    #[test]
+    fn frame_bytes_cross_exactly_like_vec_u8() {
+        let pixels: Vec<u8> = (0..=255).cycle().take(3 * 64 * 48).collect();
+        let mut ours = Vec::new();
+        <FrameBytes as Lower<UniFfiTag>>::write(FrameBytes(pixels.clone().into()), &mut ours);
+        let mut reference = Vec::new();
+        <Vec<u8> as Lower<UniFfiTag>>::write(pixels.clone(), &mut reference);
+        assert_eq!(ours, reference);
+
+        let mut rest = ours.as_slice();
+        let back = <FrameBytes as Lift<UniFfiTag>>::try_read(&mut rest).unwrap();
+        assert_eq!(back.0.as_ref(), pixels.as_slice());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn truncated_frame_bytes_are_rejected() {
+        let mut buf = Vec::new();
+        <Vec<u8> as Lower<UniFfiTag>>::write(vec![1, 2, 3, 4], &mut buf);
+        buf.pop();
+        assert!(<FrameBytes as Lift<UniFfiTag>>::try_read(&mut buf.as_slice()).is_err());
     }
 }

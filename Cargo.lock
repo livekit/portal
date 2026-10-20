@@ -1692,6 +1692,7 @@ name = "livekit-portal-ffi"
 version = "0.2.8"
 dependencies = [
  "async-trait",
+ "bytes",
  "ctor",
  "env_logger",
  "livekit-portal",

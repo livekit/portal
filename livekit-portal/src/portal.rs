@@ -473,6 +473,13 @@ impl Portal {
 
         log::info!("[{}] connecting as {:?} to {}", self.config.session, self.config.role, url);
 
+        // Hand decoded frames over as soon as they are ready instead of
+        // holding them for smooth playback. Process-wide, and only possible
+        // before the first WebRTC runtime starts.
+        if let Err(e) = livekit::webrtc::enable_zero_playout_delay() {
+            log::warn!("[playout-delay] zero playout delay not enabled: {e}");
+        }
+
         let (room, events) = Room::connect(url, token, options)
             .await
             .map_err(|e| PortalError::Room(e.to_string()))?;

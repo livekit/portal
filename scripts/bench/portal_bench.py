@@ -42,10 +42,14 @@ def token(identity: str, room: str) -> str:
         room_join=True, room=room, can_publish=True, can_subscribe=True,
         can_update_own_metadata=True,
     )
-    return (
-        api.AccessToken(KEY, SECRET).with_identity(identity).with_grants(grants)
-        .with_ttl(datetime.timedelta(hours=1)).to_jwt()
-    )
+    builder = api.AccessToken(KEY, SECRET).with_identity(identity).with_grants(grants)
+    # BENCH_ROOM_PLAYOUT_DELAY=1 creates the room the way the quickstart does,
+    # with tight playout delay bounds.
+    if os.environ.get("BENCH_ROOM_PLAYOUT_DELAY"):
+        builder = builder.with_room_config(
+            api.RoomConfiguration(name=room, min_playout_delay=0, max_playout_delay=1)
+        )
+    return builder.with_ttl(datetime.timedelta(hours=1)).to_jwt()
 
 
 def frames(w: int, h: int, n: int = 30) -> list[np.ndarray]:

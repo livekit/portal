@@ -318,6 +318,20 @@ network. A persistent warning is sustained backpressure, not a spike. Track it
 with `metrics.transport.frames_dropped_publisher_full`. If you would rather shed
 load than queue it, use a WebRTC video track instead of frame video.
 
+### playout-delay
+
+```
+[playout-delay] zero playout delay not enabled: the WebRTC runtime is already initialized without zero playout delay
+```
+
+Something in this process connected to LiveKit before Portal did, so libwebrtc's
+runtime started with its default playout delay and Portal cannot change it.
+Video still arrives, but libwebrtc holds frames back to smooth playback, which
+adds tens of milliseconds on VP8, VP9 and AV1.
+
+**Fix.** Connect Portal before any other LiveKit room in the same process, or run
+it in its own process.
+
 ### publish-failed
 
 ```

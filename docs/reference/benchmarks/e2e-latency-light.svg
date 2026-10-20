@@ -1,80 +1,106 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="720" height="516" viewBox="0 0 720 516" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" role="img" aria-label="End-to-end latency, p50 (ms): Portal compared with the LiveKit Python SDK">
-<rect width="720" height="516" fill="#fcfcfb"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="624" viewBox="0 0 720 624" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" role="img" aria-label="End-to-end latency, p50 (ms): Portal, LiveKit SDK, LiveKit SDK, room playout delay">
+<rect width="720" height="624" fill="#fcfcfb"/>
 <rect x="112" y="14" width="12" height="12" rx="3" fill="#2a78d6"/>
 <text x="130" y="24" font-size="13" fill="#52514e">Portal</text>
-<rect x="198.4" y="14" width="12" height="12" rx="3" fill="#eb6834"/>
-<text x="216.4" y="24" font-size="13" fill="#52514e">LiveKit Python SDK</text>
-<line x1="112.0" y1="38" x2="112.0" y2="468" stroke="#c3c2b7" stroke-width="1"/>
-<text x="112.0" y="484" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">0</text>
-<line x1="228.8" y1="38" x2="228.8" y2="468" stroke="#e1e0d9" stroke-width="1"/>
-<text x="228.8" y="484" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">40</text>
-<line x1="345.6" y1="38" x2="345.6" y2="468" stroke="#e1e0d9" stroke-width="1"/>
-<text x="345.6" y="484" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">80</text>
-<line x1="462.4" y1="38" x2="462.4" y2="468" stroke="#e1e0d9" stroke-width="1"/>
-<text x="462.4" y="484" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">120</text>
-<line x1="579.2" y1="38" x2="579.2" y2="468" stroke="#e1e0d9" stroke-width="1"/>
-<text x="579.2" y="484" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">160</text>
-<line x1="696.0" y1="38" x2="696.0" y2="468" stroke="#e1e0d9" stroke-width="1"/>
-<text x="696.0" y="484" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">200</text>
-<text x="404.0" y="502" font-size="12" fill="#52514e" text-anchor="middle">End-to-end latency, p50 (ms)</text>
-<text x="102" y="59.0" font-size="12" fill="#0b0b0b" text-anchor="end">H.264 480p</text>
-<path d="M112,44 h27.0 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-27.0 z" fill="#2a78d6"><title>H.264 480p, Portal: 11 ms median of 3 runs (10–11)</title></path>
-<line x1="142.2" y1="49.0" x2="144.1" y2="49.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,56 h27.8 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-27.8 z" fill="#eb6834"><title>H.264 480p, LiveKit Python SDK: 11 ms median of 3 runs (9.1–12)</title></path>
-<line x1="138.6" y1="61.0" x2="148.5" y2="61.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="95.0" font-size="12" fill="#0b0b0b" text-anchor="end">H.264 720p</text>
-<path d="M112,80 h44.8 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-44.8 z" fill="#2a78d6"><title>H.264 720p, Portal: 17 ms median of 3 runs (17–17)</title></path>
-<line x1="160.2" y1="85.0" x2="161.1" y2="85.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,92 h41.1 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-41.1 z" fill="#eb6834"><title>H.264 720p, LiveKit Python SDK: 15 ms median of 3 runs (15–18)</title></path>
-<line x1="156.5" y1="97.0" x2="165.3" y2="97.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="131.0" font-size="12" fill="#0b0b0b" text-anchor="end">H.264 1080p</text>
-<path d="M112,116 h60.1 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-60.1 z" fill="#2a78d6"><title>H.264 1080p, Portal: 22 ms median of 3 runs (22–22)</title></path>
-<line x1="175.0" y1="121.0" x2="176.4" y2="121.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,128 h59.3 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-59.3 z" fill="#eb6834"><title>H.264 1080p, LiveKit Python SDK: 22 ms median of 3 runs (20–22)</title></path>
-<line x1="169.9" y1="133.0" x2="176.4" y2="133.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="167.0" font-size="12" fill="#0b0b0b" text-anchor="end">VP8 480p</text>
-<path d="M112,152 h290.9 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-290.9 z" fill="#2a78d6"><title>VP8 480p, Portal: 101 ms median of 3 runs (61–104)</title></path>
-<line x1="291.5" y1="157.0" x2="415.4" y2="157.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,164 h259.9 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-259.9 z" fill="#eb6834"><title>VP8 480p, LiveKit Python SDK: 90 ms median of 3 runs (86–106)</title></path>
-<line x1="362.2" y1="169.0" x2="421.7" y2="169.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="203.0" font-size="12" fill="#0b0b0b" text-anchor="end">VP8 720p</text>
-<path d="M112,188 h323.7 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-323.7 z" fill="#2a78d6"><title>VP8 720p, Portal: 112 ms median of 3 runs (63–114)</title></path>
-<line x1="295.8" y1="193.0" x2="445.7" y2="193.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,200 h257.6 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-257.6 z" fill="#eb6834"><title>VP8 720p, LiveKit Python SDK: 90 ms median of 3 runs (56–102)</title></path>
-<line x1="274.9" y1="205.0" x2="410.2" y2="205.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="239.0" font-size="12" fill="#0b0b0b" text-anchor="end">VP8 1080p</text>
-<path d="M112,224 h423.2 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-423.2 z" fill="#2a78d6"><title>VP8 1080p, Portal: 146 ms median of 3 runs (146–150)</title></path>
-<line x1="538.4" y1="229.0" x2="550.9" y2="229.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,236 h388.8 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-388.8 z" fill="#eb6834"><title>VP8 1080p, LiveKit Python SDK: 135 ms median of 3 runs (128–145)</title></path>
-<line x1="487.0" y1="241.0" x2="535.5" y2="241.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="275.0" font-size="12" fill="#0b0b0b" text-anchor="end">VP9 480p</text>
-<path d="M112,260 h103.7 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-103.7 z" fill="#2a78d6"><title>VP9 480p, Portal: 37 ms median of 3 runs (27–41)</title></path>
-<line x1="191.4" y1="265.0" x2="232.8" y2="265.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,272 h66.6 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-66.6 z" fill="#eb6834"><title>VP9 480p, LiveKit Python SDK: 24 ms median of 3 runs (24–36)</title></path>
-<line x1="180.9" y1="277.0" x2="216.1" y2="277.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="311.0" font-size="12" fill="#0b0b0b" text-anchor="end">VP9 720p</text>
-<path d="M112,296 h121.1 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-121.1 z" fill="#2a78d6"><title>VP9 720p, Portal: 43 ms median of 3 runs (40–47)</title></path>
-<line x1="228.3" y1="301.0" x2="247.9" y2="301.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,308 h197.5 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-197.5 z" fill="#eb6834"><title>VP9 720p, LiveKit Python SDK: 69 ms median of 3 runs (44–76)</title></path>
-<line x1="241.1" y1="313.0" x2="333.2" y2="313.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="347.0" font-size="12" fill="#0b0b0b" text-anchor="end">VP9 1080p</text>
-<path d="M112,332 h243.1 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-243.1 z" fill="#2a78d6"><title>VP9 1080p, Portal: 85 ms median of 3 runs (75–117)</title></path>
-<line x1="331.2" y1="337.0" x2="455.0" y2="337.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,344 h283.3 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-283.3 z" fill="#eb6834"><title>VP9 1080p, LiveKit Python SDK: 98 ms median of 3 runs (71–117)</title></path>
-<line x1="320.5" y1="349.0" x2="452.6" y2="349.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="383.0" font-size="12" fill="#0b0b0b" text-anchor="end">AV1 480p</text>
-<path d="M112,368 h63.8 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-63.8 z" fill="#2a78d6"><title>AV1 480p, Portal: 23 ms median of 3 runs (23–24)</title></path>
-<line x1="179.7" y1="373.0" x2="183.2" y2="373.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,380 h66.7 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-66.7 z" fill="#eb6834"><title>AV1 480p, LiveKit Python SDK: 24 ms median of 3 runs (22–24)</title></path>
-<line x1="176.2" y1="385.0" x2="183.1" y2="385.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="419.0" font-size="12" fill="#0b0b0b" text-anchor="end">AV1 720p</text>
-<path d="M112,404 h39.0 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-39.0 z" fill="#2a78d6"><title>AV1 720p, Portal: 15 ms median of 3 runs (14–15)</title></path>
-<line x1="153.3" y1="409.0" x2="155.0" y2="409.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,416 h35.6 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-35.6 z" fill="#eb6834"><title>AV1 720p, LiveKit Python SDK: 14 ms median of 3 runs (12–18)</title></path>
-<line x1="145.6" y1="421.0" x2="165.5" y2="421.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<text x="102" y="455.0" font-size="12" fill="#0b0b0b" text-anchor="end">AV1 1080p</text>
-<path d="M112,440 h188.8 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-188.8 z" fill="#2a78d6"><title>AV1 1080p, Portal: 66 ms median of 3 runs (54–100)</title></path>
-<line x1="270.6" y1="445.0" x2="404.9" y2="445.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
-<path d="M112,452 h149.8 a4,4 0 0 1 4,4 v2 a4,4 0 0 1 -4,4 h-149.8 z" fill="#eb6834"><title>AV1 1080p, LiveKit Python SDK: 53 ms median of 3 runs (40–54)</title></path>
-<line x1="230.1" y1="457.0" x2="268.7" y2="457.0" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<rect x="197.2" y="14" width="12" height="12" rx="3" fill="#eb6834"/>
+<text x="215.2" y="24" font-size="13" fill="#52514e">LiveKit SDK</text>
+<rect x="318.4" y="14" width="12" height="12" rx="3" fill="#1baf7a"/>
+<text x="336.4" y="24" font-size="13" fill="#52514e">LiveKit SDK, room playout delay</text>
+<line x1="112.0" y1="38" x2="112.0" y2="576" stroke="#c3c2b7" stroke-width="1"/>
+<text x="112.0" y="592" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="228.8" y1="38" x2="228.8" y2="576" stroke="#e1e0d9" stroke-width="1"/>
+<text x="228.8" y="592" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="345.6" y1="38" x2="345.6" y2="576" stroke="#e1e0d9" stroke-width="1"/>
+<text x="345.6" y="592" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">80</text>
+<line x1="462.4" y1="38" x2="462.4" y2="576" stroke="#e1e0d9" stroke-width="1"/>
+<text x="462.4" y="592" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">120</text>
+<line x1="579.2" y1="38" x2="579.2" y2="576" stroke="#e1e0d9" stroke-width="1"/>
+<text x="579.2" y="592" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">160</text>
+<line x1="696.0" y1="38" x2="696.0" y2="576" stroke="#e1e0d9" stroke-width="1"/>
+<text x="696.0" y="592" font-size="11" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">200</text>
+<text x="404.0" y="610" font-size="12" fill="#52514e" text-anchor="middle">End-to-end latency, p50 (ms)</text>
+<text x="102" y="63.5" font-size="12" fill="#0b0b0b" text-anchor="end">H.264 480p</text>
+<path d="M112,44 h23.2 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-23.2 z" fill="#2a78d6"><title>H.264 480p, Portal: 9.3 ms median of 3 runs (9.1–9.3)</title></path>
+<line x1="138.7" y1="48.5" x2="139.3" y2="48.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,55 h23.8 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-23.8 z" fill="#eb6834"><title>H.264 480p, LiveKit SDK: 9.5 ms median of 3 runs (9.5–9.6)</title></path>
+<line x1="139.7" y1="59.5" x2="140.0" y2="59.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,66 h23.3 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-23.3 z" fill="#1baf7a"><title>H.264 480p, LiveKit SDK, room playout delay: 9.3 ms median of 3 runs (9.2–9.4)</title></path>
+<line x1="138.9" y1="70.5" x2="139.6" y2="70.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="108.5" font-size="12" fill="#0b0b0b" text-anchor="end">H.264 720p</text>
+<path d="M112,89 h38.3 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-38.3 z" fill="#2a78d6"><title>H.264 720p, Portal: 14 ms median of 3 runs (14–15)</title></path>
+<line x1="154.0" y1="93.5" x2="154.5" y2="93.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,100 h39.5 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-39.5 z" fill="#eb6834"><title>H.264 720p, LiveKit SDK: 15 ms median of 3 runs (15–15)</title></path>
+<line x1="154.9" y1="104.5" x2="156.1" y2="104.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,111 h37.1 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-37.1 z" fill="#1baf7a"><title>H.264 720p, LiveKit SDK, room playout delay: 14 ms median of 3 runs (14–14)</title></path>
+<line x1="152.8" y1="115.5" x2="153.2" y2="115.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="153.5" font-size="12" fill="#0b0b0b" text-anchor="end">H.264 1080p</text>
+<path d="M112,134 h57.6 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-57.6 z" fill="#2a78d6"><title>H.264 1080p, Portal: 21 ms median of 3 runs (21–21)</title></path>
+<line x1="173.6" y1="138.5" x2="174.0" y2="138.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,145 h59.1 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-59.1 z" fill="#eb6834"><title>H.264 1080p, LiveKit SDK: 22 ms median of 3 runs (22–22)</title></path>
+<line x1="175.0" y1="149.5" x2="176.3" y2="149.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,156 h58.2 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-58.2 z" fill="#1baf7a"><title>H.264 1080p, LiveKit SDK, room playout delay: 21 ms median of 3 runs (21–21)</title></path>
+<line x1="173.8" y1="160.5" x2="174.3" y2="160.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="198.5" font-size="12" fill="#0b0b0b" text-anchor="end">VP8 480p</text>
+<path d="M112,179 h39.6 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-39.6 z" fill="#2a78d6"><title>VP8 480p, Portal: 15 ms median of 3 runs (15–16)</title></path>
+<line x1="155.1" y1="183.5" x2="157.9" y2="183.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,190 h191.2 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-191.2 z" fill="#eb6834"><title>VP8 480p, LiveKit SDK: 67 ms median of 3 runs (54–96)</title></path>
+<line x1="270.7" y1="194.5" x2="391.7" y2="194.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,201 h36.9 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-36.9 z" fill="#1baf7a"><title>VP8 480p, LiveKit SDK, room playout delay: 14 ms median of 3 runs (14–16)</title></path>
+<line x1="151.8" y1="205.5" x2="158.0" y2="205.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="243.5" font-size="12" fill="#0b0b0b" text-anchor="end">VP8 720p</text>
+<path d="M112,224 h35.2 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-35.2 z" fill="#2a78d6"><title>VP8 720p, Portal: 13 ms median of 3 runs (13–13)</title></path>
+<line x1="150.7" y1="228.5" x2="151.2" y2="228.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,235 h287.6 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-287.6 z" fill="#eb6834"><title>VP8 720p, LiveKit SDK: 100 ms median of 3 runs (45–105)</title></path>
+<line x1="244.8" y1="239.5" x2="419.7" y2="239.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,246 h34.0 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-34.0 z" fill="#1baf7a"><title>VP8 720p, LiveKit SDK, room playout delay: 13 ms median of 3 runs (13–13)</title></path>
+<line x1="149.8" y1="250.5" x2="150.8" y2="250.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="288.5" font-size="12" fill="#0b0b0b" text-anchor="end">VP8 1080p</text>
+<path d="M112,269 h41.9 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-41.9 z" fill="#2a78d6"><title>VP8 1080p, Portal: 16 ms median of 3 runs (16–16)</title></path>
+<line x1="157.3" y1="273.5" x2="159.1" y2="273.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,280 h421.8 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-421.8 z" fill="#eb6834"><title>VP8 1080p, LiveKit SDK: 146 ms median of 3 runs (142–173)</title></path>
+<line x1="525.8" y1="284.5" x2="617.0" y2="284.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,291 h39.3 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-39.3 z" fill="#1baf7a"><title>VP8 1080p, LiveKit SDK, room playout delay: 15 ms median of 3 runs (15–15)</title></path>
+<line x1="155.3" y1="295.5" x2="156.0" y2="295.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="333.5" font-size="12" fill="#0b0b0b" text-anchor="end">VP9 480p</text>
+<path d="M112,314 h32.6 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-32.6 z" fill="#2a78d6"><title>VP9 480p, Portal: 13 ms median of 3 runs (12–13)</title></path>
+<line x1="148.4" y1="318.5" x2="148.7" y2="318.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,325 h111.8 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-111.8 z" fill="#eb6834"><title>VP9 480p, LiveKit SDK: 40 ms median of 3 runs (31–42)</title></path>
+<line x1="201.4" y1="329.5" x2="235.4" y2="329.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,336 h32.8 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-32.8 z" fill="#1baf7a"><title>VP9 480p, LiveKit SDK, room playout delay: 13 ms median of 3 runs (12–13)</title></path>
+<line x1="148.3" y1="340.5" x2="149.0" y2="340.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="378.5" font-size="12" fill="#0b0b0b" text-anchor="end">VP9 720p</text>
+<path d="M112,359 h31.6 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-31.6 z" fill="#2a78d6"><title>VP9 720p, Portal: 12 ms median of 3 runs (12–12)</title></path>
+<line x1="147.3" y1="363.5" x2="147.6" y2="363.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,370 h143.2 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-143.2 z" fill="#eb6834"><title>VP9 720p, LiveKit SDK: 50 ms median of 3 runs (42–56)</title></path>
+<line x1="233.6" y1="374.5" x2="274.3" y2="374.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,381 h31.0 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-31.0 z" fill="#1baf7a"><title>VP9 720p, LiveKit SDK, room playout delay: 12 ms median of 3 runs (12–12)</title></path>
+<line x1="146.5" y1="385.5" x2="147.1" y2="385.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="423.5" font-size="12" fill="#0b0b0b" text-anchor="end">VP9 1080p</text>
+<path d="M112,404 h35.4 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-35.4 z" fill="#2a78d6"><title>VP9 1080p, Portal: 13 ms median of 3 runs (13–14)</title></path>
+<line x1="151.3" y1="408.5" x2="151.5" y2="408.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,415 h239.7 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-239.7 z" fill="#eb6834"><title>VP9 1080p, LiveKit SDK: 83 ms median of 3 runs (70–135)</title></path>
+<line x1="316.8" y1="419.5" x2="507.1" y2="419.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,426 h32.5 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-32.5 z" fill="#1baf7a"><title>VP9 1080p, LiveKit SDK, room playout delay: 12 ms median of 3 runs (12–13)</title></path>
+<line x1="148.1" y1="430.5" x2="148.6" y2="430.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="468.5" font-size="12" fill="#0b0b0b" text-anchor="end">AV1 480p</text>
+<path d="M112,449 h21.8 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-21.8 z" fill="#2a78d6"><title>AV1 480p, Portal: 8.8 ms median of 3 runs (8.8–9.0)</title></path>
+<line x1="137.7" y1="453.5" x2="138.3" y2="453.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,460 h66.8 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-66.8 z" fill="#eb6834"><title>AV1 480p, LiveKit SDK: 24 ms median of 3 runs (23–25)</title></path>
+<line x1="180.5" y1="464.5" x2="184.0" y2="464.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,471 h21.5 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-21.5 z" fill="#1baf7a"><title>AV1 480p, LiveKit SDK, room playout delay: 8.7 ms median of 3 runs (8.6–8.8)</title></path>
+<line x1="137.2" y1="475.5" x2="137.6" y2="475.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="513.5" font-size="12" fill="#0b0b0b" text-anchor="end">AV1 720p</text>
+<path d="M112,494 h33.3 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-33.3 z" fill="#2a78d6"><title>AV1 720p, Portal: 13 ms median of 3 runs (13–13)</title></path>
+<line x1="149.1" y1="498.5" x2="149.6" y2="498.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,505 h34.0 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-34.0 z" fill="#eb6834"><title>AV1 720p, LiveKit SDK: 13 ms median of 3 runs (13–15)</title></path>
+<line x1="149.2" y1="509.5" x2="156.0" y2="509.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,516 h32.5 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-32.5 z" fill="#1baf7a"><title>AV1 720p, LiveKit SDK, room playout delay: 12 ms median of 3 runs (12–13)</title></path>
+<line x1="148.4" y1="520.5" x2="148.8" y2="520.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<text x="102" y="558.5" font-size="12" fill="#0b0b0b" text-anchor="end">AV1 1080p</text>
+<path d="M112,539 h39.7 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-39.7 z" fill="#2a78d6"><title>AV1 1080p, Portal: 15 ms median of 3 runs (15–15)</title></path>
+<line x1="155.3" y1="543.5" x2="155.8" y2="543.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,550 h127.2 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-127.2 z" fill="#eb6834"><title>AV1 1080p, LiveKit SDK: 45 ms median of 3 runs (37–51)</title></path>
+<line x1="220.1" y1="554.5" x2="260.8" y2="554.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+<path d="M112,561 h36.7 a4,4 0 0 1 4,4 v1 a4,4 0 0 1 -4,4 h-36.7 z" fill="#1baf7a"><title>AV1 1080p, LiveKit SDK, room playout delay: 14 ms median of 3 runs (14–14)</title></path>
+<line x1="152.3" y1="565.5" x2="152.7" y2="565.5" stroke="#52514e" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
 </svg>

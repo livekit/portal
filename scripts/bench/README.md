@@ -31,11 +31,17 @@ for i in 1 2 3; do
     --size-hint --codecs H264,VP8,VP9,AV1 --out results/portal-r$i.json
   uv run --project ../../python python sdk_bench.py suite --label sdk-r$i \
     --out results/sdk-r$i.json
+  BENCH_ROOM_PLAYOUT_DELAY=1 uv run --project ../../python python sdk_bench.py suite \
+    --label sdk-pd-r$i --out results/sdk-pd-r$i.json
 done
 uv run --project ../../python python charts.py \
-  --portal results/portal-r*.json --sdk results/sdk-r*.json \
-  --out ../../docs/reference/benchmarks
+  --portal results/portal-r*.json --sdk results/sdk-r?.json \
+  --sdk-playout results/sdk-pd-r*.json --out ../../docs/reference/benchmarks
 ```
+
+`BENCH_ROOM_PLAYOUT_DELAY=1` creates each room with `min_playout_delay=0,
+max_playout_delay=1`, as the quickstart does. `results/v028.json` is the v0.2.8
+baseline, from `portal_bench.py suite` with v0.2.8 on the path.
 
 `--only video|control|mixed`, `--codecs` and `--res` narrow a run. `--codecs
 MJPEG,PNG,RAW` covers Portal's byte-stream codecs, which the SDK has no

@@ -40,7 +40,7 @@ cd python && uv sync                       # resolve the whole workspace
 
 `build_ffi_python.sh` compiles the Rust FFI crate and drops the cdylib into
 `python/packages/livekit-portal/livekit/portal/`, where `ctypes` loads it at import
-time. Skip it only if `LIVEKIT_PORTAL_FFI_LIB` points at a prebuilt binary.
+time. The library is always loaded from that directory.
 
 ## Minting tokens
 
@@ -89,13 +89,13 @@ the motor keys and camera list from `observation_features`, and handles everythi
 network-related.
 
 ```python
-from lerobot.robots.so100 import SO100Robot, SO100RobotConfig
+from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot_teleoperator_livekit import (
     LiveKitTeleoperator,
     LiveKitTeleoperatorConfig,
 )
 
-robot = SO100Robot(SO100RobotConfig(...))      # your existing physical robot
+robot = SO101Follower(SO101FollowerConfig(...))   # your existing physical robot
 robot.connect()
 
 teleop = LiveKitTeleoperator(
@@ -156,10 +156,10 @@ Runs wherever you drive from: a workstation, a training loop, a recording script
 knows what cameras exist.
 
 ```python
-from lerobot.teleoperators.leader import LeaderArmTeleop, LeaderArmTeleopConfig
+from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 from lerobot_robot_livekit import LiveKitRobot, LiveKitRobotConfig
 
-leader = LeaderArmTeleop(LeaderArmTeleopConfig(...))
+leader = SO101Leader(SO101LeaderConfig(...))
 leader.connect()
 
 robot = LiveKitRobot(
@@ -235,7 +235,7 @@ Shared by both plugin configs:
 |---|---|---|
 | `url` | `""` | LiveKit server URL. Required. |
 | `token` | `""` | JWT with grants for this side's identity and room. Required. |
-| `session` | `"lerobot"` | Portal session label. Must match across both sides. |
+| `session` | `""` | Portal session label, `"lerobot"` when empty. Must match across both sides. |
 | `fps` | `30` | Unified capture rate. Drives the sync match window. |
 | `motors` | `()` | Fallback motor names, without `.pos`, when no local instance is passed. |
 | `camera_names` | `()` | Camera names. On the operator side these must match the robot's. |
@@ -243,7 +243,12 @@ Shared by both plugin configs:
 | `tolerance` | `None` | Passed to `set_tolerance(...)`. `1.5` widens to one frame either side, `0.5` drops on loss. |
 | `state_reliable` | `True` | Reliable delivery for state. |
 | `action_reliable` | `True` | Reliable delivery for actions. |
-| `stall_behavior` | `DROP` | What to do with a moment a silent camera cannot cover. `FREEZE` re-emits its last matched frame instead of dropping the state. |
+| `reuse_stale_frames` | `False` | Passed to `set_reuse_stale_frames(...)`: re-emit a silent camera's last matched frame instead of dropping the state. |
+| `video_codec` | `VideoCodec.H264` | Codec for every camera track. Must match across both sides. |
+| `video_quality` | `90` | MJPEG quality, 1 to 100. Ignored by other codecs. |
+| `video_max_bitrate_kbps` | `None` | WebRTC encoder cap. See [Frame video](../07-frame-video.md). |
+| `video_simulcast` | `None` | WebRTC simulcast. Off when `None`. |
+| `video_screencast` | `None` | WebRTC screencast content hint. Off when `None`. |
 
 Operator-only, on `LiveKitRobotConfig`:
 
@@ -290,11 +295,6 @@ directly, reach into `plugin._portal` from code running on that loop.
 **Python 3.12 or newer.** lerobot requires it. `livekit-portal` alone still works
 on 3.10, but the plugin packages and the workspace root are 3.12 and up.
 
-**Protobuf constraint.** The plugins pin `protobuf>=5,<6` because lerobot's
-transitive dependencies cap there.
-`packages/livekit-portal/scripts/generate_protos.sh` rewrites the `_pb2.py` gencode
-version to `5.26.0` after each `protoc` run so it loads on that runtime.
-
 **macOS libwebrtc linker flag.** `-ObjC` is set in `livekit-portal-ffi/build.rs` so
 VideoToolbox's ObjC categories link correctly. Dropping it produces an
 `NSInvalidArgumentException` at the first `PeerConnection` creation.
@@ -313,14 +313,14 @@ reconstruct the plugin. On the operator side, prefer declaring
 
 | Symptom | Likely cause |
 |---|---|
-| `ffi not initialized` | The cdylib did not load. Rerun `build_ffi_python.sh` or set `LIVEKIT_PORTAL_FFI_LIB`. |
+| `ImportError` or `OSError` importing `livekit.portal` | The cdylib did not load. Rerun `build_ffi_python.sh`, which puts it next to `livekit_portal_ffi.py`. |
 | `LiveKit*Config.url and .token are required` | Token mint returned an empty string, or the fields were never set. |
 | `failed to publish role attribute (token may be missing canUpdateOwnMetadata)` | The token omitted `can_update_own_metadata=True`. |
 | Observations always empty | First sync has not happened yet. Confirm both sides joined the same room, camera names match, and `fps` is identical. |
 | Observations always empty, state only | State schema mismatch. The two sides declared different motor keys. A `WARNING` fires on the first dropped sync naming the missing and unexpected fields. Declare `observation_features` explicitly. |
 | High `states_dropped` | The encoder is throttling, or a camera stopped publishing. Compare `frames_received` on the operator against `frames_sent` on the robot. |
 | `WrongRole` | You called `send_action` on the robot side, or `send_state` and `send_video_frame` on the operator side. |
-| Robot receives no actions, no errors | `active_operator` is unset or pointing elsewhere. The plugin auto-claims by default. With `auto_claim_control=False`, claim via `plugin._portal.set_active_operator(...)` or have a peer do it. If the pointer is right, look for a `[version-mismatch]` log line: both sides must run the same Portal release. |
+| Robot receives no actions, no errors | `active_operator` is unset or pointing elsewhere. The plugin auto-claims by default. With `auto_claim_control=False`, have a peer claim it, or run the async call on the plugin's loop: `plugin._run(plugin._portal.set_active_operator(identity))`. If the pointer is right, look for a `[version-mismatch]` log line: both sides must run the same Portal release. |
 | `InvalidFrameDimensions` | Frame width or height is odd. Both must be even. |
 | `ValueError: ... cannot infer schema` | The constructor got neither a local instance nor `motors` and `camera_names`. Pass one or the other. |
 

@@ -23,9 +23,9 @@ portal.reset_metrics()   # zero the counters, keep the session
 `reset_metrics()`. Gauges reflect the instant you asked.
 
 Every duration is **microseconds**. Percentiles come from a rolling
-256-sample window and read `None` until enough samples land.
+256-sample window and read `None` until the first sample lands.
 
-## The six groups
+## The groups
 
 | Group | Answers |
 |---|---|
@@ -35,6 +35,7 @@ Every duration is **microseconds**. Percentiles come from a rolling
 | [`rtt`](#rtt) | How far away is the peer? |
 | [`time_sync`](#time_sync) | Do we agree with the robot on the time? |
 | [`policy`](#policy) | How long does the full loop take? |
+| [`observer`](#observer) | Is the recorder keeping up? `Observer` only. |
 
 ## What to watch first
 
@@ -49,7 +50,8 @@ If you only instrument four numbers, use these.
 
 ## `sync`
 
-Operator side. Everything about turning separate streams into observations.
+Operator side, or an `Observer` with `set_observation_sync(True)`. Empty when
+observation sync is off. Everything about turning separate streams into observations.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -72,14 +74,15 @@ jitter will start dropping.
 
 **`stale_observations_emitted` is your freeze detector.** With
 `stall_behavior: freeze`, a frozen camera produces observations exactly like a
-healthy one. This counter is the only thing that distinguishes them. Rising here
+healthy one. This counter is the session-level signal that distinguishes them;
+per frame, `frame.source` reads `STALE`. Rising here
 while `observations_emitted` holds steady means video is frozen and state is
 still flowing.
 
-**`last_blocker_track` is sticky and startup-biased.** It updates when a new
-block occurs, which is useful for post-hoc diagnosis. Under
-`stall_behavior: freeze`, it stops updating once every track has emitted once, so do
-not use it to detect a freeze. Use `stale_observations_emitted`.
+**`last_blocker_track` is sticky.** It names the last track that held matching
+up, which is useful for post-hoc diagnosis, but it doesn't say whether that
+track is blocked now. With `max_lag_ms=0` it stops updating once every track has
+emitted once. To detect a freeze, use `stale_observations_emitted`.
 
 ```python
 s = portal.metrics().sync
@@ -98,7 +101,7 @@ dicts keyed by track name.
 | `frames_sent` | `dict[str, int]` | Frames handed to the transport, per track. |
 | `frames_received` | `dict[str, int]` | Frames arrived, per track. |
 | `frames_dropped_publisher_full` | `dict[str, int]` | Frames replaced by a newer frame before the publisher could send them. |
-| `bytes_sent` | `dict[str, int]` | On-wire payload bytes, per track. Frame-video tracks only. |
+| `bytes_sent` | `dict[str, int]` | Payload bytes, per track. Frame-video tracks only. For `RAW`, counted before the byte stream's deflate. |
 | `bytes_received` | `dict[str, int]` | Same, receive side. Frame-video only. |
 | `states_sent` | `int` | State packets published. |
 | `states_received` | `int` | State packets arrived. |
@@ -133,7 +136,7 @@ t = portal.metrics().transport         # on the operator
 
 ## `buffers`
 
-Operator side. Instantaneous fill levels, plus cumulative evictions.
+Same scope as `sync`. Instantaneous fill levels, plus cumulative evictions.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -199,7 +202,8 @@ with each other, usually because the link is very jittery.
 ## `observer`
 
 `Observer` only, while or after it records with `record_to`. Filled in by the
-Python recorder rather than the Rust core.
+Python recorder rather than the Rust core. The counters are per recording:
+`reset_metrics()` doesn't clear them, and a new `record_to` starts from zero.
 
 | Field | Type | Meaning |
 |---|---|---|

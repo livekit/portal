@@ -28,8 +28,9 @@ as a floating-point joint position or a boolean gripper command. Field names,
 order, and data types must match between senders and receivers. Use a
 [shared YAML file](reference/config-file.md) to keep them consistent.
 
-Roles are fixed at construction. Methods that are unavailable for a role raise
-`PortalError.WrongRole`.
+Roles are fixed at construction. Each class only has its own role's methods:
+`Operator` has no `send_state`, for example. An `Observer`'s `send_*` methods
+exist only to raise `PortalError.WrongRole`.
 
 ## The observation model
 
@@ -154,8 +155,8 @@ actions according to the updated active identity.
 
 Three behaviors are worth knowing up front.
 
-**Control starts unset.** A fresh robot has no active operator and drops
-every action it receives. Your first operator has to claim control, or nothing
+**Control starts unset.** A fresh robot has no active operator, unless its token
+seeds one, and drops every action it receives. Your first operator has to claim control, or nothing
 moves. This is the most common first-run surprise.
 
 **Inactive operators get no feedback.** Their `send_action` calls succeed and
@@ -196,8 +197,10 @@ That is exactly a NumPy `uint8` array of shape `(H, W, 3)` in RGB order, which
 is what `PIL.Image.convert("RGB")` and OpenCV's
 `cvtColor(frame, COLOR_BGR2RGB)` give you.
 
-**Width and height must both be even.** I420 chroma subsampling requires it.
-Odd dimensions raise `PortalError.InvalidFrameDimensions`.
+**On WebRTC tracks, width and height must both be even.** I420 chroma
+subsampling requires it. Odd dimensions raise
+`PortalError.InvalidFrameDimensions`. [Frame-video](07-frame-video.md) tracks
+have no such constraint.
 
 The default WebRTC path converts RGB to I420 before encoding. If your policy
 or dataset requires exact RGB pixels, select PNG or RAW instead. See
@@ -205,8 +208,10 @@ or dataset requires exact RGB pixels, select PNG or RAW instead. See
 
 ### Frames must carry a timestamp
 
-Every video frame Portal receives must carry `user_timestamp` in its LiveKit
-packet-trailer metadata. Portal sets this automatically on tracks it publishes.
+Every WebRTC video frame Portal receives must carry `user_timestamp` in its
+LiveKit frame metadata. Portal sets this automatically on tracks it publishes.
+Frames without it are dropped and logged as
+[`missing-timestamp`](10-troubleshooting.md#missing-timestamp).
 
 A subscribed track from a publisher that does **not** set it cannot be matched
 and is unsupported. Either republish the source through Portal, or enable
@@ -217,7 +222,7 @@ detail if you are writing your own publisher.
 ## Callbacks and threading
 
 Callbacks you register with `on_observation`, `on_action`, and friends fire on
-the asyncio loop that was running when you registered them. Your code never
+the asyncio loop that called `connect()`. Your code never
 runs on the tokio worker thread.
 
 That means a slow callback stalls your own loop, not Portal's internals. It

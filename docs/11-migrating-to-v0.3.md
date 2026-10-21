@@ -17,8 +17,9 @@ stops arriving after an upgrade, look for `[version-mismatch]` in the logs.
 ## Action chunks are removed
 
 `send_action_chunk`, `on_action_chunk`, `get_action_chunk`, `add_action_chunk`,
-the `portal_action_chunk` topic, the yaml `action_chunks` block and the chunk
-metrics are gone. A yaml file that still has `action_chunks` fails with
+the `action_chunks` config property, the `ChunkSpec` and `ActionChunk` exports,
+`PortalError.UnknownChunk`, the `portal_action_chunk` topic, the yaml
+`action_chunks` block and the chunk metrics are gone. A yaml file that still has `action_chunks` fails with
 `ConfigFileError.ActionChunksRemoved`.
 
 **Do this:** plan the horizon on the policy side and step through it, sending
@@ -75,6 +76,9 @@ clock with `set_time_sync_source(TimeSyncSource.SYSTEM)` (yaml
 `metrics().rtt` keeps its fields, but the robot only answers pings now, so its
 own `rtt` stays empty.
 
+A yaml file that still has `ping_ms` no longer loads: unknown keys are a
+`ConfigFileError.Parse` error.
+
 **Do this:** delete `set_ping_ms` calls and `ping_ms` yaml keys.
 
 ## Only operators and observers may steer
@@ -92,13 +96,19 @@ directly, make it an [observer](05-portal-api.md#surface-summary) and call
 
 - **`WrongRole` names the caller's own role.** It used to report the opposite
   role, hard-coded.
+- **Rust:** `PortalConfig::add_video` takes `(name, codec, VideoOptions { quality,
+  max_bitrate_kbps, simulcast, screencast, resolution })` instead of the
+  positional options. `resolution` is an `Option` of the new `Resolution` type.
+  `set_action_subscription` and its getter use `ActionSubscription` instead of a
+  `bool`. `set_ping_ms` and `ping_ms` are gone.
 - **Rust:** `Portal::get_observation` returns
   `PortalResult<Option<Observation>>` and `Portal::on_observation` returns
   `PortalResult<()>`. Both fail with `ObservationSyncDisabled` on a peer that
   turned observation sync off. `Role` has a third variant, `Observer`, so
   exhaustive matches need an arm.
 - **Raw FFI users:** the `PortalCallbacks` trait gained `on_time_synced` and
-  `on_keypoint`. The `livekit.portal` classes implement them for you.
+  `on_keypoint`, and `add_video` gained positional `width` and `height`
+  arguments. The `livekit.portal` classes handle both for you.
 
 ## What's new
 

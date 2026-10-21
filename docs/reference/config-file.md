@@ -144,9 +144,9 @@ action:
 | `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
 | `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |
 | `reuse_stale_frames` | bool | `false` | Deprecated. Alias for `stall_behavior: freeze` with `max_lag_ms: 0`. |
-| `observation_sync` | bool | `true` | Operator-side: bundle state and frames into observations. `false` skips the sync buffer; `slack`, `tolerance`, `stall_behavior` and `max_lag_ms` then do nothing. |
+| `observation_sync` | bool | `true` (`false` for an observer) | Operator and observer: bundle state and frames into observations. `false` skips the sync buffer; `slack`, `tolerance`, `stall_behavior` and `max_lag_ms` then do nothing. |
 | `time_sync_source` | string | `portal` | Where `now_us()` comes from. `portal` syncs to the robot's clock. `system` trusts the host clock, for hosts kept in step by PTP or GPS. |
-| `action_subscription` | string | `none` | Operator-side: which received actions reach `on_action`. `active` is the active operator's, `all` is every operator's, tagged with `active`. A bool is an error. No-op on the robot. |
+| `action_subscription` | string | `none` (`active` for an observer) | Operator and observer: which received actions reach `on_action`. `active` is the active operator's, `all` is every operator's, tagged with `active`. A bool is an error. No-op on the robot. |
 | `videos` | list | `[]` | Declared video tracks. |
 | `state` | list | `[]` | Declared state schema. |
 | `action` | list | `[]` | Declared action schema. |
@@ -264,7 +264,7 @@ The loader produces the same config you would build by hand.
 | `stall_behavior` | `cfg.set_stall_behavior(...)` / `cfg.set_track_stall_behavior(...)` |
 | `max_lag_ms` | `cfg.set_max_lag_ms(...)` / `cfg.set_track_max_lag_ms(...)` |
 | `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` (deprecated) |
-| `observation_sync` | `cfg.set_observation_sync(...)` |
+| `observation_sync` | `cfg.set_observation_sync(...)` (operator and observer configs only) |
 | `time_sync_source` | `cfg.set_time_sync_source(...)` |
 | `action_subscription` | `cfg.set_action_subscription(...)` |
 | `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=..., width=..., height=...)` |
@@ -283,13 +283,18 @@ identical: same fingerprints, same registered tracks, same sync config.
 | `Parse` | YAML parse failure. Covers unknown keys, missing `version`, wrong types, and bad codec or dtype strings. The message carries the parser position. |
 | `UnsupportedVersion { got, supported }` | The file declares a `version` this build cannot read. |
 | `Invalid` | Pre-flight validation failure. See the list below. |
-| `Io` | `from_yaml_file` only. The file could not be opened. |
+| `ActionChunksRemoved` | The file has an `action_chunks` key. Action chunks were removed in v0.3. |
+| `Io` | Rust's `from_yaml_file` only. The file could not be opened. In Python, `from_yaml_file` opens the file itself, so a missing file raises `OSError`. |
 
 `Invalid` covers duplicate track names, MJPEG quality outside `1..=100`,
 `max_bitrate_kbps` on a byte-stream codec or set to zero, `simulcast`,
 `screencast`, `width` or `height` on a byte-stream codec, only one of `width`
-and `height`, an odd or zero `width` or `height`, and `fps`, `slack`, or
-`tolerance` at zero or negative.
+and `height`, an odd or zero `width` or `height`, `fps` or `slack` at zero,
+`tolerance` at zero, negative or NaN, and a bad `stall_behavior` (`drop`,
+`freeze` or `omit`), `time_sync_source` (`portal` or `system`) or
+`action_subscription` (`none`, `active` or `all`; a bool gets a migration
+message). A negative or out-of-range integer, such as `fps: -1`, is a `Parse`
+error.
 
 ```python
 from livekit.portal import ConfigFileError, RobotConfig
@@ -313,7 +318,7 @@ except ConfigFileError.Invalid:
     # Schema bug. Surface it to a human.
     ...
 except ConfigFileError as e:
-    # Catch-all for parse and io.
+    # Catch-all: parse errors, ActionChunksRemoved.
     ...
 ```
 

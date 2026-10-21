@@ -96,7 +96,7 @@ async def main() -> None:
     synced = asyncio.Event()
     obs.on_time_synced(synced.set)
     await obs.connect(URL, mint("recorder"))
-    await synced.wait()   # start on the robot's clock
+    await synced.wait()   # start on the robot's clock (skip with TimeSyncSource.SYSTEM)
 
     sink = RrdSink("data/sessions", jpeg_quality=95)
     obs.record_to(sink)
@@ -118,7 +118,9 @@ Open the result with `rerun data/sessions/<session>-<UTC start>.rrd`.
 - **Wait for `on_time_synced` before recording.** Every row is stamped on the
   robot's clock. Until the observer's first sync, `now_us()` is only its own
   clock, so anything stamped from it, such as `started_at_us` and the metrics
-  rows, would sit on a different timeline from the rest of the archive.
+  rows, would sit on a different timeline from the rest of the archive. With
+  `TimeSyncSource.SYSTEM` there is nothing to wait for and `on_time_synced`
+  never fires, so start recording right away.
 - **`disconnect()` finishes the recording.** It stops the feed, writes what
   is already queued and closes the sink. `stop_recording()` does the same
   without leaving the room, so one observer can write several archives in a
@@ -183,7 +185,7 @@ class MySink:
 | `write_frame_dropped` | `str`, `int` | track and timestamp of a frame the recorder dropped |
 | `write_action` | `Action` | `values`, `raw_values`, `timestamp_us`, `sender`, `active`, `in_reply_to_ts_us` |
 | `write_keypoint` | `Keypoint` | `type`, `payload` (a `dict`), `timestamp_us`, `sender` |
-| `write_metrics` | `PortalMetrics` | the full [`metrics()`](09-metrics.md) snapshot |
+| `write_metrics` | `PortalMetrics` | a [`metrics()`](09-metrics.md) snapshot, without the `observer` recording counters |
 
 Every timestamp is in microseconds on the robot's clock, unless
 `time_sync_source` is `SYSTEM`, in which case it is the hosts' own synced

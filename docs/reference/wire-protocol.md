@@ -57,11 +57,12 @@ a recognised operator, even if the active-operator pointer names it.
 
 Both are plain participant attributes. Read them from the
 participant-attributes-changed event, and from the initial participant list on
-join. To act as a robot, set `lk.portal.role` to `"robot"` yourself after
-connecting.
+join. To act as a robot, set `lk.portal.role` to `"robot"` and
+`lk.portal.version` to `"3"` yourself after connecting.
 
-**Token requirements.** Robot and operator tokens must grant
-`can_update_own_metadata = true`, because that self-set write fails without it. A
+**Token requirements.** Every Portal peer's token (robot, operator and observer)
+must grant `can_update_own_metadata = true`, because that self-set write fails
+without it. A
 token may also seed the robot's `lk.portal.active_operator` at mint time so the
 pointer is set before anyone connects.
 
@@ -190,6 +191,10 @@ The header is 16 fixed bytes plus the track name:
 [u8 × N               encoded payload]
 ```
 
+Portal sends `RAW` frames with LiveKit's byte-stream compression (deflate) on,
+and `PNG` and `MJPEG` without it. A reader needs an SDK that inflates compressed
+byte streams.
+
 The decoded payload is always packed RGB24: byte order `R, G, B`, row-major,
 `stride = width * 3`. RAW is exactly that already. PNG and MJPEG decode to it.
 
@@ -211,8 +216,8 @@ Two requirements bind a Portal-compatible publisher.
 ends must negotiate the same codec, so AV1 and H.265 depend on peer support.
 
 **Per-frame timestamp.** Every published frame must carry `user_timestamp` in its
-LiveKit packet-trailer metadata, in microseconds on the robot's clock. The
-publisher must enable `PacketTrailerFeatures.user_timestamp` on the track.
+LiveKit frame metadata, in microseconds on the robot's clock. The publisher must
+enable `FrameMetadataFeatures.user_timestamp` on the track.
 
 That second one is **mandatory, not optional.** The operator's synchronization
 aligns frames to state by this timestamp, so a frame without it can never be
@@ -367,7 +372,7 @@ To act as an **operator** against a Portal robot:
    `lk.portal.role` attribute to `"operator"` and `lk.portal.version` to `"3"`.
 2. Find the robot: the remote participant with `lk.portal.role == "robot"`.
 3. Subscribe to its video tracks by name. For WebRTC tracks, read `user_timestamp`
-   from each frame's packet trailer. For byte-stream tracks, read
+   from each frame's metadata. For byte-stream tracks, read
    `portal_frame_video` and parse the frame header.
 4. Read `portal_state` packets. Verify the fingerprint, then parse the header and
    fields against the shared state schema.
@@ -380,9 +385,10 @@ To act as an **operator** against a Portal robot:
 
 To act as a **robot** against Portal operators:
 
-1. Connect with the same metadata grant. Set `lk.portal.role` to `"robot"`.
+1. Connect with the same metadata grant. Set `lk.portal.role` to `"robot"` and
+   `lk.portal.version` to `"3"`.
 2. Publish video tracks. On WebRTC tracks, enable
-   `PacketTrailerFeatures.user_timestamp` and stamp every frame.
+   `FrameMetadataFeatures.user_timestamp` and stamp every frame.
 3. Publish `portal_state` packets with the state fingerprint and a timestamp from
    the same clock as your frames.
 4. Register the `portal.set_active_operator` RPC. On call, write your

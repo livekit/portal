@@ -27,7 +27,7 @@ crates alone.
 
 | Level | What you get |
 |---|---|
-| `error` | A callback panicked, or a send failed outright. The loop keeps running. |
+| `error` | A callback panicked. The loop keeps running. |
 | `warn` | Something was dropped or ignored. The session continues with reduced quality. |
 | `info` | Connection lifecycle. Connect, disconnect, track published, publisher ready. |
 | `debug` | Per-event detail. Off by default. |
@@ -87,9 +87,9 @@ robot sends it and you never declared it, the robot logs
 failed to publish role attribute (token may be missing canUpdateOwnMetadata)
 ```
 
-Your token omitted `can_update_own_metadata`. Both `Robot` and `Operator`
-self-set an `lk.portal.role` attribute on connect so peers can discover them, and
-that write needs the grant.
+Your token omitted `can_update_own_metadata`. Every role (`Robot`, `Operator`
+and `Observer`) self-sets `lk.portal.role` and `lk.portal.version` attributes on
+connect so peers can discover it, and that write needs the grant.
 
 ```python
 grants = api.VideoGrants(
@@ -128,15 +128,16 @@ print(robot.operators())        # the sender must be listed
 If it is missing, look for a [`version-mismatch`](#version-mismatch) line and
 upgrade every peer to the same release.
 
-### `ImportError` or `ffi not initialized`
+### `ImportError` or `OSError` on import
 
-The native library did not load. Rebuild it:
+The native library did not load. Portal loads it from the package directory,
+next to `livekit_portal_ffi.py`. Rebuild it there:
 
 ```bash
 bash scripts/build_ffi_python.sh release
 ```
 
-Or point `LIVEKIT_PORTAL_FFI_LIB` at a prebuilt binary. If you installed from
+If you installed from
 PyPI on an unsupported platform there is no wheel, and you need a
 [source build](01-quickstart.md#build-from-source).
 
@@ -333,6 +334,7 @@ it in its own process.
 ```
 [publish-failed] data publish failed: <error>
 [publish-failed] clock publish failed: <error>
+[publish-failed] frame_video '<track>' byte stream failed: <error>
 ```
 
 A publish call returned a transport error. The room is disconnected, or the peer
@@ -422,6 +424,8 @@ or encoder problem on the sender.
 ```
 [bad-payload] frame_video: bad header (<error>)
 [bad-payload] state deserialize failed: <error>
+[bad-payload] action deserialize failed: <error>
+[bad-payload] keypoint from '<sender>' is not valid: <error>
 [bad-payload] failed to read frame_video byte stream: <error>
 ```
 
@@ -445,6 +449,21 @@ Logged once per identity.
 **Fix.** Run the same Portal release on every peer. See
 [Migrating to v0.3](11-migrating-to-v0.3.md).
 
+### missing-timestamp
+
+```
+[missing-timestamp] '<track>' skipped N frame(s) with no user_timestamp; the sender must enable FrameMetadataFeatures.user_timestamp
+```
+
+A WebRTC frame arrived without a capture timestamp, so it can't be matched and is
+dropped before sync. The first skipped frame after subscribing is normal and only
+logged at `debug`. Repeats are logged at most once every 5 seconds.
+
+**Fix.** The sender isn't stamping frames. Portal's own robot always does, so this
+points at a publisher built on another SDK. Enable
+`FrameMetadataFeatures.user_timestamp` on its video track. See
+[Wire protocol](reference/wire-protocol.md).
+
 ### callback-panic
 
 ```
@@ -453,8 +472,8 @@ Logged once per identity.
 
 One of your callbacks raised. Portal catches it so it cannot take down the event
 loop, logs it, and keeps running. This covers `on_observation`, `on_drop`,
-`on_state`, `on_action`, the video-frame callbacks, and the operator-roster
-callbacks.
+`on_state`, `on_action`, `on_keypoint`, `on_time_synced`, the video-frame
+callbacks, and the operator-roster callbacks.
 
 **Fix.** Fix the exception. Portal cannot report the line number, so wrap the
 callback body while debugging:
@@ -485,6 +504,16 @@ they are not tagged. `SESSION` below is your session label, not a tag.
 | `[SESSION] participant 'ID' disconnected` | Someone left the room. |
 | `[SESSION] reconnected, clearing sync buffers and latest slots` | The session recovered. Buffers were flushed. |
 | `disconnecting` | Disconnect started. |
+
+One untagged `warn` line belongs here too:
+
+```
+[SESSION] observation sync is off, so these options do nothing: <options>
+```
+
+You set `slack`, `tolerance`, a stall behavior or a max lag on a peer with
+observation sync off, usually an `Observer`. They only affect the sync buffer.
+Remove them, or turn sync on with `set_observation_sync(True)`.
 
 If you connect and then see no `subscribed` or `ready` lines, the two peers are
 not seeing each other. Check the room name in the token, then the schemas.

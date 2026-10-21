@@ -82,7 +82,7 @@ When video runs faster than state, two things change.
 ```python
 # 60 fps video, 10 Hz state
 cfg.set_fps(60)
-cfg.set_slack(8)        # ceil(60 / 10) + 2
+cfg.set_slack(7)        # ceil(60 / 10) + 1
 cfg.set_tolerance(1.5)  # ticks are video ticks now, so about 25 ms
 ```
 
@@ -183,13 +183,15 @@ at all.
 
 **Watch `metrics.sync.stale_observations_emitted`.** That counter rising while
 `observations_emitted` holds steady is the signal that a track is silently
-frozen. It is the only reliable freeze indicator.
+frozen. Per frame, `frame.source` says the same thing: `STALE` for a reused
+frame, `LIVE` for a fresh one.
 
 Two metrics become less useful once reuse is on. `match_delta_us_p95` tracks the
 drift between a state and its stale frame, so it grows unbounded during a
-freeze. Any alert keyed on it needs rescoping. `last_blocker_track` only updates
-while a track is still waiting for its first frame, so it will not identify a
-freeze after startup.
+freeze. Any alert keyed on it needs rescoping. `last_blocker_track` is sticky:
+it names the last track that held matching up, so it shows that a track blocked,
+not that it is frozen now. With `max_lag_ms=0` (or `set_reuse_stale_frames`) it
+only updates while a track is waiting for its first frame.
 
 ## Transport reliability
 

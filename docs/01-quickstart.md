@@ -191,8 +191,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Frames must be `uint8` NumPy arrays of shape `(H, W, 3)` in RGB order. Width
-and height must both be even. See
+Frames must be `uint8` NumPy arrays of shape `(H, W, 3)` in RGB order. On the
+default WebRTC video path, width and height must both be even. See
 [Concepts: frame format](02-concepts.md#video-frame-format).
 
 ## 5. Write the operator
@@ -353,7 +353,7 @@ async def main() -> None:
     synced = asyncio.Event()
     obs.on_time_synced(synced.set)
     await obs.connect(os.environ["LIVEKIT_URL"], mint("recorder"))
-    await synced.wait()   # start on the robot's clock
+    await synced.wait()   # start on the robot's clock (skip with TimeSyncSource.SYSTEM)
 
     sink = RrdSink("data/sessions")
     obs.record_to(sink)
@@ -429,6 +429,10 @@ bash scripts/build_ffi_python.sh release
 cd python && uv sync
 ```
 
+The `python/` workspace needs Python 3.12, because the lerobot plugins in it do.
+On 3.10 or 3.11, skip `uv sync` and install the package on its own after the
+build: `pip install -e python/packages/livekit-portal`.
+
 `build_ffi_python.sh` runs `cargo build -p livekit-portal-ffi`, drops the
 platform cdylib next to the Python package, and generates the UniFFI bindings.
 The first build takes a few minutes. Later builds are incremental. Rerun it
@@ -441,8 +445,6 @@ uv add --editable /abs/path/to/portal/python/packages/livekit-portal
 # or
 pip install -e /abs/path/to/portal/python/packages/livekit-portal
 ```
-
-If the cdylib lives somewhere else, point `LIVEKIT_PORTAL_FFI_LIB` at it.
 
 ## Already on lerobot?
 

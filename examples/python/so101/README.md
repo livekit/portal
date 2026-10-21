@@ -39,7 +39,7 @@ uv sync
 Installs `lerobot[feetech]`, the Portal SDK, the `lerobot-robot-livekit`
 and `lerobot-teleoperator-livekit` plugins, and `rerun-sdk` into a local
 venv. The three Portal packages are picked up as editable installs from
-`../../packages/`.
+`../../../python/packages/`.
 
 ---
 
@@ -146,10 +146,10 @@ uv run teleoperator.py
 ```
 
 The rerun viewer auto-spawns on the operator side. You'll see:
-- `observation.<camera_name>`: live video from the follower (JPEG-compressed,
+- `observation/<camera_name>`: live video from the follower (JPEG-compressed,
   scrubbable on the `robot_time` timeline aligned to the follower's clock).
-- `observation.<motor>.pos`: follower joint positions as scalar plots.
-- `action.<motor>.pos`: commanded positions from the leader.
+- `observation/<motor>.pos`: follower joint positions as scalar plots.
+- `action/<motor>.pos`: commanded positions from the leader.
 
 Stop either side with Ctrl-C.
 

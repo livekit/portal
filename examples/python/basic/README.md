@@ -146,10 +146,10 @@ Everything is driven by `.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LIVEKIT_URL` | `ws://localhost:7880` | Server URL. |
+| `LIVEKIT_URL` | none | Required. Server URL, e.g. `ws://localhost:7880` in `.env.example`. |
 | `LIVEKIT_API_KEY` | none | Required. |
 | `LIVEKIT_API_SECRET` | none | Required. |
-| `LIVEKIT_ROOM` | `portal-demo` | Room name, shared by every script. |
+| `LIVEKIT_ROOM` | none | Required. Room name, shared by every script; `.env.example` uses `portal-demo`. |
 | `PORTAL_FPS` | `30` | Capture rate. Both sides must agree. |
 | `PORTAL_FRAME_WIDTH` | `320` | Frame width. Must be even. |
 | `PORTAL_FRAME_HEIGHT` | `240` | Frame height. Must be even. |

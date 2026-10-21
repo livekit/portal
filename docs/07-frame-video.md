@@ -68,7 +68,7 @@ Track names must be unique across all `add_video` calls, whatever the codec.
 
 | Codec | Lossless | Compression | Encode and decode cost | Fits one chunk up to |
 |---|---|---|---|---|
-| `RAW` | yes | none | none | about 70x70 |
+| `RAW` | yes | deflate on the wire, content-dependent | none | about 70x70 uncompressed |
 | `PNG` | yes | 2 to 3x on natural images | 3 to 10 ms at 480p | about 150x150 |
 | `MJPEG` | no | 10 to 20x at q=90 | under 1 ms at 480p | about 480p |
 
@@ -114,6 +114,10 @@ max fps ≈ 1000 / (1 + 2 × chunks)
 | 1080p | RAW | 6.1 MB | 415 | 1.2 |
 | 1080p | MJPEG q90 | 410 KB | 28 to 35 | 14 to 17 |
 
+RAW sizes are uncompressed. Portal sends RAW with LiveKit's byte-stream
+deflate on, so the bytes on the wire, and the chunk count, depend on the image:
+a flat synthetic frame shrinks far more than a real camera's.
+
 Reading that table:
 
 - MJPEG sustains real time at every resolution up to 720p.
@@ -147,6 +151,10 @@ cfg.add_video(
     *,
     simulcast: bool | None = None,
     screencast: bool | None = None,
+    stall_behavior: StallBehavior | None = None,
+    max_lag_ms: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> None
 ```
 
@@ -155,11 +163,17 @@ cfg.add_video(
 - **`quality`** is 1 to 100, and applies to MJPEG only. It is ignored for every
   other codec. 90 is visually near-lossless. 70 trades visible artifacts for
   roughly 2x more compression. Below 50 is unusable for inference.
-- **`max_bitrate_kbps`** caps the WebRTC encoder's peak rate. It is rejected on
-  the byte-stream codecs, because there is no encoder to cap.
+- **`max_bitrate_kbps`** caps the WebRTC encoder's peak rate. `add_video`
+  ignores it on the byte-stream codecs, because there is no encoder to cap, and
+  the [YAML loader](reference/config-file.md) rejects it there.
 - **`simulcast`** and **`screencast`** configure the WebRTC encoder and default
-  to off. They are rejected on the byte-stream codecs for the same reason. See
+  to off. Like `max_bitrate_kbps`, they are ignored on the byte-stream codecs
+  and rejected there in YAML. See
   [Simulcast and screencast](05-portal-api.md#simulcast-and-screencast).
+- **`stall_behavior`** and **`max_lag_ms`** override the session's stall
+  handling for this track. See [Tuning](06-tuning.md).
+- **`width`** and **`height`** declare the frame size you send. See
+  [Frame size](05-portal-api.md#frame-size).
 
 ## Metrics
 
@@ -169,7 +183,7 @@ because Portal does the encoding itself:
 ```python
 t = portal.metrics().transport
 
-t.bytes_sent["front"]                        # cumulative on-wire bytes
+t.bytes_sent["front"]                        # cumulative payload bytes (RAW: before deflate)
 t.bytes_received["front"]                    # same, operator side
 t.frames_dropped_publisher_full["front"]     # replaced by a newer frame before sending
 ```
@@ -181,6 +195,9 @@ designed for:
 avg_bytes = t.bytes_sent["front"] / t.frames_sent["front"]
 chunks_per_frame = avg_bytes / 15_000
 ```
+
+For RAW, `bytes_sent` counts the payload before deflate, so this overstates its
+chunks.
 
 A track you sized for one chunk showing up as four in production means your real
 camera has more entropy than your test fixture did. Re-check the table above

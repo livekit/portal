@@ -26,8 +26,8 @@ The robot accepts actions from the **active operator**, identified by a
 participant attribute on the robot. Operators and observers can request a change
 with `set_active_operator(identity)`.
 
-- **Claim control before sending actions.** A new robot has no active operator
-  and rejects actions until one is selected.
+- **Claim control before sending actions.** A new robot has no active operator,
+  unless its token seeds one, and rejects actions until one is selected.
 - **Coordinate handoffs in your application.** There is no built-in priority
   between callers. The last accepted request determines the active operator.
   Use the [orchestrator](#orchestration) pattern when one process should decide.

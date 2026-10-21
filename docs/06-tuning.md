@@ -1,13 +1,16 @@
 # Tuning
 
-> Three knobs control matching. Two more control transport reliability.
+Tune observation matching when cameras arrive late, observations are dropped,
+or a camera stops streaming. Start by setting `fps` to your camera rate. Then
+adjust how far apart captures may be (`tolerance`) and how much data Portal
+buffers (`slack`).
 
-Portal assumes **unified sampling**. The robot captures a frame and a state
-reading on the same tick. Every sync parameter derives from a single `fps`, and
-every internal buffer shares a single `slack`.
+For example, at 30 fps the default tolerance of 1.5 ticks allows a frame less
+than 50 ms from a state sample. A narrower window gives closer capture times
+but can drop more observations. A larger buffer can absorb delays but retains
+older data for longer.
 
-The defaults target 30 fps video with state at 100 Hz or below, over a WAN with
-roughly 50 ms RTT. If that describes your setup, you can skip this page.
+The following fragment shows the main settings on an existing config:
 
 ```python
 cfg.set_fps(30)                      # capture rate
@@ -21,9 +24,9 @@ cfg.set_stall_behavior(StallBehavior.DROP)   # what to do about a silent track
 cfg.set_max_lag_ms(166)              # how long to wait first; default slack/fps
 ```
 
-## The three matching knobs
+## Matching settings
 
-| Knob | Default | Controls | Change it when |
+| Setting | Default | Controls | Change it when |
 |---|---|---|---|
 | `fps` | 30 | Sampling rate. Sets the tick length the other two are measured in. | Your capture rate is not 30. If video and state differ, use the **video** rate. |
 | `slack` | 5 | Buffer depth, in ticks, for every internal buffer. | You need to ride out longer stalls, or your rates are asymmetric. Minimum useful value is 2. |
@@ -43,14 +46,14 @@ about 167 ms of headroom.
 
 ## Choosing `tolerance`
 
-This is the knob with a real tradeoff. A wide window preserves observations at
-the cost of sometimes pairing a state with a frame from a neighbouring tick. A
-narrow window guarantees tight pairing and drops instead.
+Choose `tolerance` based on how much capture-time difference your application
+accepts. A wider window can match more observations, including frames from
+neighboring ticks. A narrower window rejects those pairs.
 
 | Your situation | Pick | Why |
 |---|---|---|
 | Real-time inference or control | `0.5` | A misaligned observation is silently wrong. A drop is an explicit signal you can count. |
-| Recording data for VLA training | `1.5` | One tick of misalignment (33 ms at 30 fps) is invisible to a trained model. A dropped observation is lost data. |
+| Recording data for training | Disable observation sync | Preserve raw timestamps and choose alignment during dataset conversion. |
 | Teleop viewer | `1.5` | Visual continuity matters more than frame-perfect pairing. |
 | Lossy link, cellular or wireless | `1.5` | Widening cuts the drop rate materially under real loss. |
 | Clean local network | either | Drops are already rare, so the choice barely shows up. |
@@ -89,8 +92,10 @@ fewer things that can fail to match.
 
 ## Stalled tracks
 
-When a camera stops sending, two knobs decide what happens to the moments it
-can no longer cover: how long to wait, then what to do.
+If a wrist camera stops sending while the front camera continues, decide whether
+your application can use an observation without a fresh wrist image. Set
+`max_lag_ms` to limit how far the streams advance before resolving that
+observation, and `stall_behavior` to choose the result.
 
 **Set these on the side that consumes observations, normally the operator.**
 Observations are assembled where they are received, so a stall is detected and
@@ -133,9 +138,8 @@ in code written before it existed.
 
 ### Per track
 
-Cameras differ in how load-bearing they are, so both knobs override per track.
-In Python the override goes on the track declaration, alongside `codec` and the
-encoder settings, so everything about a track reads in one place:
+A policy may require a fresh wrist image while a monitoring view can tolerate a
+missing scene image. Override the behavior and lag limit for each camera:
 
 ```python
 cfg.set_stall_behavior(StallBehavior.OMIT)      # defaults for every track
@@ -166,7 +170,7 @@ cfg.set_track_max_lag_ms("wrist", 40);
 | Your situation | Pick |
 |---|---|
 | Real-time inference or control | `DROP` on the tracks the policy depends on. A substituted frame silently misaligns the perception and action loop, and no observation beats a confidently wrong one. |
-| Data collection or logging | `FREEZE`. A dropped state is lost data; a brief video freeze is recoverable, and `FrameSource.STALE` marks it in the recording. |
+| Data collection or logging | Record raw streams with observation sync disabled. Preserve timestamps and choose alignment later. |
 | Teleop viewer | `OMIT`. One dead camera should not blank the other three, and the operator can see which one died. |
 
 Before a track's first frame, `FREEZE` has nothing to reuse and `OMIT` has no
@@ -189,8 +193,8 @@ freeze after startup.
 
 ## Transport reliability
 
-State and actions use **reliable** delivery by default, which is lossless and
-ordered over SCTP. Video is always unreliable, because that is what RTP is.
+State and actions use reliable, ordered delivery over SCTP by default.
+WebRTC video uses RTP; RAW, PNG, and MJPEG frame video use reliable byte streams.
 
 ```python
 cfg.set_state_reliable(False)   # allow loss, no head-of-line blocking
@@ -229,13 +233,13 @@ is fine and your window is too tight. Raise `tolerance`.
 If `frames_received` is well below `frames_sent`, the problem sits upstream of
 sync. Look at the network, the encoder, and the publish queue.
 
-Every field is documented in [Metrics](07-metrics.md). The shipped examples
+Every field is documented in [Metrics](09-metrics.md). The shipped examples
 print a live summary every two seconds. Lift `periodic_metrics` from
 [`examples/python/basic/_common.py`](../examples/python/basic/_common.py) for
 your own scripts.
 
 ## Next steps
 
-- [Metrics](07-metrics.md). The full counter reference.
-- [Troubleshooting](08-troubleshooting.md). Warning tags and their fixes.
+- [Metrics](09-metrics.md). The full counter reference.
+- [Troubleshooting](10-troubleshooting.md). Warning tags and their fixes.
 - [Synchronization](reference/synchronization.md). Why these knobs exist.

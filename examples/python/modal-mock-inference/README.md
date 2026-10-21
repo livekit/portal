@@ -209,4 +209,4 @@ Frame size and run length are constants at the top of `robot.py`: `WIDTH`,
 If `dropped` climbs or `decode_rate` falls, the QR is getting mangled before
 the plain video would. Raise `WIDTH`/`HEIGHT`, or set `codec: png` in
 `portal.yaml` for a lossless comparison. See
-[frame video](../../../docs/05-frame-video.md).
+[frame video](../../../docs/07-frame-video.md).

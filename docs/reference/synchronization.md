@@ -1,18 +1,15 @@
 # Synchronization
 
-> How Portal fuses independently-streamed video frames and state packets into
-> coherent observations.
+Use this reference to understand why an observation matched, waited, or dropped.
+For example, a delayed wrist camera can prevent a policy from receiving an
+observation even when state and front-camera frames keep arriving.
 
-This is background reading. You do not need it to use Portal. It is here for
-people who need to reason about the algorithm, tune it against a hard latency
-budget, or extend it.
+For configuration changes, start with [Tuning](../06-tuning.md). This page
+explains the matching algorithm and its assumptions.
 
-For the knobs, see [Tuning](../04-tuning.md). For the short version, see
-[Concepts](../02-concepts.md#the-observation-model).
-
-All of this runs only on peers with observation sync on, which is the default
-for operators. With `set_observation_sync(False)` the sync buffer is never
-built, and state and frames reach `on_state` and `on_video_frame` unmatched.
+Matching runs on participants with observation sync enabled, including operators
+by default. With `set_observation_sync(False)`, frames and state reach
+`on_video_frame` and `on_state` separately.
 
 ## The problem
 
@@ -501,7 +498,7 @@ user-facing knobs.
 Keep `tolerance` at 1 or above so the window covers at least one inter-frame
 interval. Tighter than that and ordinary jitter starts producing drops.
 
-Full setters and the asymmetric-rate math are in [Tuning](../04-tuning.md).
+Full setters and the asymmetric-rate math are in [Tuning](../06-tuning.md).
 
 ## Where the code lives
 
@@ -519,6 +516,6 @@ Tests for every edge case above are in the `tests` module at the bottom of
 
 ## Reference
 
-- [Tuning](../04-tuning.md). The knobs.
-- [Metrics](../07-metrics.md). What the algorithm reports about itself.
+- [Tuning](../06-tuning.md). The knobs.
+- [Metrics](../09-metrics.md). What the algorithm reports about itself.
 - [Concepts](../02-concepts.md#the-observation-model). The short version.

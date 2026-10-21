@@ -1,12 +1,11 @@
 # RPC
 
-> One-shot commands that do not belong in a control loop.
+Use RPC for commands that need a response, such as homing the robot or starting
+calibration. Unlike a stream of joint targets, each call requests one operation
+and returns a result.
 
-`home`, `calibrate`, `start_recording`, a configuration change. These happen
-once, they need an answer, and modelling them as state or actions would be
-awkward. Portal exposes LiveKit's RPC surface directly for them.
-
-Either side can register methods. Either side can invoke them.
+Portal exposes LiveKit RPC through `register_rpc_method` and `perform_rpc`.
+A robot, operator, or observer can register and call methods.
 
 ## Register and call
 
@@ -26,8 +25,6 @@ On the side that asks:
 reply = await op.perform_rpc("home")
 print(reply)   # "ok"
 ```
-
-That is the whole happy path.
 
 Handlers may be `def` or `async def`. They **must return a string**. Returning
 anything else is an error.
@@ -155,7 +152,7 @@ Do not register your own method under that name.
 
 ## Next steps
 
-- [Portal API](03-portal-api.md). The full surface.
+- [Portal API](05-portal-api.md). The full surface.
 - [Concepts: control handoff](02-concepts.md#control-handoff). What the reserved
   method is for.
 - [Wire protocol](reference/wire-protocol.md#application-rpc). The contract, if

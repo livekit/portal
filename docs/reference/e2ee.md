@@ -1,10 +1,10 @@
 # End-to-end encryption
 
-> Shared-key AES-GCM over every media track and data channel.
+Configure end-to-end encryption when media and data should be readable only by
+participants holding a shared key. Participants encrypt content before sending
+it; the LiveKit server routes encrypted packets.
 
-With E2EE on, content is encrypted before it leaves the sender and decrypted only
-at the receiver. The LiveKit server routes the packets without being able to read
-them.
+Set the same key on each participant's config before connecting.
 
 ## How it works
 
@@ -95,7 +95,7 @@ What you will see instead:
 
 - Video is black, green, or visibly corrupt.
 - State and action packets do not parse. You may see
-  [`bad-payload`](../08-troubleshooting.md#bad-payload) warnings.
+  [`bad-payload`](../10-troubleshooting.md#bad-payload) warnings.
 - Observations never fire, because no frames or states are usable.
 
 The fix is always the same. Confirm both sides load byte-identical keys. A
@@ -108,7 +108,7 @@ print(len(key))   # 32, on both sides
 
 ## Reference
 
-- [Portal API](../03-portal-api.md). Where `set_e2ee_key` sits in the config
+- [Portal API](../05-portal-api.md). Where `set_e2ee_key` sits in the config
   surface.
 - [Config from YAML](config-file.md). Why the key is not in the file.
 - [Wire protocol](wire-protocol.md#end-to-end-encryption). What a peer in another

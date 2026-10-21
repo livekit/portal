@@ -1,6 +1,11 @@
 # Metrics
 
-> Every counter `portal.metrics()` returns, and which ones to watch.
+Use `portal.metrics()` to check whether frames are arriving, observations are
+being matched, and actions are returning within your latency budget. For
+example, if a policy responds slowly, compare network round-trip time with
+observation-to-action latency before changing synchronization settings.
+
+Read a snapshot from a connected Portal instance:
 
 ```python
 m = portal.metrics()
@@ -14,8 +19,7 @@ m.policy.e2e_us_p95
 portal.reset_metrics()   # zero the counters, keep the session
 ```
 
-`metrics()` returns a snapshot. Reading it is cheap and lock-free enough to call
-on a timer. Counters are cumulative since construction or the last
+`metrics()` returns a snapshot. You can poll it periodically from a monitoring task. Counters are cumulative since construction or the last
 `reset_metrics()`. Gauges reflect the instant you asked.
 
 Every duration is **microseconds**. Percentiles come from a rolling
@@ -143,12 +147,12 @@ Both fill gauges are bounded by `slack`, which defaults to 5. A track sitting at
 `video_fill` pinned at capacity on one track while others sit low points at that
 track running ahead. `state_fill` pinned at capacity means states are piling up
 with nothing to match against, which usually means a camera stalled. See
-[`state-overflow`](08-troubleshooting.md#state-overflow).
+[`state-overflow`](10-troubleshooting.md#state-overflow).
 
 Some eviction is normal when video arrives faster than state. Newest frames are
 kept, so matching still works. Eviction paired with rising `states_dropped` is
 the combination that matters. See
-[`video-overflow`](08-troubleshooting.md#video-overflow).
+[`video-overflow`](10-troubleshooting.md#video-overflow).
 
 ## `rtt`
 
@@ -281,7 +285,7 @@ Start it with `asyncio.create_task(report(op))` and cancel it before
 Both describe the same events from different angles.
 
 Logs tell you that something happened and what to do about it. Every drop
-carries a [reference tag](08-troubleshooting.md#tag-reference) naming its cause
+carries a [reference tag](10-troubleshooting.md#tag-reference) naming its cause
 and fix. Warnings are throttled, so the log is not a count.
 
 Metrics tell you how much and how often. Counters never throttle, so the metric
@@ -292,5 +296,5 @@ the number.
 
 ## Next steps
 
-- [Troubleshooting](08-troubleshooting.md). Each warning tag, its cause, its fix.
-- [Tuning](04-tuning.md). The knobs these numbers should drive.
+- [Troubleshooting](10-troubleshooting.md). Each warning tag, its cause, its fix.
+- [Tuning](06-tuning.md). The knobs these numbers should drive.

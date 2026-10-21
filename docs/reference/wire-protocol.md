@@ -1,19 +1,12 @@
 # Wire protocol
 
-> The bytes on the wire. Everything needed to build a Portal peer in a LiveKit
-> SDK with no Portal plugin.
+Use this reference to build a Portal-compatible client with another LiveKit
+SDK, such as a browser teleoperation UI or a Swift app. It defines the topics,
+participant attributes, RPC methods, and packet layouts that peers must share.
 
-Every other page describes the SDK surface. This one describes the wire. A peer
-that follows everything here interoperates with a Portal `Robot` or `Operator`
-without sharing any code.
-
-Use it for a browser teleop UI, a Go service, a Swift app, or anything else that
-speaks LiveKit but cannot import the Rust core or the Python package.
-
-Portal adds no new transport. It rides four standard LiveKit primitives: reliable
-data packets, byte streams, WebRTC video tracks, and participant attributes. The
-contract is the set of topic names, attribute keys, RPC names, and binary layouts
-below.
+Portal uses LiveKit data packets, byte streams, video tracks, and participant
+attributes. Your client must also implement the role and version checks below
+to communicate with a Portal robot, operator, or observer.
 
 ## Transport map
 
@@ -33,7 +26,7 @@ data and stream events by topic and ignore everything else. Other applications c
 share the room on other topics without interfering.
 
 The publisher column is the default direction. With
-[operator-side action subscription](../03-portal-api.md#operator-side-action-subscription)
+[operator-side action subscription](../05-portal-api.md#operator-side-action-subscription)
 on, an operator also reads `portal_action`.
 
 ## Identity, roles, and discovery
@@ -204,7 +197,7 @@ Track names are capped at 256 bytes. Route each frame to the track named in its
 header.
 
 Codec tradeoffs, the chunking latency floor, and per-track fps ceilings are in
-[Frame video](../05-frame-video.md).
+[Frame video](../07-frame-video.md).
 
 ## WebRTC video tracks
 
@@ -337,7 +330,7 @@ The LiveKit SDK limits apply: 15 KB request, 15 KB response, 256-byte error
 message, 15 KB error data. Codes 1001 to 1999 are reserved for transport errors.
 
 No Portal-specific framing is involved, so any LiveKit RPC client interoperates as
-is. See [RPC](../06-rpc.md) for the SDK-level surface.
+is. See [RPC](../08-rpc.md) for the SDK-level surface.
 
 ## End-to-end encryption
 
@@ -409,9 +402,9 @@ describe the schema for you.
   serve.
 - [Config from YAML](config-file.md). The shareable schema file both peers build
   from.
-- [Frame video](../05-frame-video.md). Codec and latency detail for the
+- [Frame video](../07-frame-video.md). Codec and latency detail for the
   byte-stream video path.
 - [Synchronization](synchronization.md). How an operator turns separate streams
   into matched observations.
-- [RPC](../06-rpc.md). The SDK-level RPC surface.
+- [RPC](../08-rpc.md). The SDK-level RPC surface.
 - [E2EE](e2ee.md). Shared-key encryption setup.

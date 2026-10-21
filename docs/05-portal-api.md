@@ -1,14 +1,12 @@
 # Portal API
 
-> The main surface. Build a config, construct a `Robot` or an `Operator`,
-> register callbacks, push data.
+Use this reference when connecting your hardware, policy, or recorder to Portal.
+For a complete running application, start with the [quickstart](01-quickstart.md).
 
-This is the API everything else in the repository is built on, including the
-optional lerobot plugins. It works with any robotics stack, because it has no
-opinion about where your frames or your actions come from.
-
-The shape is always the same. Build a config. Construct the role. Register
-callbacks. Connect. Push data.
+Choose `Robot` to publish sensor data and receive actions, `Operator` to send
+actions, or `Observer` to record and supervise. For each role, create a config,
+register callbacks, then connect to a LiveKit room. Your application supplies
+the sensor readings and implements the control logic.
 
 ## Install
 
@@ -93,7 +91,7 @@ role-specific is a no-op on the wrong side.
 
 | Method | Default | What it does |
 |---|---|---|
-| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](07-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
@@ -112,7 +110,7 @@ role-specific is a no-op on the wrong side.
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
 
 `set_fps`, `set_slack`, and `set_tolerance` are covered in
-[Tuning](04-tuning.md).
+[Tuning](06-tuning.md).
 
 Every field is also readable back as a property, which is how you inspect a
 config you loaded from YAML instead of building by hand:
@@ -235,7 +233,7 @@ async def main(url: str, token: str, policy) -> None:
 
 Passing `in_reply_to_ts_us` is optional but cheap, and it is what turns
 `metrics.policy.e2e_us_p50` into a real observation-to-action latency instead
-of a network ping. See [Metrics](07-metrics.md#policy).
+of a network ping. See [Metrics](09-metrics.md#policy).
 
 ## Lifecycle
 
@@ -397,7 +395,7 @@ sync `now_us()` switches to the robot's clock in one step, which can go
 backwards once if this host's clock was ahead. From then on it never repeats and
 never goes backwards. It is the default
 timestamp for everything you send. Details are in
-[Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
+[Metrics](09-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
 
 **Opting out.** A lab whose hosts are already synced, with PTP or
 GPS-disciplined clocks, can trust the system clock instead:
@@ -433,7 +431,7 @@ api.AccessToken(key, secret).with_attributes(
 **Both roles need `can_update_own_metadata=True`** in their token. `Robot` and
 `Operator` self-set an `lk.portal.role` attribute on connect, and that write
 fails without the grant. See
-[Troubleshooting](08-troubleshooting.md#connect-fails-with-a-metadata-error).
+[Troubleshooting](10-troubleshooting.md#connect-fails-with-a-metadata-error).
 
 ## Keypoints
 
@@ -476,19 +474,20 @@ without any extra API.
 |---|---|---|
 | **Single operator** | robot, 1 operator | Operator claims control at startup. |
 | **Human in the loop** | robot, policy, human | Either side calls `set_active_operator`. Executed actions stay continuous across the cutover. |
-| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription("active")` and logs every executed action with `action.sender`. |
+| **Data recording** | robot, policy, human, recorder | Recorder is an observer, which defaults to `set_action_subscription("active")`, and logs every active action with `action.sender`. See [Data recording](03-data-recording.md). |
 | **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. A recorder with `set_action_subscription("all")` gets both streams, with `action.active` telling them apart. |
 | **Supervisor** | robot, N operators, supervisor UI | Supervisor never claims control. It only calls `set_active_operator` to route. |
 
-Working versions of the last three live in the integration tests:
+A runnable walkthrough of human in the loop and orchestration is in
+[Arbitration](04-arbitration.md). Working versions of the last three live in the integration tests:
 [action subscription](../python/packages/livekit-portal/tests/integration/test_action_subscription.py),
 [handoff](../python/packages/livekit-portal/tests/integration/test_multi_operator.py).
 
 ## Operator-side action subscription
 
-By default an operator only sends actions. It never sees what the robot
-actually executed. Recorders, shadow policies, and monitoring UIs need that
-view. `set_action_subscription` decides which actions reach `on_action`.
+To display or compare actions from other operators, enable action subscription.
+`set_action_subscription` selects which actions reach `on_action`; operators
+subscribe to none by default, while observers subscribe to active actions.
 
 ```python
 cfg = OperatorConfig("session-1")
@@ -505,11 +504,11 @@ op.on_action(lambda action: log.append(action))
 | `active` | only the active operator's actions, the same gate the robot runs |
 | `all` | every operator's actions, including the ones the gate dropped |
 
-Every action carries `sender` and `active`, both stamped at gate time.
-`active=False` marks a shadow action the robot ignored. With `all` you can
-record a candidate policy next to the one actually driving and compare them
-offline. It means the action passed the gate, not that the robot carried it
-out.
+Each receiving participant evaluates `active` against its local view of the
+active operator. `sender` identifies the action's source. With `all`, you can
+record a candidate policy's actions alongside the active operator's actions.
+These fields do not confirm that the robot received or physically executed an
+action. For execution feedback, publish the measured result as robot state.
 
 Actions are broadcast to the whole room either way, so this is a local filter
 and `all` costs nothing extra on the wire. `none` is the default because most
@@ -591,7 +590,7 @@ default settings holds them at 45 to 146 ms at 1080p.
 The setting covers the whole process and has to be in place before its first
 LiveKit connection. Portal sets it on connect. If something else in the process
 connected to LiveKit first, Portal logs
-[`playout-delay`](08-troubleshooting.md#playout-delay) and receives with the
+[`playout-delay`](10-troubleshooting.md#playout-delay) and receives with the
 default delay.
 
 #### Simulcast and screencast
@@ -643,7 +642,7 @@ cfg.add_video("debug", codec=VideoCodec.RAW)
 The user-facing API does not change. `send_video_frame`, `on_video_frame`,
 `get_video_frame`, and observations all behave identically, and frames arrive
 as RGB either way. Codec choice, the latency math, and per-track fps ceilings
-are in [Frame video](05-frame-video.md).
+are in [Frame video](07-frame-video.md).
 
 ## RPC
 
@@ -658,7 +657,7 @@ reply = await op.perform_rpc("home", payload="{}")
 ```
 
 Handlers must return a string. Full surface, error codes, and payload limits
-are in [RPC](06-rpc.md).
+are in [RPC](08-rpc.md).
 
 ## Metrics
 
@@ -673,7 +672,7 @@ m.policy.e2e_us_p95
 portal.reset_metrics()
 ```
 
-Every field is documented in [Metrics](07-metrics.md).
+Every field is documented in [Metrics](09-metrics.md).
 
 ## Gotchas
 
@@ -689,7 +688,7 @@ cast. `int` is accepted for float dtypes. `bool` is rejected everywhere except
 fingerprint over the ordered field names and dtypes. A peer whose schema
 disagrees sees its packets dropped with one warning per offending fingerprint.
 The healthy side keeps running. Nothing throws. See
-[`schema-mismatch`](08-troubleshooting.md#schema-mismatch).
+[`schema-mismatch`](10-troubleshooting.md#schema-mismatch).
 
 **Unknown field names on send are dropped.** Keys not in the declared schema
 get one warning and are then ignored silently. A typo in a field name looks
@@ -886,12 +885,11 @@ Two timelines, both on the robot's clock:
   on `robot_time` alone.
 - **`portal/schema` records field order.** Rerun entities are independent, so
   without it anything reading the file would have to guess joint order.
-- **`action/<sender>/active`** is 1 for actions the robot executed and 0 for
+- **`action/<sender>/active`** is 1 for actions accepted by the local control gate and 0 for
   shadow actions, recorded with `set_action_subscription("all")`.
 
-Turning archives into datasets (LeRobot or anything else) is up to your own
-tooling. For other formats, such as MCAP or your own storage, write your own
-sink.
+For a walkthrough, writing your own sink, and turning archives into training
+datasets, see [Data recording](03-data-recording.md).
 
 ## Using `Portal` directly
 
@@ -915,8 +913,8 @@ genuinely dynamic.
 
 ## Next steps
 
-- [Tuning](04-tuning.md). `fps`, `slack`, `tolerance`, and reliability.
-- [Frame video](05-frame-video.md). Pixel-exact frames for policies.
-- [Metrics](07-metrics.md). Every counter, and which ones to alert on.
+- [Tuning](06-tuning.md). `fps`, `slack`, `tolerance`, and reliability.
+- [Frame video](07-frame-video.md). Pixel-exact frames for policies.
+- [Metrics](09-metrics.md). Every counter, and which ones to alert on.
 - [Config from YAML](reference/config-file.md). Move the schema into one shared
   file.

@@ -1,17 +1,13 @@
 # Frame video
 
-> Per-frame RGB over byte streams, for policies where the pixels matter.
+Choose a video path based on what consumes the images. A human teleoperator
+usually needs a responsive preview. A policy or dataset may also need precise
+pixel values or frames compressed independently.
 
-The default video path is WebRTC H.264. It is lossy, it resamples colorspace,
-and it drops frames silently to hold a bitrate target. For a human watching a
-teleop feed that is exactly right. For a policy reading those pixels it can be
-a problem.
-
-Frame video is the alternative. Each frame is encoded independently and shipped
-whole over a reliable byte stream. The bytes your camera produced are the bytes
-your policy sees.
-
-You select it by passing a byte-stream codec to `add_video`.
+Portal defaults to H.264 over WebRTC. To send each frame over a reliable byte
+stream instead, select `RAW`, `PNG`, or `MJPEG` in `add_video`. RAW and PNG
+preserve RGB pixels; MJPEG is lossy. All three use the same frame API and
+participate in observation matching.
 
 ## When to use it
 
@@ -24,7 +20,7 @@ You select it by passing a byte-stream codec to `add_video`.
 
 The byte-stream codecs are `RAW`, `PNG`, and `MJPEG`. Everything else (`H264`,
 `VP8`, `VP9`, `AV1`, `H265`) rides the WebRTC media path. See
-[Portal API](03-portal-api.md#video-codecs) for the WebRTC options and
+[Portal API](05-portal-api.md#video-codecs) for the WebRTC options and
 `max_bitrate_kbps`.
 
 > **Note.** There is no default byte-stream codec. `add_video(name)` with no
@@ -80,12 +76,12 @@ That last column matters because of the latency floor below. A frame that fits
 in one 15 KB chunk pays the floor once. A frame spread over N chunks pays it N
 times.
 
-For most inference work, **MJPEG at quality 90 is the right answer.** It is
-visually near-lossless on natural images, it decodes in under a millisecond, and
-it fits typical inference resolutions in one or two chunks.
+For inference that can accept lossy images, start by evaluating MJPEG at
+quality 90. Measure image quality and latency with your camera data and policy;
+encoded size depends on the scene and resolution.
 
-Reach for PNG when you need bit-exactness and can afford the payload. Reach for
-RAW only at small resolutions, where it is genuinely free.
+Use PNG when you need exact pixels with compression. RAW avoids encoding but
+requires more bandwidth, so it is most useful at small resolutions.
 
 ## The latency floor
 
@@ -122,7 +118,8 @@ Reading that table:
 
 - MJPEG sustains real time at every resolution up to 720p.
 - RAW is real time only at small resolutions, 320x240 and below.
-- At 1080p, 30 fps closed-loop control needs MJPEG. RAW caps near 1 fps.
+- In these measurements, neither RAW nor MJPEG reaches 30 fps at 1080p.
+  Reduce resolution or frame rate, or evaluate the WebRTC path.
 - At 224x224, the standard VLA inference size, even RAW clears 30 fps. Bit-exact
   RGB is genuinely on the table.
 
@@ -162,7 +159,7 @@ cfg.add_video(
   the byte-stream codecs, because there is no encoder to cap.
 - **`simulcast`** and **`screencast`** configure the WebRTC encoder and default
   to off. They are rejected on the byte-stream codecs for the same reason. See
-  [Simulcast and screencast](03-portal-api.md#simulcast-and-screencast).
+  [Simulcast and screencast](05-portal-api.md#simulcast-and-screencast).
 
 ## Metrics
 
@@ -192,9 +189,9 @@ with the real number.
 `frames_dropped_publisher_full` climbing means the publisher is offering frames
 faster than the link ships them. Each track sends one frame at a time and holds
 only the newest one waiting behind it, so a slow link costs frame rate, not
-latency. See [`publish-full`](08-troubleshooting.md#publish-full).
+latency. See [`publish-full`](10-troubleshooting.md#publish-full).
 
-Full field list in [Metrics](07-metrics.md#transport).
+Full field list in [Metrics](09-metrics.md#transport).
 
 ## Wire format
 
@@ -226,6 +223,6 @@ Building a peer in another SDK? The full contract is in
 
 ## Next steps
 
-- [Tuning](04-tuning.md). Match-window knobs, which interact with frame rate.
-- [Metrics](07-metrics.md). The counters above, in full.
-- [Troubleshooting](08-troubleshooting.md). Frame-video warning tags.
+- [Tuning](06-tuning.md). Match-window knobs, which interact with frame rate.
+- [Metrics](09-metrics.md). The counters above, in full.
+- [Troubleshooting](10-troubleshooting.md). Frame-video warning tags.

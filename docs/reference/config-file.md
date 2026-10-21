@@ -1,10 +1,10 @@
 # Config from YAML
 
-> One shareable file describing the wire contract, loaded by both peers.
+The robot, operator, and recorder need matching camera names and field schemas.
+Keep those declarations in one YAML file to avoid updating each process
+separately when you add a joint or camera.
 
-Schema mismatch is the most common way a Portal session fails, and it happens
-because two processes declare their fields in two places. A shared YAML file
-removes that whole class of bug.
+Load the file with the config class for your role:
 
 ```python
 from livekit.portal import RobotConfig
@@ -12,8 +12,8 @@ from livekit.portal import RobotConfig
 cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
 ```
 
-The file describes the **wire contract only**: schemas, video tracks, and sync
-knobs. Identity and secrets are supplied at the call site, so the same file is
+The file describes the **wire contract only**: schemas, video tracks, and synchronization
+settings. Identity and secrets are supplied at the call site, so the same file is
 reusable across the robot and the operator, and it never holds anything sensitive.
 
 The Rust core does the parsing and validation. There is exactly one parser, so a
@@ -35,12 +35,15 @@ RobotConfig.from_yaml_file(path: str | os.PathLike, session: str) -> RobotConfig
 OperatorConfig.from_yaml_str(yaml: str, session: str) -> OperatorConfig
 OperatorConfig.from_yaml_file(path: str | os.PathLike, session: str) -> OperatorConfig
 
+ObserverConfig.from_yaml_str(yaml: str, session: str) -> ObserverConfig
+ObserverConfig.from_yaml_file(path: str | os.PathLike, session: str) -> ObserverConfig
+
 PortalConfig.from_yaml_str(yaml: str, session: str, role: Role) -> PortalConfig
 PortalConfig.from_yaml_file(path: str | os.PathLike, session: str, role: Role) -> PortalConfig
 ```
 
-`RobotConfig` and `OperatorConfig` pin the role for you. Use them unless you have
-a reason to drive `PortalConfig` directly.
+`RobotConfig`, `OperatorConfig`, and `ObserverConfig` select the role for you.
+Use `PortalConfig` when the application chooses its role dynamically.
 
 Everything the file declared is readable back off the loaded config, so a value
 the file owns doesn't have to be duplicated in your process:
@@ -50,7 +53,7 @@ cfg = RobotConfig.from_yaml_file("portal.yaml", "session-1")
 period = 1.0 / cfg.fps        # the file's rate, not a second copy of it
 ```
 
-See [the full property list](../03-portal-api.md#full-config-surface).
+See [the full property list](../05-portal-api.md#full-config-surface).
 
 ## A minimal file
 
@@ -135,7 +138,7 @@ action:
 | `version` | int | **required** | Major version of the file format. Currently `1`. Unknown majors are rejected. |
 | `fps` | int | `30` | Observation rate. Drives `search_range = tolerance / fps`. |
 | `slack` | int | `5` | Pipeline headroom, in ticks. |
-| `tolerance` | float | `1.5` | Match window, in ticks. See [Tuning](../04-tuning.md). |
+| `tolerance` | float | `1.5` | Match window, in ticks. See [Tuning](../06-tuning.md). |
 | `state_reliable` | bool | `true` | Reliable transport for state packets. |
 | `action_reliable` | bool | `true` | Reliable transport for action packets. |
 | `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
@@ -173,7 +176,7 @@ videos:
 | `max_lag_ms` | int | Optional. Per-track override of the top-level `max_lag_ms`. |
 | `simulcast` | bool | Optional. Publish several spatial layers. Defaults to `false`. Rejected on the byte-stream codecs. |
 | `screencast` | bool | Optional. Pin the resolution and drop frames under pressure instead of rescaling. Defaults to `false`. Rejected on the byte-stream codecs. |
-| `width`, `height` | int | Optional. The frame size you send, so the encoder is set up for it. Give both or neither, both even. Defaults to 640x480. Rejected on the byte-stream codecs. See [Frame size](../03-portal-api.md#frame-size). |
+| `width`, `height` | int | Optional. The frame size you send, so the encoder is set up for it. Give both or neither, both even. Defaults to 640x480. Rejected on the byte-stream codecs. See [Frame size](../05-portal-api.md#frame-size). |
 
 The codec picks both the encoding and the transport.
 
@@ -186,7 +189,7 @@ codecs that honor `simulcast`, `screencast`, `width` and `height`.
 resolution that changes mid-session. By default libwebrtc treats the source as
 camera content and rescales frames under CPU or bandwidth pressure. Marking it
 as screen content pins the geometry and drops frames instead. See
-[Simulcast and screencast](../03-portal-api.md#simulcast-and-screencast).
+[Simulcast and screencast](../05-portal-api.md#simulcast-and-screencast).
 
 **`mjpeg`** is a per-frame byte stream, lossy. Roughly 10 to 20x compression at
 q=90, with sub-millisecond decode. Each frame is independent.
@@ -198,7 +201,7 @@ natural images.
 encode cost.
 
 Codec selection guidance and the latency math are in
-[Frame video](../05-frame-video.md).
+[Frame video](../07-frame-video.md).
 
 ## `state` and `action`
 
@@ -217,7 +220,7 @@ state:
 **Order is significant.** Both peers must declare the same fields in the same
 order with the same dtypes. The schema fingerprint is computed from this list, so
 any rename, reorder, or dtype change drops packets at the receiver with a
-[`schema-mismatch`](../08-troubleshooting.md#schema-mismatch) warning.
+[`schema-mismatch`](../10-troubleshooting.md#schema-mismatch) warning.
 
 Values cast to and from the declared dtype at the wire boundary. Integer overflow
 saturates, so `mode: 500` into an `i8` arrives as `127`.
@@ -414,7 +417,7 @@ Everything else is fair game.
 
 ## Reference
 
-- [Portal API](../03-portal-api.md). The programmatic equivalent.
-- [Tuning](../04-tuning.md). What `fps`, `slack`, and `tolerance` actually do.
-- [Frame video](../05-frame-video.md). Choosing a codec.
+- [Portal API](../05-portal-api.md). The programmatic equivalent.
+- [Tuning](../06-tuning.md). What `fps`, `slack`, and `tolerance` actually do.
+- [Frame video](../07-frame-video.md). Choosing a codec.
 - [E2EE](e2ee.md). Why the key is not in the file.

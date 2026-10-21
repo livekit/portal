@@ -1,19 +1,10 @@
 # lerobot plugins
 
-> Optional convenience wrappers, for stacks already on lerobot.
+If your application already uses [LeRobot](https://github.com/huggingface/lerobot),
+these plugins let you access a remote robot through LeRobot's device interfaces.
+They read the device's feature definitions and configure Portal's streams for you.
 
-Portal's own API works with any robotics stack and is the surface everything else
-is built on. If you happen to be on [lerobot](https://github.com/huggingface/lerobot)
-already, two plugin packages wrap that API so you do not have to write the glue
-yourself.
-
-Your existing local `Robot` or `Teleoperator` goes in. The plugin introspects its
-`*_features`, brokers the traffic over a LiveKit room, and presents the remote arm
-as an ordinary local lerobot device.
-
-These are a shortcut, not the canonical way to use Portal. Read
-[Concepts](../02-concepts.md) first, because the plugins expose the same model with
-different names.
+Install the plugin for each host:
 
 | Package | Runs on | What it wraps | What it presents |
 |---|---|---|---|
@@ -88,7 +79,7 @@ def mint(identity: str, room: str, api_key: str, api_secret: str) -> str:
 
 > **Note.** `can_update_own_metadata=True` is not optional. Without it, `connect()`
 > fails with `failed to publish role attribute`. See
-> [Troubleshooting](../08-troubleshooting.md#connect-fails-with-a-metadata-error).
+> [Troubleshooting](../10-troubleshooting.md#connect-fails-with-a-metadata-error).
 
 ## Robot host
 
@@ -262,12 +253,12 @@ Operator-only, on `LiveKitRobotConfig`:
 | `camera_height` | `480` | Shape advertised in `observation_features`. Metadata only, Portal accepts any resolution at runtime. |
 | `camera_width` | `640` | As above. |
 | `observation_features` | `None` | Full state schema when the robot reports more than the action keys. Replaces the mirror assumption. |
-| `time_sync_source` | `PORTAL` | `PORTAL` syncs to the robot's clock. `SYSTEM` trusts this host's clock, for hosts already synced by PTP or GPS. See [Time sync](../03-portal-api.md#time-sync). |
+| `time_sync_source` | `PORTAL` | `PORTAL` syncs to the robot's clock. `SYSTEM` trusts this host's clock, for hosts already synced by PTP or GPS. See [Time sync](../05-portal-api.md#time-sync). |
 
 The room identity comes from the LiveKit token you mint, via `with_identity(...)`,
 not from any config field.
 
-See [Tuning](../04-tuning.md) for the math behind `fps`, `slack`, and `tolerance`.
+See [Tuning](../06-tuning.md) for the math behind `fps`, `slack`, and `tolerance`.
 
 ## Frame formats
 
@@ -333,13 +324,13 @@ reconstruct the plugin. On the operator side, prefer declaring
 | `InvalidFrameDimensions` | Frame width or height is odd. Both must be even. |
 | `ValueError: ... cannot infer schema` | The constructor got neither a local instance nor `motors` and `camera_names`. Pass one or the other. |
 
-For anything not in that table, see [Troubleshooting](../08-troubleshooting.md).
+For anything not in that table, see [Troubleshooting](../10-troubleshooting.md).
 
 ## Reference
 
 - [Concepts](../02-concepts.md). The model the plugins wrap.
-- [Portal API](../03-portal-api.md). What they are built on, and what to drop down
+- [Portal API](../05-portal-api.md). What they are built on, and what to drop down
   to when you need more control.
-- [Tuning](../04-tuning.md). The knobs the config fields forward to.
+- [Tuning](../06-tuning.md). The knobs the config fields forward to.
 - [`examples/python/so101/`](../../examples/python/so101). A working two-arm setup
   on real hardware.

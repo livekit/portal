@@ -431,6 +431,32 @@ api.AccessToken(key, secret).with_attributes(
 fails without the grant. See
 [Troubleshooting](08-troubleshooting.md#connect-fails-with-a-metadata-error).
 
+## Keypoints
+
+Annotations as their own track. A keypoint is `{type, payload}`: `type` is any
+string and `payload` any JSON object. Portal delivers and records keypoints but
+never interprets them, so what they mean is up to whoever consumes them.
+
+```python
+present = await op.send_keypoint(
+    "recording", {"task_description": "pick the blue cube"},
+    timestamp_us=frame.timestamp_us,   # default: now_us()
+)
+if not present:
+    print("no observer recorded that")
+
+obs.on_keypoint(lambda kp: ...)   # kp.type, kp.payload, kp.timestamp_us, kp.sender
+```
+
+- **Any role can send, every role receives**, the sender included.
+- **`timestamp_us` is where the mark belongs.** A teleoperator passes the
+  timestamp of the frame on screen, so a boundary lands where the operator saw
+  it. Anything else gets `now_us()`, on the robot's clock.
+- **`send_keypoint` returns the observers that were present.** An empty list
+  tells the sender that no one recorded the mark.
+- `type` must be a `str` and `payload` a `dict`; anything else raises
+  `TypeError` before sending. A keypoint must fit in one data packet.
+
 ## Multi-operator patterns
 
 Because operators are just room participants, several useful setups fall out
@@ -679,8 +705,9 @@ robot.operators() / robot.local_identity()
 robot.on_operator_joined(cb) / robot.on_operator_left(cb)
 robot.on_active_operator_changed(cb)
 
-# time sync
+# time sync, keypoints
 robot.now_us() / robot.on_time_synced(cb)
+await robot.send_keypoint(type, payload=None, timestamp_us=None) / robot.on_keypoint(cb)
 
 # rpc, metrics, lifecycle
 robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
@@ -705,8 +732,9 @@ op.operators() / op.robot_identity() / op.local_identity()
 op.on_operator_joined(cb) / op.on_operator_left(cb)
 op.on_active_operator_changed(cb)
 
-# time sync
+# time sync, keypoints
 op.now_us() / op.on_time_synced(cb)
+await op.send_keypoint(type, payload=None, timestamp_us=None) / op.on_keypoint(cb)
 
 # rpc, metrics, lifecycle
 op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)
@@ -731,7 +759,8 @@ obs.operators() / obs.observers() / obs.robot_identity() / obs.local_identity()
 obs.on_operator_joined(cb) / obs.on_operator_left(cb)
 obs.on_active_operator_changed(cb)
 
-# time sync, rpc, metrics, lifecycle: as on the operator
+# keypoints, time sync, rpc, metrics, lifecycle: as on the operator
+await obs.send_keypoint(type, payload=None, timestamp_us=None) / obs.on_keypoint(cb)
 ```
 
 `ObserverConfig` has the same declarative surface as `OperatorConfig` but

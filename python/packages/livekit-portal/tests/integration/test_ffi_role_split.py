@@ -80,6 +80,9 @@ class _Recorder(ffi.PortalCallbacks):
     def on_time_synced(self) -> None:
         pass
 
+    def on_keypoint(self, keypoint) -> None:
+        pass
+
 
 def _f(name: str):
     return ffi.FieldSpec(name=name, dtype=ffi.DType.F32)

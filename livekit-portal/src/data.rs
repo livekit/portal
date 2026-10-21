@@ -16,13 +16,12 @@ use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use livekit::StreamByteOptions;
 use livekit::prelude::*;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::config::{ChunkSpec, FieldSpec};
+use crate::config::FieldSpec;
 use crate::error::{PortalError, PortalResult};
 
 #[cfg(test)]
@@ -30,19 +29,16 @@ use crate::dtype::DType;
 use crate::metrics::{DataStream, MetricsRegistry};
 use crate::rtt::{RTT_TOPIC, RttService};
 use crate::serialization::{
-    DecodeError, action_fingerprint, chunk_fingerprint, deserialize_action, deserialize_chunk,
-    deserialize_values, schema_fingerprint, serialize_action, serialize_chunk, serialize_values,
+    DecodeError, action_fingerprint, deserialize_action, deserialize_values, schema_fingerprint,
+    serialize_action, serialize_values,
 };
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
-use crate::types::{Action, ActionChunk, ChunkColumn, Role, State, TypedValue, to_value_maps};
+use crate::types::{Action, Role, State, TypedValue, to_value_maps};
 use crate::video::now_us;
 
-/// Reserved Portal topics. State and action travel as data packets;
-/// chunks travel as byte streams (their topic is matched on
-/// `ByteStreamOpened`, not `DataReceived`).
+/// Reserved Portal topics. State and action travel as data packets.
 pub(crate) const STATE_TOPIC: &str = "portal_state";
 pub(crate) const ACTION_TOPIC: &str = "portal_action";
-pub(crate) const ACTION_CHUNK_TOPIC: &str = "portal_action_chunk";
 
 // --- Publisher ---
 
@@ -51,12 +47,6 @@ pub(crate) const ACTION_CHUNK_TOPIC: &str = "portal_action_chunk";
 /// (slow SFU, lossy link) cannot grow memory without limit; on overflow we
 /// drop and warn rather than block the synchronous send path.
 const PUBLISH_QUEUE_CAP: usize = 1024;
-
-/// Cap on the unknown-fingerprint warn-rate-limiter set. Each unique
-/// offender is logged once; once the cap fills, further unknown
-/// fingerprints are silently dropped (one log line announces the cap).
-/// Keeps the set bounded against an adversarial peer cycling fingerprints.
-const UNKNOWN_FP_WARN_CAP: usize = 256;
 
 /// Publishes serialized state/action packets. Spawns a single background task
 /// at construction; `send` enqueues onto an mpsc channel, preserving ordering
@@ -108,9 +98,6 @@ impl DataPublisher {
         let fingerprint = match stream {
             DataStream::State => schema_fingerprint(&schema),
             DataStream::Action => action_fingerprint(&schema),
-            DataStream::Chunk => unreachable!(
-                "DataPublisher only handles scalar state/action; chunks go through ChunkPublisher"
-            ),
         };
         let last_values = Mutex::new(vec![0.0; schema.len()]);
         Self {
@@ -165,9 +152,6 @@ impl DataPublisher {
                 DataStream::Action => {
                     serialize_action(self.fingerprint, ts, in_reply_to_ts_us, &last, &self.schema)
                 }
-                DataStream::Chunk => unreachable!(
-                    "DataPublisher only handles scalar state/action; chunks go through ChunkPublisher"
-                ),
             };
             // Compute the f64 view a receiver would reconstruct: each value
             // round-tripped through its declared dtype so out-of-range
@@ -261,57 +245,6 @@ impl DataPublisher {
     }
 }
 
-/// Reject a chunk column whose claimed dtype disagrees with the declared
-/// field. The scalar counterpart is `DataPublisher::check_dtypes`, and the
-/// semantics match: declarations are compared and values are never
-/// inspected, so this stays O(fields) regardless of horizon. A column that
-/// claims nothing is coerced to the declared dtype at encode.
-///
-/// Free-standing so it's testable without a live `LocalParticipant`.
-fn check_chunk_dtypes(
-    fields: &[FieldSpec],
-    data: &HashMap<String, ChunkColumn>,
-) -> PortalResult<()> {
-    for field in fields {
-        // Absent fields skip the check and zero-fill, matching how the
-        // scalar path skips absent keys (there they carry forward instead).
-        if let Some(column) = data.get(&field.name)
-            && let Some(claimed) = column.dtype
-            && claimed != field.dtype
-        {
-            return Err(PortalError::DtypeMismatch {
-                field: field.name.clone(),
-                expected: field.dtype,
-                got: claimed.variant_name(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// How a column's length compares to the declared horizon, and therefore
-/// what `serialize_chunk` will do about it. Carries lengths rather than a
-/// formatted message so classification never allocates — the message is
-/// built only for a column that actually warns.
-#[derive(Debug, PartialEq)]
-enum ColumnFill {
-    Exact,
-    Missing,
-    /// Column is `n` long against a longer horizon, so the tail zero-pads.
-    Short(usize),
-    /// Column is `n` long against a shorter horizon, so the tail is dropped.
-    Long(usize),
-}
-
-fn classify_column_len(got: Option<usize>, horizon: usize) -> ColumnFill {
-    match got {
-        None => ColumnFill::Missing,
-        Some(n) if n == horizon => ColumnFill::Exact,
-        Some(n) if n < horizon => ColumnFill::Short(n),
-        Some(n) => ColumnFill::Long(n),
-    }
-}
-
 /// Update `last` in place with values from `map` for each declared field,
 /// leaving other slots untouched (carry-forward). Typed values are
 /// lossless-widened to `f64` on the way in.
@@ -390,293 +323,6 @@ impl<R: Clone> DataSlot<R> {
 
 pub(crate) type ActionSlot = DataSlot<Action>;
 pub(crate) type StateSlot = DataSlot<State>;
-
-/// Slot for a single declared action chunk. Wraps the same callback +
-/// latest-wins + mismatch-warn machinery as `DataSlot`, plus the spec and
-/// precomputed fingerprint the dispatch path needs. Lives on the receiving
-/// (Robot) side; one per declared chunk.
-pub(crate) struct ChunkSlot {
-    pub(crate) spec: ChunkSpec,
-    pub(crate) fingerprint: u32,
-    pub(crate) inner: DataSlot<ActionChunk>,
-}
-
-impl ChunkSlot {
-    pub fn new(spec: ChunkSpec) -> Self {
-        let fingerprint = chunk_fingerprint(&spec);
-        Self { spec, fingerprint, inner: DataSlot::new() }
-    }
-
-    pub fn deliver(&self, chunk: ActionChunk) {
-        self.inner.deliver(chunk);
-    }
-
-    pub fn get(&self) -> Option<ActionChunk> {
-        self.inner.get()
-    }
-
-    pub fn clear(&self) {
-        self.inner.clear();
-    }
-
-    pub fn set_callback(&self, cb: Box<dyn Fn(&ActionChunk) + Send + Sync>) {
-        *self.inner.cb.lock() = Some(cb);
-    }
-
-    pub fn warn_mismatch(&self, expected: u32, got: u32) {
-        self.inner.warn_mismatch(&format!("chunk '{}'", self.spec.name), expected, got);
-    }
-}
-
-/// Publishes chunk payloads as LiveKit byte streams (not data packets).
-///
-/// Chunks can exceed the 15 KB data-packet limit (10 timesteps × 32 F32 fields
-/// already runs ~1.3 KB; production VLAs trend larger). Byte streams are
-/// reliable by design and chunk into fragments under the hood, so we get
-/// arbitrary-size payloads with the same lossless ordering scalar actions
-/// already enjoy.
-///
-/// Sends are serialized through an mpsc onto a single drainer task. One
-/// in-flight stream at a time keeps order on the receiver — concurrent
-/// streams could finish out of declaration order.
-pub(crate) struct ChunkPublisher {
-    spec: ChunkSpec,
-    fingerprint: u32,
-    tx: mpsc::Sender<Vec<u8>>,
-    task: Option<JoinHandle<()>>,
-    metrics: Arc<MetricsRegistry>,
-    /// `(t, field_index)` pairs already warned. Kept as flat indices —
-    /// matches `serialize_chunk`'s output channel.
-    warned_saturated: Mutex<HashSet<usize>>,
-    warned_unknown_keys: Mutex<HashSet<String>>,
-    /// Fields already warned about a column length that isn't `horizon`.
-    /// Keyed by field name, so a caller that is consistently short warns
-    /// once rather than once per send.
-    warned_length: Mutex<HashSet<String>>,
-}
-
-impl ChunkPublisher {
-    pub fn new(
-        spec: ChunkSpec,
-        local_participant: LocalParticipant,
-        metrics: Arc<MetricsRegistry>,
-    ) -> Self {
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(PUBLISH_QUEUE_CAP);
-        let chunk_name = spec.name.clone();
-        let task = tokio::spawn(async move {
-            while let Some(payload) = rx.recv().await {
-                let options = StreamByteOptions::new_with_topic(ACTION_CHUNK_TOPIC);
-                if let Err(e) = local_participant.send_bytes(payload, options).await {
-                    log::warn!("[publish-failed] chunk '{chunk_name}' byte stream failed: {e}");
-                }
-            }
-        });
-        let fingerprint = chunk_fingerprint(&spec);
-        Self {
-            spec,
-            fingerprint,
-            tx,
-            task: Some(task),
-            metrics,
-            warned_saturated: Mutex::new(HashSet::new()),
-            warned_unknown_keys: Mutex::new(HashSet::new()),
-            warned_length: Mutex::new(HashSet::new()),
-        }
-    }
-
-    /// Send a chunk. `data` is `field -> column of length horizon`. Each
-    /// column's f64 values must be in range for the field's declared
-    /// dtype; integer overflow saturates and warns once per
-    /// `(t, field_index)`.
-    ///
-    /// A column that claims a dtype (`ChunkColumn::dtype == Some`) is
-    /// checked against the declared field and a mismatch is rejected,
-    /// mirroring `DataPublisher::check_dtypes` for scalar actions.
-    ///
-    /// `timestamp_us = None` resolves to `now_us()`. `in_reply_to_ts_us`
-    /// links the chunk back to the observation that produced it for
-    /// `metrics.policy.e2e_us_*`. Wrong-length columns are accepted and
-    /// padded with `0.0` (rather than rejected) so partial fills during
-    /// development don't fail noisily — production callers should always
-    /// supply the full column, and a length that isn't `horizon` warns
-    /// once per field.
-    pub fn send(
-        &self,
-        data: &HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        self.check_dtypes(data)?;
-        self.warn_unknown_keys(data);
-        self.warn_length(data);
-        let ts = timestamp_us.unwrap_or_else(now_us);
-        let out = serialize_chunk(self.fingerprint, ts, in_reply_to_ts_us, &self.spec, data);
-        if !out.saturated_indices.is_empty() {
-            self.warn_saturated(&out.saturated_indices);
-        }
-        match self.tx.try_send(out.payload) {
-            Ok(()) => {
-                self.metrics.bump_sent(DataStream::Chunk);
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                log::warn!(
-                    "[publish-full] chunk '{}' queue full (cap={}), dropping packet",
-                    self.spec.name,
-                    PUBLISH_QUEUE_CAP
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
-        }
-        Ok(())
-    }
-
-    fn check_dtypes(&self, data: &HashMap<String, ChunkColumn>) -> PortalResult<()> {
-        check_chunk_dtypes(&self.spec.fields, data)
-    }
-
-    fn warn_unknown_keys(&self, data: &HashMap<String, ChunkColumn>) {
-        for key in data.keys() {
-            if self.spec.fields.iter().any(|f| &f.name == key) {
-                continue;
-            }
-            let mut warned = self.warned_unknown_keys.lock();
-            if warned.insert(key.clone()) {
-                log::warn!(
-                    "[unknown-field] chunk '{}': field '{}' not in chunk schema, ignored",
-                    self.spec.name,
-                    key
-                );
-            }
-        }
-    }
-
-    /// Report columns that aren't exactly `horizon` long. `serialize_chunk`
-    /// pads with `0.0` and truncates the overflow, which for joint targets
-    /// means commanding zero rather than doing nothing — silent is the wrong
-    /// default even though accepting the send is.
-    fn warn_length(&self, data: &HashMap<String, ChunkColumn>) {
-        let horizon = self.spec.horizon as usize;
-        for field in &self.spec.fields {
-            let fill = classify_column_len(data.get(&field.name).map(|c| c.values.len()), horizon);
-            if fill == ColumnFill::Exact {
-                continue;
-            }
-            // Claim the warn slot before formatting. A caller that is
-            // consistently short would otherwise build a message per send
-            // for the lifetime of the publisher and throw it away.
-            {
-                let mut warned = self.warned_length.lock();
-                if !warned.insert(field.name.clone()) {
-                    continue;
-                }
-            }
-            let detail = match fill {
-                ColumnFill::Exact => unreachable!("filtered above"),
-                ColumnFill::Missing => format!("missing, padded with {horizon} zeros"),
-                ColumnFill::Short(n) => {
-                    format!("has {n} of {horizon} timesteps, padded with {} zeros", horizon - n)
-                }
-                ColumnFill::Long(n) => {
-                    format!("has {n} of {horizon} timesteps, truncated to {horizon}")
-                }
-            };
-            log::warn!(
-                "[chunk-length] chunk '{}': field '{}' {}",
-                self.spec.name,
-                field.name,
-                detail
-            );
-        }
-    }
-
-    fn warn_saturated(&self, indices: &[usize]) {
-        let n_fields = self.spec.fields.len();
-        let mut warned = self.warned_saturated.lock();
-        for &i in indices {
-            if warned.insert(i) {
-                let t = i / n_fields;
-                let fi = i % n_fields;
-                let field = &self.spec.fields[fi];
-                log::warn!(
-                    "[saturated] chunk '{}': field '{}' at t={} clamped to {:?} range",
-                    self.spec.name,
-                    field.name,
-                    t,
-                    field.dtype
-                );
-            }
-        }
-    }
-}
-
-impl Drop for ChunkPublisher {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
-/// Decode + dispatch a chunk payload received from a byte stream. Unlike the
-/// data-packet path, this runs on a tokio worker the byte-stream reader was
-/// spawned on; the dispatch logic mirrors `handle_data_received`'s action
-/// arm — fingerprint match → decode against that slot's schema → fire
-/// callback + cache latest.
-///
-/// `unknown_fp_warns` rate-limits the unknown-fingerprint log so a peer
-/// running a totally different chunk schema doesn't spam every received
-/// stream — we log once per offending fingerprint, like `DataSlot` does
-/// for its mismatch path.
-pub(crate) fn dispatch_chunk_payload(
-    payload: &[u8],
-    chunk_slots: &[Arc<ChunkSlot>],
-    unknown_fp_warns: &Mutex<HashSet<u32>>,
-    metrics: &MetricsRegistry,
-    sender: String,
-) {
-    if payload.len() < 4 {
-        log::warn!("[bad-payload] chunk byte stream shorter than 4-byte fingerprint header");
-        return;
-    }
-    let fp = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-    let Some(slot) = chunk_slots.iter().find(|s| s.fingerprint == fp) else {
-        let mut warned = unknown_fp_warns.lock();
-        if warned.len() < UNKNOWN_FP_WARN_CAP && warned.insert(fp) {
-            log::warn!(
-                "[unknown-chunk] topic '{ACTION_CHUNK_TOPIC}': unknown fingerprint 0x{fp:08x}, dropping byte stream"
-            );
-            if warned.len() == UNKNOWN_FP_WARN_CAP {
-                log::warn!(
-                    "[unknown-chunk] topic '{ACTION_CHUNK_TOPIC}': unknown-fingerprint warn cap ({UNKNOWN_FP_WARN_CAP}) reached, suppressing further warnings"
-                );
-            }
-        }
-        return;
-    };
-    match deserialize_chunk(payload, slot.fingerprint, &slot.spec) {
-        Ok((send_ts, in_reply_to_ts_us, columns)) => {
-            let now = now_us();
-            metrics.record_received(DataStream::Chunk, send_ts, now);
-            metrics.record_e2e(in_reply_to_ts_us, now);
-            let data: HashMap<String, Vec<f64>> =
-                slot.spec.fields.iter().map(|f| f.name.clone()).zip(columns).collect();
-            slot.deliver(ActionChunk {
-                name: slot.spec.name.clone(),
-                horizon: slot.spec.horizon,
-                data,
-                timestamp_us: send_ts,
-                in_reply_to_ts_us,
-                sender: sender.clone(),
-            });
-        }
-        Err(DecodeError::SchemaMismatch { expected, got }) => {
-            slot.warn_mismatch(expected, got);
-        }
-        Err(DecodeError::Malformed(e)) => {
-            log::warn!("[bad-payload] chunk '{}' deserialize failed: {e}", slot.spec.name);
-        }
-    }
-}
 
 /// Build an `Action` from the schema and the decoded f64 values. Kept
 /// here so `handle_data_received` and any test helpers share the same
@@ -814,10 +460,10 @@ mod tests {
             map: &HashMap<String, TypedValue>,
         ) -> Result<(), (String, DType, &'static str)> {
             for field in schema {
-                if let Some(v) = map.get(&field.name) {
-                    if v.dtype() != field.dtype {
-                        return Err((field.name.clone(), field.dtype, v.variant_name()));
-                    }
+                if let Some(v) = map.get(&field.name)
+                    && v.dtype() != field.dtype
+                {
+                    return Err((field.name.clone(), field.dtype, v.variant_name()));
                 }
             }
             Ok(())
@@ -842,76 +488,6 @@ mod tests {
         assert_eq!(err.0, "gripper");
         assert_eq!(err.1, DType::Bool);
         assert_eq!(err.2, "F32");
-    }
-
-    fn chunk_fields() -> Vec<FieldSpec> {
-        vec![
-            FieldSpec::new("joint", DType::F32),
-            FieldSpec::new("gripper", DType::Bool),
-            FieldSpec::new("mode", DType::I8),
-        ]
-    }
-
-    #[test]
-    fn chunk_claimed_dtype_matching_declaration_passes() {
-        let data: HashMap<String, ChunkColumn> = [
-            ("joint".to_string(), ChunkColumn::typed(DType::F32, vec![0.5, 0.25])),
-            ("gripper".to_string(), ChunkColumn::typed(DType::Bool, vec![1.0, 0.0])),
-        ]
-        .into_iter()
-        .collect();
-        assert!(check_chunk_dtypes(&chunk_fields(), &data).is_ok());
-    }
-
-    #[test]
-    fn chunk_claimed_dtype_mismatch_is_rejected() {
-        // An F32 column against the declared Bool gripper — the chunk
-        // equivalent of handing `send_action` a `TypedValue::F32` for a
-        // Bool field.
-        let data: HashMap<String, ChunkColumn> =
-            [("gripper".to_string(), ChunkColumn::typed(DType::F32, vec![1.0, 0.0]))]
-                .into_iter()
-                .collect();
-        let err = check_chunk_dtypes(&chunk_fields(), &data).unwrap_err();
-        match err {
-            PortalError::DtypeMismatch { field, expected, got } => {
-                assert_eq!(field, "gripper");
-                assert_eq!(expected, DType::Bool);
-                assert_eq!(got, "F32");
-            }
-            other => panic!("expected DtypeMismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn chunk_unclaimed_dtype_waives_the_check() {
-        // The uniform-tensor path: one f32 policy output fanned across a
-        // mixed schema can't honestly claim Bool for the gripper, so it
-        // claims nothing and coerces instead of failing.
-        let data: HashMap<String, ChunkColumn> = chunk_fields()
-            .iter()
-            .map(|f| (f.name.clone(), ChunkColumn::untyped(vec![1.0, 0.0])))
-            .collect();
-        assert!(check_chunk_dtypes(&chunk_fields(), &data).is_ok());
-    }
-
-    #[test]
-    fn chunk_dtype_check_ignores_absent_and_unknown_fields() {
-        // Absent declared field: skipped here, zero-filled at encode.
-        // Unknown key: skipped here, warned separately by warn_unknown_keys.
-        let data: HashMap<String, ChunkColumn> =
-            [("extra".to_string(), ChunkColumn::typed(DType::U8, vec![1.0]))].into_iter().collect();
-        assert!(check_chunk_dtypes(&chunk_fields(), &data).is_ok());
-    }
-
-    #[test]
-    fn column_length_classification_covers_pad_truncate_and_missing() {
-        assert_eq!(classify_column_len(Some(16), 16), ColumnFill::Exact);
-        assert_eq!(classify_column_len(None, 16), ColumnFill::Missing);
-        assert_eq!(classify_column_len(Some(10), 16), ColumnFill::Short(10));
-        assert_eq!(classify_column_len(Some(20), 16), ColumnFill::Long(20));
-        // An empty column is missing data, not a zero-length exact match.
-        assert_eq!(classify_column_len(Some(0), 16), ColumnFill::Short(0));
     }
 
     #[test]

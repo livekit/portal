@@ -122,5 +122,5 @@ harder. Lower `PORTAL_FPS` on a constrained link.
 - [Quickstart](../../../docs/01-quickstart.md). The same thing, built up step by
   step.
 - [Concepts](../../../docs/02-concepts.md). The model behind what you just ran.
-- [`../inference/`](../inference). Action chunks and end-to-end latency metrics.
+- [`../inference/`](../inference). A planned action horizon and end-to-end latency metrics.
 - [`../so101/`](../so101). The same ideas on real hardware.

@@ -24,7 +24,7 @@ Each logical channel maps to one LiveKit primitive on one reserved topic.
 | State | `portal_state` | data packet | yes | robot |
 | Action | `portal_action` | data packet | yes | operator |
 | Frame video | `portal_frame_video` | byte stream | yes | robot |
-| RTT | `portal_rtt` | data packet | no | both |
+| Clock | `portal_clock` | data packet | no | robot answers, others ping |
 | WebRTC video | the track name | media track | n/a | robot |
 
 All topic names are exact, case-sensitive literals. A peer must filter incoming
@@ -227,22 +227,42 @@ the configured fps. Neither is required for interop, but matching them avoids
 surprises. Simulcast is per-track configurable via `add_video(simulcast=True)`,
 as is libwebrtc's content-type hint via `screencast=True`.
 
-## RTT
+## Clock
 
-An optional liveness and latency probe. It is a data packet on `portal_rtt`, sent
-**unreliable** so retransmits cannot inflate the measurement.
+Time sync, NTP-style. Every peer except the robot estimates the robot's clock
+from a ping/pong exchange on `portal_clock`. Packets are **unreliable** so
+retransmits cannot inflate the round trip, and addressed to one participant
+(`destination_identities`), never broadcast. All integers are little-endian.
 
 ```
-[u8  kind = 0 ping | 1 pong]
-[u64 timestamp_us  little-endian]
+ping  [u8 kind = 0][u32 seq][u64 t1]                    peer → robot
+pong  [u8 kind = 1][u32 seq][u64 t1][u64 t2][u64 t3]    robot → pinger
 ```
 
-A peer sends a ping carrying its current timestamp on a timer. The receiver echoes
-the payload back as a pong, **preserving the original timestamp**. The original
-sender computes RTT as now minus the echoed timestamp.
+`t1` is when the peer sent the ping, on its own clock. The robot answers every
+ping, echoing `seq` and `t1` and adding `t2` (ping received) and `t3` (pong
+sent), both on the robot's clock. The peer notes `t4` when the pong arrives and
+computes:
 
-A peer that does not implement RTT can ignore the topic entirely. Nothing else
-depends on it.
+```
+offset = ((t2 - t1) + (t3 - t4)) / 2      robot clock minus local clock
+rtt    = (t4 - t1) - (t3 - t2)
+```
+
+Portal pings at 4 Hz until synced, then 1 Hz. It keeps a 10 s window of samples
+and uses the offset from the one with the smallest `rtt`, since the
+least-delayed sample is closest to the true offset. It needs 4 samples before
+the first estimate. A sample implying a jump of more than 1 s is ignored unless
+30 in a row agree, which counts as a resync. When the robot leaves the room the
+estimate starts over.
+
+The estimate never moves timestamps backwards. A forward correction applies at
+once. A backward correction is absorbed gradually: the clock runs at 95% of real
+speed until it has caught up.
+
+A packet with an unknown kind or the wrong length is ignored. A peer that does
+not implement time sync can ignore the topic; it just keeps timestamping on its
+own clock.
 
 ## Control plane: active operator
 

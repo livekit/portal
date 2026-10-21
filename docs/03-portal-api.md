@@ -101,7 +101,6 @@ role-specific is a no-op on the wrong side.
 | `set_tolerance(float)` | 1.5 | Match window, in ticks. |
 | `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
 | `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
-| `set_ping_ms(int)` | 1000 | RTT probe cadence. `0` disables probing on this side. |
 | `set_stall_behavior(StallBehavior)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
 | `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
@@ -128,7 +127,6 @@ config you loaded from YAML instead of building by hand:
 | `slack` | `int` | `set_slack`. |
 | `tolerance` | `float` | `set_tolerance`. |
 | `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
-| `ping_ms` | `int` | `set_ping_ms`. |
 | `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. Deprecated. |
 | `action_subscription` | `bool` | `set_action_subscription`. |
 | `has_e2ee_key` | `bool` | Whether a key was set. The bytes are not readable back. |
@@ -351,6 +349,23 @@ portal.on_operator_left(lambda identity: ...)
 portal.on_active_operator_changed(lambda identity: ...)   # identity may be None
 ```
 
+## Time sync
+
+Every peer syncs to the robot's clock in the background, on the `portal_clock`
+topic. It is always on.
+
+```python
+portal.now_us()                      # now on the robot's clock; on the robot, its own
+portal.on_time_synced(lambda: ...)   # first sync, and after each resync
+
+m = portal.metrics().time_sync
+m.synced, m.offset_us, m.uncertainty_us
+```
+
+Before the first sync, `now_us()` is local time and `synced` is `False`.
+`now_us()` never repeats and never goes backwards. Details are in
+[Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
+
 ### Behavior worth knowing
 
 **It starts unset.** A robot with no active operator drops every action. Your
@@ -530,6 +545,7 @@ m = portal.metrics()
 m.sync.observations_emitted
 m.sync.states_dropped
 m.rtt.rtt_us_p95
+m.time_sync.offset_us
 m.policy.e2e_us_p95
 
 portal.reset_metrics()
@@ -607,6 +623,9 @@ robot.operators() / robot.local_identity()
 robot.on_operator_joined(cb) / robot.on_operator_left(cb)
 robot.on_active_operator_changed(cb)
 
+# time sync
+robot.now_us() / robot.on_time_synced(cb)
+
 # rpc, metrics, lifecycle
 robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
 await robot.perform_rpc(method, payload, destination=None, response_timeout_ms=None)
@@ -629,6 +648,9 @@ op.active_operator() / await op.set_active_operator(identity)
 op.operators() / op.robot_identity() / op.local_identity()
 op.on_operator_joined(cb) / op.on_operator_left(cb)
 op.on_active_operator_changed(cb)
+
+# time sync
+op.now_us() / op.on_time_synced(cb)
 
 # rpc, metrics, lifecycle
 op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)

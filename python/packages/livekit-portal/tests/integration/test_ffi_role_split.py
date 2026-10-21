@@ -77,6 +77,9 @@ class _Recorder(ffi.PortalCallbacks):
     def on_active_operator_changed(self, identity) -> None:
         self.active_changes.append(identity)
 
+    def on_time_synced(self) -> None:
+        pass
+
 
 def _f(name: str):
     return ffi.FieldSpec(name=name, dtype=ffi.DType.F32)

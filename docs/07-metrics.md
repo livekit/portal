@@ -21,7 +21,7 @@ on a timer. Counters are cumulative since construction or the last
 Every duration is **microseconds**. Percentiles come from a rolling
 256-sample window and read `None` until enough samples land.
 
-## The five groups
+## The six groups
 
 | Group | Answers |
 |---|---|
@@ -29,6 +29,7 @@ Every duration is **microseconds**. Percentiles come from a rolling
 | [`transport`](#transport) | Is data getting across? |
 | [`buffers`](#buffers) | Are we running out of headroom? |
 | [`rtt`](#rtt) | How far away is the peer? |
+| [`time_sync`](#time_sync) | Do we agree with the robot on the time? |
 | [`policy`](#policy) | How long does the full loop take? |
 
 ## What to watch first
@@ -92,19 +93,16 @@ dicts keyed by track name.
 |---|---|---|
 | `frames_sent` | `dict[str, int]` | Frames handed to the transport, per track. |
 | `frames_received` | `dict[str, int]` | Frames arrived, per track. |
-| `frames_dropped_publisher_full` | `dict[str, int]` | Frames dropped because the publisher's in-flight queue was at its cap. |
+| `frames_dropped_publisher_full` | `dict[str, int]` | Frames replaced by a newer frame before the publisher could send them. |
 | `bytes_sent` | `dict[str, int]` | On-wire payload bytes, per track. Frame-video tracks only. |
 | `bytes_received` | `dict[str, int]` | Same, receive side. Frame-video only. |
 | `states_sent` | `int` | State packets published. |
 | `states_received` | `int` | State packets arrived. |
 | `actions_sent` | `int` | Action packets published. |
 | `actions_received` | `int` | Action packets arrived. |
-| `action_chunks_sent` | `int` | Chunk byte streams published. |
-| `action_chunks_received` | `int` | Chunk byte streams arrived. |
 | `frame_jitter_us` | `dict[str, int]` | Inter-arrival jitter per video track. |
 | `state_jitter_us` | `int` | Inter-arrival jitter for state. |
 | `action_jitter_us` | `int` | Inter-arrival jitter for actions. |
-| `action_chunk_jitter_us` | `int` | Inter-arrival jitter for chunks. |
 
 **`bytes_sent` and `bytes_received` cover frame-video tracks only.** WebRTC
 frames are encoded by libwebrtc inside its own transport, so Portal cannot
@@ -154,7 +152,8 @@ the combination that matters. See
 
 ## `rtt`
 
-Both sides. Populated only if `ping_ms` is non-zero on this side.
+Every side except the robot, which answers pings but never sends them.
+Measured by the [time sync](#time_sync) exchange.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -171,6 +170,40 @@ does.
 RTT is pure network round trip on an unreliable channel. It is **not** your
 control-loop latency. For that, use `policy`.
 
+## `time_sync`
+
+Every side. On the robot it always reads synced, with a zero offset and zero
+uncertainty, because the robot's clock is the reference.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `source` | `TimeSyncSource` | `PORTAL` or `SYSTEM`, from `set_time_sync_source`. Sinks record it, so every archive says which clock its timestamps came from. |
+| `synced` | `bool` | Whether `now_us()` is on the robot's clock yet. Always `True` in `SYSTEM` mode. |
+| `offset_us` | `int` | Robot clock minus local clock, as applied to `now_us()`. |
+| `uncertainty_us` | `int \| None` | How far off `now_us()` could be: half the round trip of the sample the offset came from. `None` until synced, and always in `SYSTEM` mode. |
+| `measured_offset_us` | `int \| None` | Latest offset the exchange measured, applied or not. In `SYSTEM` mode, a value far from zero means the host clocks have drifted apart. |
+| `resyncs` | `int` | Times 30 agreeing samples moved the timeline by more than 1 s. |
+| `samples_rejected` | `int` | Samples ignored for implying a jump of more than 1 s. |
+
+`reset_metrics()` zeroes `resyncs` and `samples_rejected` but leaves the rest
+alone, since zeroing `offset_us` or `synced` would look like the clock just lost
+sync.
+
+A steadily climbing `samples_rejected` with no resync means the samples disagree
+with each other, usually because the link is very jittery.
+
+## `observer`
+
+`Observer` only, while or after it records with `record_to`. Filled in by the
+Python recorder rather than the Rust core.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `recording` | `bool` | Whether a sink is being fed. |
+| `frames_written` | `int` | Video frames handed to the sink. |
+| `frames_dropped` | `int` | Video frames dropped because the sink fell behind. State, actions and keypoints are never dropped. |
+| `queued` | `int` | Records waiting for the writer thread. |
+
 ## `policy`
 
 The one that measures your actual loop. Populated on whichever side **receives**
@@ -180,7 +213,7 @@ correlated actions, which is normally the robot.
 |---|---|---|
 | `e2e_us_p50` | `int \| None` | Median observation-to-action latency. |
 | `e2e_us_p95` | `int \| None` | 95th percentile of the same. |
-| `correlated_received` | `int` | Actions and chunks that carried a correlation stamp. |
+| `correlated_received` | `int` | Actions that carried a correlation stamp. |
 
 This measures from the observation timestamp the operator correlated against to
 the local receive time of the resulting action. It therefore includes the

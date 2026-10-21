@@ -22,7 +22,10 @@ members = ["packages/*"]
 
 [dependency-groups]
 dev = [
+    "livekit>=1.0",
     "livekit-api>=1.1.0",
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "rerun-sdk>=0.24",
+    "pillow>=10",
 ]

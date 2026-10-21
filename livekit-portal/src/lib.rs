@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod clock;
 pub mod codec;
 pub mod config;
 pub mod config_file;
@@ -19,11 +20,12 @@ mod data;
 pub mod dtype;
 pub mod error;
 mod frame_video;
+mod jpeg;
+mod keypoint;
 pub mod metrics;
 mod placeholder;
 mod portal;
 pub mod rpc;
-mod rtt;
 mod serialization;
 mod sync_buffer;
 pub mod types;
@@ -31,18 +33,24 @@ mod video;
 
 pub use codec::Codec;
 pub use config::{
-    ChunkSpec, DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, VideoTrackSpec,
+    DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, Resolution, VideoOptions,
+    VideoTrackSpec,
 };
 pub use config_file::ConfigFileError;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
 pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
+pub use keypoint::Keypoint;
 pub use metrics::{
-    BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TransportMetrics,
+    BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
+    TransportMetrics,
 };
-pub use portal::{ACTIVE_OPERATOR_ATTR_KEY, Portal, ROLE_ATTR_KEY, SET_ACTIVE_OPERATOR_RPC};
+pub use portal::{
+    ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, Portal, ROLE_ATTR_KEY,
+    SET_ACTIVE_OPERATOR_RPC,
+};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{
-    Action, ActionChunk, ChunkColumn, FrameSource, Observation, Role, StallBehavior, StallConfig,
-    State, SyncConfig, TypedValue, VideoFrameData,
+    Action, ActionSubscription, FrameSource, Observation, Role, StallBehavior, StallConfig, State,
+    SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,
 };

@@ -15,19 +15,7 @@ path = "uniffi-bindgen.rs"
 
 [dependencies]
 livekit-portal = { path = "../livekit-portal" }
-# Pinned to main past two fixes neither of which is in a crates.io
-# release yet (latest 0.31.1 branched before both):
-#   - PR #2824 (2026-02-23): `_UniffiRustBufferBuilder.write` / `_pack_into`
-#     switch from a per-byte Python loop to `ctypes.memmove`, recovering
-#     tens of ms of GIL time per video frame.
-#   - baf24e77b5 (2026-03-19): `Box<T>::visit_children` now visits the
-#     inner `T` instead of skipping to its grandchildren. Without this,
-#     the pipeline's `namespace.visit::<Type>` never reaches the inner
-#     types of `Map`/`Sequence`/`Optional`, so `_UniffiFfiConverterFloat64`
-#     is referenced but never emitted when f64 only appears inside a
-#     `HashMap<String, f64>` (which is our state/action wire format).
-# Drop this back to a version req once a release ships with both.
-uniffi = { git = "https://github.com/mozilla/uniffi-rs", rev = "bd74c376547cff78e1364dd678ddb277927c14a8", features = ["cli", "tokio"] }
+uniffi = { version = "0.32.2", features = ["cli", "tokio"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros"] }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
@@ -35,3 +23,5 @@ log = { workspace = true }
 env_logger = "0.11"
 ctor = "1"
 async-trait = "0.1"
+serde_json = "1"
+bytes = "1"

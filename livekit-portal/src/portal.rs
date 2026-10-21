@@ -22,30 +22,37 @@ use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::config::{ChunkSpec, FieldSpec, PortalConfig};
+use crate::clock::{CLOCK_TOPIC, ClockActor, ClockOptions, ClockService, SyncedClock};
+use crate::config::{FieldSpec, PortalConfig};
 use crate::data::{
-    ACTION_CHUNK_TOPIC, ACTION_TOPIC, ActionSlot, ChunkPublisher, ChunkSlot, DataPublisher,
-    STATE_TOPIC, StateSlot, dispatch_chunk_payload, handle_data_received,
+    ACTION_TOPIC, ActionOrigin, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot,
+    handle_data_received,
 };
 use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{
     FRAME_VIDEO_TOPIC, FrameVideoPublisher, FrameVideoTrackEntry, dispatch_frame_payload,
 };
+use crate::keypoint::{KEYPOINT_TOPIC, Keypoint, KeypointSlot};
 use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
-use crate::rtt::RttService;
 use crate::serialization::{action_fingerprint, schema_fingerprint};
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
 use crate::types::*;
-use crate::video::{VideoPublisher, VideoReceiver, VideoTrackSlots};
+use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver, VideoTrackSlots};
 
 /// Participant attribute keys used by Portal for role discovery and the
 /// multi-controller pointer. Namespaced to avoid colliding with any
 /// application-level attributes the user may also be setting.
 pub const ROLE_ATTR_KEY: &str = "lk.portal.role";
 pub const ACTIVE_OPERATOR_ATTR_KEY: &str = "lk.portal.active_operator";
+/// Wire protocol version every peer publishes. Peers only recognise each
+/// other when it matches, so a mixed-version room fails loudly instead of
+/// exchanging packets neither side can read.
+pub const PROTOCOL_VERSION_ATTR_KEY: &str = "lk.portal.version";
+pub const PROTOCOL_VERSION: &str = "3";
 const ROLE_VALUE_ROBOT: &str = "robot";
 const ROLE_VALUE_OPERATOR: &str = "operator";
+const ROLE_VALUE_OBSERVER: &str = "observer";
 /// RPC method registered by Robot-side Portals so any participant can request
 /// a change to the active operator pointer. Payload is the new identity, or
 /// the empty string to clear. Result is the empty string on success.
@@ -58,6 +65,13 @@ const RPC_NOT_CONNECTED: u32 = 2001;
 /// App-level RPC error code returned when the SDK's `set_attributes` fails
 /// while the robot is processing a `set_active_operator` request.
 const RPC_SET_ATTRIBUTES_FAILED: u32 = 2002;
+/// App-level RPC error code returned when `set_active_operator` comes from
+/// a participant that is neither an operator nor an observer.
+const RPC_NOT_AUTHORIZED: u32 = 2003;
+/// How long the robot waits for an unrecognised RPC caller to appear in the
+/// rosters. The caller's role attribute and its RPC travel separately, so a
+/// peer that calls right after connecting can beat its own attribute here.
+const RPC_CALLER_ROSTER_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 type ObservationCb = Box<dyn Fn(&Observation) + Send + Sync>;
 type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
@@ -76,9 +90,16 @@ pub(crate) struct ControllerState {
     /// from `ParticipantConnected` plus the initial remote-participants
     /// snapshot.
     pub(crate) operators: Mutex<HashSet<String>>,
+    /// Identities of currently-connected observers (excluding self). Kept
+    /// apart from `operators` so that list only holds peers that can drive.
+    pub(crate) observers: Mutex<HashSet<String>>,
     /// The robot's identity, discovered by reading the `lk.portal.role`
     /// attribute. Operators use this to address `set_active_operator` RPCs.
     pub(crate) robot_identity: Mutex<Option<String>>,
+
+    /// Identities already warned about for a protocol version mismatch, so
+    /// each one is logged once rather than on every attribute change.
+    version_mismatch_warned: Mutex<HashSet<String>>,
 
     on_operator_joined: Mutex<Option<IdentityCb>>,
     on_operator_left: Mutex<Option<IdentityCb>>,
@@ -90,7 +111,9 @@ impl ControllerState {
         Self {
             active_operator: Mutex::new(None),
             operators: Mutex::new(HashSet::new()),
+            observers: Mutex::new(HashSet::new()),
             robot_identity: Mutex::new(None),
+            version_mismatch_warned: Mutex::new(HashSet::new()),
             on_operator_joined: Mutex::new(None),
             on_operator_left: Mutex::new(None),
             on_active_operator_changed: Mutex::new(None),
@@ -124,9 +147,17 @@ impl ControllerState {
         }
     }
 
+    /// Whether `id` is a recognised Portal peer of any role.
+    fn is_known_peer(&self, id: &str) -> bool {
+        self.robot_identity.lock().as_deref() == Some(id)
+            || self.operators.lock().contains(id)
+            || self.observers.lock().contains(id)
+    }
+
     fn clear(&self) {
         *self.active_operator.lock() = None;
         self.operators.lock().clear();
+        self.observers.lock().clear();
         *self.robot_identity.lock() = None;
     }
 
@@ -149,18 +180,26 @@ impl ControllerState {
     ///   does not produce a spurious callback when it gets re-read.
     fn clear_for_reconnect(&self) {
         self.operators.lock().clear();
+        self.observers.lock().clear();
         *self.robot_identity.lock() = None;
     }
 }
 
 /// Classify a participant by their `lk.portal.role` attribute. Returns
-/// `None` if the attribute is absent or has an unknown value.
+/// `None` if the attribute is absent, has an unknown value, or the
+/// participant speaks a different protocol version.
 fn classify_role(attrs: &HashMap<String, String>) -> Option<Role> {
-    match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
-        Some(ROLE_VALUE_ROBOT) => Some(Role::Robot),
-        Some(ROLE_VALUE_OPERATOR) => Some(Role::Operator),
-        _ => None,
-    }
+    let role = match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
+        Some(ROLE_VALUE_ROBOT) => Role::Robot,
+        Some(ROLE_VALUE_OPERATOR) => Role::Operator,
+        Some(ROLE_VALUE_OBSERVER) => Role::Observer,
+        _ => return None,
+    };
+    is_compatible(attrs).then_some(role)
+}
+
+fn is_compatible(attrs: &HashMap<String, String>) -> bool {
+    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str) == Some(PROTOCOL_VERSION)
 }
 
 /// Drains the buffers returned by `SyncBuffer::push_*` and dispatches them to
@@ -241,7 +280,7 @@ impl ObservationSink {
 struct ConnectionState {
     room: Option<Room>,
     event_task: Option<JoinHandle<()>>,
-    rtt: Option<Arc<RttService>>,
+    clock: Option<Arc<ClockService>>,
 }
 
 pub struct Portal {
@@ -269,8 +308,6 @@ pub struct Portal {
     frame_video_publishers: Mutex<HashMap<String, Arc<FrameVideoPublisher>>>,
     state_publisher: Mutex<Option<Arc<DataPublisher>>>,
     action_publisher: Mutex<Option<Arc<DataPublisher>>>,
-    /// Operator-side: one publisher per declared action chunk.
-    chunk_publishers: Mutex<HashMap<String, Arc<ChunkPublisher>>>,
 
     // Operator-side sync + dispatch.
     sync_buffer: Mutex<Option<Arc<Mutex<SyncBuffer>>>>,
@@ -279,13 +316,6 @@ pub struct Portal {
     // Push callback + pull latest-wins slot, bundled per stream.
     action: Arc<ActionSlot>,
     state: Arc<StateSlot>,
-    /// Robot-side: one slot per declared action chunk. Fixed at construction
-    /// (keyed by chunk name) so the receive path doesn't lock the map.
-    chunk_slots: HashMap<String, Arc<ChunkSlot>>,
-    /// Rate-limit set for unknown chunk fingerprints — the byte-stream
-    /// equivalent of `DataSlot::warned_mismatches`, but lives at the
-    /// dispatcher level because no slot owns "unknown" packets.
-    unknown_chunk_fp_warns: Arc<Mutex<HashSet<u32>>>,
     // Fixed at construction (keyed by declared video_tracks) — no lock on the map itself.
     video_tracks: HashMap<String, Arc<VideoTrackSlots>>,
     /// Names of all video tracks (WebRTC + frame video) in declaration
@@ -324,6 +354,11 @@ pub struct Portal {
     // running". We enter this handle around that call. `None` before the
     // first connect.
     runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
+
+    // Outlives connections so `now_us()` stays continuous across reconnects.
+    clock: Arc<SyncedClock>,
+
+    keypoints: Arc<KeypointSlot>,
 }
 
 impl Portal {
@@ -339,15 +374,6 @@ impl Portal {
 
         let metrics = Arc::new(MetricsRegistry::new(&all_track_names));
         let obs_sink = Arc::new(ObservationSink::new());
-
-        // Build chunk slots once at construction so the dispatch table is
-        // immutable for the Portal's lifetime — `handle_room_event` reads
-        // them without taking any Portal-level lock.
-        let chunk_slots: HashMap<String, Arc<ChunkSlot>> = config
-            .action_chunks
-            .iter()
-            .map(|spec| (spec.name.clone(), Arc::new(ChunkSlot::new(spec.clone()))))
-            .collect();
 
         // Same idea for frame-video entries: the dispatch path reads them
         // per packet, so freezing the map at construction lets the hot path
@@ -378,22 +404,34 @@ impl Portal {
                 .collect(),
         );
 
+        let ignored = config.ignored_sync_options();
+        if !ignored.is_empty() {
+            log::warn!(
+                "[{}] observation sync is off, so these options do nothing: {}",
+                config.session,
+                ignored.join(", ")
+            );
+        }
+
+        let clock = Arc::new(SyncedClock::new(ClockOptions {
+            is_reference: config.role == Role::Robot,
+            source: config.time_sync_source,
+            skew_us: config.clock_skew_us,
+        }));
+
         Self {
             config,
             lifecycle: tokio::sync::Mutex::new(()),
-            conn: Mutex::new(ConnectionState { room: None, event_task: None, rtt: None }),
+            conn: Mutex::new(ConnectionState { room: None, event_task: None, clock: None }),
             video_receivers: Arc::new(Mutex::new(HashMap::new())),
             video_publishers: Mutex::new(HashMap::new()),
             frame_video_publishers: Mutex::new(HashMap::new()),
             state_publisher: Mutex::new(None),
             action_publisher: Mutex::new(None),
-            chunk_publishers: Mutex::new(HashMap::new()),
             sync_buffer: Mutex::new(None),
             obs_sink,
             action: Arc::new(ActionSlot::new()),
             state: Arc::new(StateSlot::new()),
-            chunk_slots,
-            unknown_chunk_fp_warns: Arc::new(Mutex::new(HashSet::new())),
             video_tracks,
             all_track_names,
             frame_video_entries,
@@ -401,6 +439,8 @@ impl Portal {
             rpc_handlers: Arc::new(Mutex::new(HashMap::new())),
             local_participant: Arc::new(Mutex::new(None)),
             controller: Arc::new(ControllerState::new()),
+            clock,
+            keypoints: Arc::new(KeypointSlot::new()),
             runtime_handle: Mutex::new(None),
         }
     }
@@ -432,6 +472,13 @@ impl Portal {
         }
 
         log::info!("[{}] connecting as {:?} to {}", self.config.session, self.config.role, url);
+
+        // Hand decoded frames over as soon as they are ready instead of
+        // holding them for smooth playback. Process-wide, and only possible
+        // before the first WebRTC runtime starts.
+        if let Err(e) = livekit::webrtc::enable_zero_playout_delay() {
+            log::warn!("[playout-delay] zero playout delay not enabled: {e}");
+        }
 
         let (room, events) = Room::connect(url, token, options)
             .await
@@ -470,9 +517,11 @@ impl Portal {
         let role_value = match self.config.role {
             Role::Robot => ROLE_VALUE_ROBOT,
             Role::Operator => ROLE_VALUE_OPERATOR,
+            Role::Observer => ROLE_VALUE_OBSERVER,
         };
         let mut role_attrs = HashMap::new();
         role_attrs.insert(ROLE_ATTR_KEY.to_string(), role_value.to_string());
+        role_attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), PROTOCOL_VERSION.to_string());
         if let Err(e) = local_participant.set_attributes(role_attrs).await {
             // Most common cause: the token grant did not include
             // `canUpdateOwnMetadata`. Surface a clear error so callers fix
@@ -512,7 +561,7 @@ impl Portal {
 
         let setup_result = match self.config.role {
             Role::Robot => self.setup_robot(&room).await,
-            Role::Operator => {
+            Role::Operator | Role::Observer => {
                 self.setup_operator(&room);
                 Ok(())
             }
@@ -527,11 +576,13 @@ impl Portal {
             return Err(e);
         }
 
-        let rtt = Arc::new(RttService::spawn(
-            local_participant.clone(),
-            self.config.ping_ms,
-            self.metrics.clone(),
-        ));
+        let clock = Arc::new(ClockService::spawn(ClockActor {
+            role: self.config.role,
+            local_participant: local_participant.clone(),
+            controller: self.controller.clone(),
+            clock: self.clock.clone(),
+            metrics: self.metrics.clone(),
+        }));
 
         log::info!("[{}] connected as {:?}", self.config.session, self.config.role);
 
@@ -539,12 +590,6 @@ impl Portal {
         // whole Portal, so it doesn't need any outer lock.
         let action_schema_fp = action_fingerprint(&self.config.action_schema);
         let state_schema_fp = schema_fingerprint(&self.config.state_schema);
-        // The dispatch path needs a slice for fingerprint lookup; the map
-        // form is for `get_action_chunk` / `on_action_chunk` name lookups.
-        // Build the slice once per connect so the event loop iterates a
-        // plain Vec, not a HashMap.
-        let chunk_slots_for_dispatch: Vec<Arc<ChunkSlot>> =
-            self.chunk_slots.values().cloned().collect();
         let local_identity = local_participant.identity().as_str().to_string();
         let ctx = EventContext {
             config: self.config.clone(),
@@ -554,13 +599,13 @@ impl Portal {
             obs_sink: self.obs_sink.clone(),
             action: self.action.clone(),
             state: self.state.clone(),
-            chunk_slots: chunk_slots_for_dispatch,
-            unknown_chunk_fp_warns: self.unknown_chunk_fp_warns.clone(),
             video_tracks: self.video_tracks.clone(),
             video_receivers: self.video_receivers.clone(),
             frame_video_entries: self.frame_video_entries.clone(),
             metrics: self.metrics.clone(),
-            rtt: rtt.clone(),
+            clock: clock.clone(),
+            time: self.clock.clone(),
+            keypoints: self.keypoints.clone(),
             controller: self.controller.clone(),
             local_identity,
         };
@@ -574,7 +619,7 @@ impl Portal {
         let mut state = self.conn.lock();
         state.room = Some(room);
         state.event_task = Some(event_handle);
-        state.rtt = Some(rtt);
+        state.clock = Some(clock);
         Ok(())
     }
 
@@ -591,6 +636,7 @@ impl Portal {
         // time — codec selection routes the spec to one list or the
         // other — and names are unique across both, so a track lives in
         // exactly one map.
+        let timestamp_us = Some(timestamp_us.unwrap_or_else(|| self.clock.now_us()));
         if let Some(publisher) = self.video_publishers.lock().get(track_name).cloned() {
             return publisher.send_frame(rgb_data, width, height, timestamp_us);
         }
@@ -600,8 +646,7 @@ impl Portal {
         // Distinguish wrong-role (track is declared but no publisher exists
         // because send is operator-side) from genuinely unknown-track. The
         // operator never spawns video publishers, so a declared name with
-        // no publisher means "wrong role" — same shape as `send_state` /
-        // `send_action_chunk`.
+        // no publisher means "wrong role" — same shape as `send_state`.
         if self.config.role != Role::Robot
             && self.config.video_tracks.iter().any(|s| s.name == track_name)
         {
@@ -613,17 +658,19 @@ impl Portal {
     /// Publish a state sample (robot only). Values are typed — build the
     /// map with `TypedValue::Bool(true)`, `0.5f32.into()`, etc. The
     /// pipeline internally widens to `f64` for carry-forward and casts
-    /// back to the declared dtype at the wire boundary.
+    /// back to the declared dtype at the wire boundary. `timestamp_us`
+    /// defaults to `now_us()`.
     pub fn send_state(
         &self,
         values: &HashMap<String, TypedValue>,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
         let publisher =
-            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Operator))?;
+            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
+        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         // State has no echo path; drop the wire-values vector that
         // `send_map` returns for action callers.
-        publisher.send_map(values, timestamp_us, None).map(|_| ())
+        publisher.send_map(values, Some(timestamp_us), None).map(|_| ())
     }
 
     /// Publish an action (operator only).
@@ -640,18 +687,16 @@ impl Portal {
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
         let publisher =
-            self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(Role::Robot))?;
+            self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
         // Resolve the actual send timestamp the publisher will stamp onto
         // the wire so the local echo (if any) sees the same value the
-        // robot sees. `send_map` would default `None` to `now_us()` and
-        // we'd pick a slightly later timestamp here.
-        let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
+        // robot sees.
+        let send_ts = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         let wire_values = publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
         // Echo path. LiveKit does not fan out a publisher's own data
-        // packets, so without this an active operator would never see its
-        // own action through `on_action`. We only echo when subscription
-        // is on AND we are the active operator: otherwise this would just
-        // be local noise that nobody else in the room sees either.
+        // packets, so without this an operator would never see its own
+        // action through `on_action`. Echo exactly what the subscription
+        // would have delivered from anyone else.
         //
         // `wire_values` is what the receiver will reconstruct after decode:
         // post-carry-forward (so omitted fields keep their last-sent value
@@ -659,97 +704,23 @@ impl Portal {
         // inputs match the clipped wire bytes). Building the echo from the
         // caller's input map directly would silently diverge whenever a
         // partial update or saturating value is involved.
-        if self.config.action_subscription && self.is_self_active() {
-            // We only echo when self is the active operator, which means
-            // we are connected and have a local identity. Unwrap is safe.
-            let local_id =
-                self.local_identity().expect("local_identity is Some when self == active_operator");
-            let action = crate::data::build_action(
-                send_ts,
-                in_reply_to_ts_us,
-                &self.config.action_schema,
-                &wire_values,
-                local_id,
-            );
-            self.action.deliver(action);
-        }
-        Ok(())
-    }
-
-    /// Publish an action chunk on the named chunk schema (operator only).
-    ///
-    /// `data` is `field -> column of length horizon`. Columns shorter than
-    /// `horizon` are zero-padded, longer columns are truncated, both with a
-    /// warn-once, and unknown keys are warned-and-ignored once each. Use
-    /// `in_reply_to_ts_us` the same way as `send_action` to feed
-    /// `metrics.policy.e2e_us_*`.
-    ///
-    /// A column built with `ChunkColumn::typed` is checked against the
-    /// declared field dtype and returns `PortalError::DtypeMismatch` on
-    /// disagreement, the same rejection `send_action` gives a `TypedValue`
-    /// of the wrong variant. `ChunkColumn::untyped` (and the `From<Vec<f64>>`
-    /// conversion) waives the check and coerces.
-    pub fn send_action_chunk(
-        &self,
-        chunk_name: &str,
-        data: &HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        let publisher = {
-            let map = self.chunk_publishers.lock();
-            map.get(chunk_name).cloned()
+        let active = self.is_self_active();
+        let echo = match self.config.action_subscription {
+            ActionSubscription::None => false,
+            ActionSubscription::Active => active,
+            ActionSubscription::All => true,
         };
-        let Some(publisher) = publisher else {
-            // No publisher resolves to one of three precise errors so the
-            // caller sees the actual mistake instead of a generic refusal:
-            // wrong role, undeclared chunk name, or operator-but-not-yet
-            // connected (publishers are spawned in `setup_operator`).
-            return if self.config.role != Role::Operator {
-                Err(PortalError::WrongRole(Role::Robot))
-            } else if !self.chunk_slots.contains_key(chunk_name) {
-                Err(PortalError::UnknownChunk { name: chunk_name.to_string() })
-            } else {
-                Err(PortalError::NotConnected)
-            };
+        let Some(sender) = self.local_identity().filter(|_| echo) else {
+            return Ok(());
         };
-        let send_ts = timestamp_us.unwrap_or_else(crate::video::now_us);
-        publisher.send(data, Some(send_ts), in_reply_to_ts_us)?;
-        // Echo path: same conditions as `send_action`. Unlike scalar
-        // actions where we rebuild the typed values, chunks already carry
-        // raw `f64` columns — we hand the same `data` map straight to the
-        // slot, padded/truncated to the declared horizon to match what
-        // the wire path emits.
-        if self.config.action_subscription
-            && self.is_self_active()
-            && let Some(slot) = self.chunk_slots.get(chunk_name)
-        {
-            let local_id =
-                self.local_identity().expect("local_identity is Some when self == active_operator");
-            let horizon = slot.spec.horizon as usize;
-            let normalized: HashMap<String, Vec<f64>> = slot
-                .spec
-                .fields
-                .iter()
-                .map(|f| {
-                    let mut col = data.get(&f.name).map(|c| c.values.clone()).unwrap_or_default();
-                    if col.len() < horizon {
-                        col.resize(horizon, 0.0);
-                    } else if col.len() > horizon {
-                        col.truncate(horizon);
-                    }
-                    (f.name.clone(), col)
-                })
-                .collect();
-            slot.deliver(ActionChunk {
-                name: slot.spec.name.clone(),
-                horizon: slot.spec.horizon,
-                data: normalized,
-                timestamp_us: send_ts,
-                in_reply_to_ts_us,
-                sender: local_id,
-            });
-        }
+        let action = crate::data::build_action(
+            send_ts,
+            in_reply_to_ts_us,
+            &self.config.action_schema,
+            &wire_values,
+            ActionOrigin { sender, active },
+        );
+        self.action.deliver(action);
         Ok(())
     }
 
@@ -817,7 +788,7 @@ impl Portal {
                 }
                 Ok(())
             }
-            Role::Operator => {
+            Role::Operator | Role::Observer => {
                 // Cached robot identity (populated by attribute events) is
                 // the fast path. The common pattern is:
                 //
@@ -842,6 +813,14 @@ impl Portal {
     /// Currently-connected operator identities (excluding self).
     pub fn operators(&self) -> Vec<String> {
         let mut v: Vec<String> = self.controller.operators.lock().iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Currently-connected observer identities (excluding self). Observers
+    /// never drive, so they are listed apart from `operators()`.
+    pub fn observers(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.controller.observers.lock().iter().cloned().collect();
         v.sort();
         v
     }
@@ -995,7 +974,7 @@ impl Portal {
     /// snapshot for setups that haven't designated control yet.
     fn resolve_peer(&self) -> PortalResult<String> {
         match self.config.role {
-            Role::Operator => {
+            Role::Operator | Role::Observer => {
                 if let Some(id) = self.controller.robot_identity.lock().clone() {
                     return Ok(id);
                 }
@@ -1051,16 +1030,12 @@ impl Portal {
         self.frame_video_publishers.lock().clear();
         *self.state_publisher.lock() = None;
         *self.action_publisher.lock() = None;
-        self.chunk_publishers.lock().clear();
         if let Some(sb) = self.sync_buffer.lock().take() {
             sb.lock().clear();
         }
         self.obs_sink.clear();
         self.action.clear();
         self.state.clear();
-        for slot in self.chunk_slots.values() {
-            slot.clear();
-        }
         for slots in self.video_tracks.values() {
             slots.clear();
         }
@@ -1084,7 +1059,7 @@ impl Portal {
             if let Some(task) = state.event_task.take() {
                 task.abort();
             }
-            state.rtt = None;
+            state.clock = None;
         }
         *self.local_participant.lock() = None;
         // Multi-controller state (operators, robot_identity, active_operator
@@ -1103,7 +1078,6 @@ impl Portal {
         self.frame_video_publishers.lock().clear();
         *self.state_publisher.lock() = None;
         *self.action_publisher.lock() = None;
-        self.chunk_publishers.lock().clear();
 
         if let Some(sb) = self.sync_buffer.lock().take() {
             sb.lock().clear();
@@ -1111,9 +1085,6 @@ impl Portal {
         self.obs_sink.clear();
         self.action.clear();
         self.state.clear();
-        for slot in self.chunk_slots.values() {
-            slot.clear();
-        }
         for slots in self.video_tracks.values() {
             slots.clear();
         }
@@ -1126,8 +1097,18 @@ impl Portal {
     /// Clone of the latest observation, or `None` if none received yet.
     /// Consumers wanting a history of observations should register
     /// `on_observation` and buffer on their own side.
-    pub fn get_observation(&self) -> Option<Observation> {
-        self.obs_sink.get()
+    /// Latest observation, or `ObservationSyncDisabled` when observation
+    /// sync is off.
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
+        self.require_observation_sync()?;
+        Ok(self.obs_sink.get())
+    }
+
+    fn require_observation_sync(&self) -> PortalResult<()> {
+        match self.config.observation_sync {
+            true => Ok(()),
+            false => Err(PortalError::ObservationSyncDisabled),
+        }
     }
 
     /// Clone of the latest action received (Robot side), or `None`.
@@ -1148,17 +1129,6 @@ impl Portal {
         self.video_tracks.get(track_name).and_then(|s| s.latest.lock().clone())
     }
 
-    /// Clone of the latest chunk received for `chunk_name`, or `None` if
-    /// none received yet (or the chunk wasn't declared).
-    pub fn get_action_chunk(&self, chunk_name: &str) -> Option<ActionChunk> {
-        self.chunk_slots.get(chunk_name).and_then(|s| s.get())
-    }
-
-    /// All declared action chunk schemas, in declaration order.
-    pub fn action_chunks(&self) -> &[ChunkSpec] {
-        self.config.action_chunks()
-    }
-
     // --- Callback registration (push API) ---
 
     /// Fire on every received action. The `Action` record exposes typed
@@ -1168,25 +1138,19 @@ impl Portal {
         *self.action.cb.lock() = Some(Box::new(callback));
     }
 
-    /// Fire on every received chunk for the named declaration. Only one
-    /// callback per chunk; calling twice overwrites. Unknown names are
-    /// logged and ignored — they aren't a hard error because the chunk
-    /// schema may have been intentionally omitted on this peer.
-    pub fn on_action_chunk(
+    pub fn on_observation(
         &self,
-        chunk_name: &str,
-        callback: impl Fn(&ActionChunk) + Send + Sync + 'static,
-    ) {
-        match self.chunk_slots.get(chunk_name) {
-            Some(slot) => slot.set_callback(Box::new(callback)),
-            None => log::warn!(
-                "[unknown-chunk] on_action_chunk: chunk '{chunk_name}' not declared, callback ignored"
-            ),
-        }
+        callback: impl Fn(&Observation) + Send + Sync + 'static,
+    ) -> PortalResult<()> {
+        self.require_observation_sync()?;
+        self.obs_sink.set_observation_cb(Box::new(callback));
+        Ok(())
     }
 
-    pub fn on_observation(&self, callback: impl Fn(&Observation) + Send + Sync + 'static) {
-        self.obs_sink.set_observation_cb(Box::new(callback));
+    /// Whether this peer bundles observations. See
+    /// `PortalConfig::set_observation_sync`.
+    pub fn observation_sync(&self) -> bool {
+        self.config.observation_sync
     }
 
     /// Fire on every received state. Semantics mirror `on_action`.
@@ -1226,15 +1190,11 @@ impl Portal {
             let track_name = &spec.name;
             let track_metrics =
                 self.metrics.track(track_name).expect("track metrics registered at construction");
-            let publisher = VideoPublisher::new(
-                track_name,
-                track_metrics,
-                self.config.fps,
-                spec.codec,
-                spec.max_bitrate_kbps,
-                spec.simulcast,
-                spec.screencast,
-            );
+            let publisher = VideoPublisher::new(VideoPublisherOptions {
+                spec,
+                metrics: track_metrics,
+                fps: self.config.fps,
+            });
             if let Err(e) = publisher.publish(&lp).await {
                 // Roll back any earlier publishers so their send tasks stop
                 // and connect() leaves Portal in a clean state.
@@ -1290,16 +1250,18 @@ impl Portal {
         // arrivals by name, regardless of whether they came from a WebRTC
         // RTP track or a frame-video byte stream. `all_track_names` was
         // computed once at construction.
-        let sync_buffer = Arc::new(Mutex::new(SyncBuffer::new(
-            &self.all_track_names,
-            self.config.state_schema.clone(),
-            self.config.sync_config(),
-            self.config.stall_configs(&self.all_track_names),
-            self.metrics.clone(),
-        )));
-        *self.sync_buffer.lock() = Some(sync_buffer);
+        if self.config.observation_sync {
+            let sync_buffer = Arc::new(Mutex::new(SyncBuffer::new(
+                &self.all_track_names,
+                self.config.state_schema.clone(),
+                self.config.sync_config(),
+                self.config.stall_configs(&self.all_track_names),
+                self.metrics.clone(),
+            )));
+            *self.sync_buffer.lock() = Some(sync_buffer);
+        }
 
-        if !self.config.action_schema.is_empty() {
+        if self.config.role == Role::Operator && !self.config.action_schema.is_empty() {
             let mode = if self.config.action_reliable { "reliable" } else { "unreliable" };
             log::info!(
                 "[{}] ready to publish action via {mode} data ({} fields)",
@@ -1316,20 +1278,6 @@ impl Portal {
             );
             *self.action_publisher.lock() = Some(Arc::new(publisher));
         }
-
-        if !self.config.action_chunks.is_empty() {
-            for spec in &self.config.action_chunks {
-                log::info!(
-                    "[{}] ready to publish chunk '{}' via byte stream (horizon={}, {} fields)",
-                    self.config.session,
-                    spec.name,
-                    spec.horizon,
-                    spec.fields.len()
-                );
-                let publisher = ChunkPublisher::new(spec.clone(), lp.clone(), self.metrics.clone());
-                self.chunk_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
-            }
-        }
     }
 
     /// Snapshot of metrics since construction or the last `reset_metrics()`.
@@ -1341,11 +1289,63 @@ impl Portal {
             }
             None => (HashMap::new(), 0),
         };
-        self.metrics.snapshot(video_fill, state_fill)
+        let mut snapshot = self.metrics.snapshot(video_fill, state_fill);
+        snapshot.time_sync = self.clock.metrics();
+        snapshot
     }
 
+    /// Resets counters. Time sync state is kept: see `TimeSyncMetrics`.
     pub fn reset_metrics(&self) {
         self.metrics.reset();
+        self.clock.reset_counters();
+    }
+
+    /// Now, in microseconds on the robot's clock. On the robot this is its
+    /// own clock. Before the first sync it is local time, and at the first
+    /// sync it switches to the robot's clock in one step, possibly backwards.
+    /// After that it never repeats and never goes backwards.
+    pub fn now_us(&self) -> u64 {
+        self.clock.now_us()
+    }
+
+    /// Send an annotation to everyone in the room, including this peer's own
+    /// `on_keypoint`. `timestamp_us` is where the mark belongs and defaults to
+    /// `now_us()`; a teleoperator passes the timestamp of the frame on screen.
+    ///
+    /// Portal doesn't interpret `kind` or `payload`. Returns the observers
+    /// that were present, so an empty list tells the sender no one recorded
+    /// the mark. The encoded keypoint must fit in one data packet (about
+    /// 64 KB on a default server); a larger one fails with the transport's error.
+    pub async fn send_keypoint(
+        &self,
+        kind: &str,
+        payload: serde_json::Map<String, serde_json::Value>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
+        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
+        let packet = DataPacket {
+            payload: crate::keypoint::encode(kind, &payload, timestamp_us),
+            topic: Some(KEYPOINT_TOPIC.to_string()),
+            reliable: true,
+            destination_identities: Vec::new(),
+        };
+        lp.publish_data(packet).await.map_err(|e| PortalError::Room(e.to_string()))?;
+        // LiveKit doesn't fan a publisher's own packets back, and a recorder
+        // that marks its own takes still has to see them.
+        let sender = lp.identity().as_str().to_string();
+        self.keypoints.deliver(&Keypoint { kind: kind.to_string(), payload, timestamp_us, sender });
+        Ok(self.observers())
+    }
+
+    /// Fire on every keypoint in the room, this peer's own included.
+    pub fn on_keypoint(&self, callback: impl Fn(&Keypoint) + Send + Sync + 'static) {
+        self.keypoints.set_callback(Box::new(callback));
+    }
+
+    /// Fires on the first sync with the robot's clock, and after each resync.
+    pub fn on_time_synced(&self, callback: impl Fn() + Send + Sync + 'static) {
+        self.clock.set_on_synced(Box::new(callback));
     }
 }
 
@@ -1376,8 +1376,6 @@ struct EventContext {
     obs_sink: Arc<ObservationSink>,
     action: Arc<ActionSlot>,
     state: Arc<StateSlot>,
-    chunk_slots: Vec<Arc<ChunkSlot>>,
-    unknown_chunk_fp_warns: Arc<Mutex<HashSet<u32>>>,
     video_tracks: HashMap<String, Arc<VideoTrackSlots>>,
     video_receivers: Arc<Mutex<HashMap<String, VideoReceiver>>>,
     /// Frame-video entries (spec + slots + metrics fused) keyed by track
@@ -1385,7 +1383,9 @@ struct EventContext {
     /// tasks bumps a refcount instead of cloning the map.
     frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>>,
     metrics: Arc<MetricsRegistry>,
-    rtt: Arc<RttService>,
+    clock: Arc<ClockService>,
+    time: Arc<SyncedClock>,
+    keypoints: Arc<KeypointSlot>,
     /// Multi-controller state, shared with `Portal` so attribute and
     /// participant lifecycle events can update it directly without going
     /// through the Portal struct.
@@ -1416,8 +1416,8 @@ fn classify_and_update(
                     *slot = Some(id.clone());
                 }
             }
-            // Operator-side: mirror the robot's `active_operator` attribute.
-            if self_role == Role::Operator {
+            // Operators and observers mirror the robot's `active_operator`.
+            if self_role != Role::Robot {
                 let new_value = attrs
                     .get(ACTIVE_OPERATOR_ATTR_KEY)
                     .and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
@@ -1435,9 +1435,23 @@ fn classify_and_update(
                 controller.fire_op_joined(&id);
             }
         }
+        Some(Role::Observer) => {
+            controller.observers.lock().insert(id);
+        }
         None => {
-            // Role attribute not yet visible; wait for a follow-up
-            // ParticipantAttributesChanged event.
+            // Either the role attribute isn't visible yet (a follow-up
+            // ParticipantAttributesChanged event will bring it) or the peer
+            // speaks another protocol version and stays out of the rosters.
+            if attrs.contains_key(ROLE_ATTR_KEY)
+                && !is_compatible(attrs)
+                && controller.version_mismatch_warned.lock().insert(id.clone())
+            {
+                log::warn!(
+                    "[version-mismatch] ignoring '{id}': it speaks Portal protocol {:?}, this \
+                     peer speaks {PROTOCOL_VERSION:?}; upgrade both sides to the same release",
+                    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str).unwrap_or("<none>"),
+                );
+            }
         }
     }
 }
@@ -1447,11 +1461,35 @@ fn classify_and_update(
 /// new identity (or empty string to clear). The handler updates the local
 /// pointer and the broadcast attribute, then fires
 /// `on_active_operator_changed` if the value actually moved.
+/// Whether `caller` is an operator or observer. A peer that calls right
+/// after connecting can reach the robot before its role attribute does, so
+/// an unknown caller gets a short grace period to show up in the rosters.
+async fn caller_may_steer(controller: &ControllerState, caller: &str) -> bool {
+    let known = || {
+        controller.operators.lock().contains(caller) || controller.observers.lock().contains(caller)
+    };
+    let deadline = tokio::time::Instant::now() + RPC_CALLER_ROSTER_WAIT;
+    while !known() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    true
+}
+
 async fn set_active_operator_rpc_impl(
     lp_slot: &Mutex<Option<LocalParticipant>>,
     controller: &ControllerState,
     data: RpcInvocationData,
 ) -> Result<String, RpcError> {
+    if !caller_may_steer(controller, &data.caller_identity).await {
+        return Err(RpcError::new(
+            RPC_NOT_AUTHORIZED,
+            "only operators and observers may set the active operator",
+            None,
+        ));
+    }
     let identity = if data.payload.is_empty() { None } else { Some(data.payload.clone()) };
     let lp = lp_slot.lock().clone();
     let Some(lp) = lp else {
@@ -1474,77 +1512,95 @@ async fn set_active_operator_rpc_impl(
     Ok(String::new())
 }
 
+/// The active-operator gate for an incoming action packet. Returns who sent
+/// it and whether they were active, or `None` to drop it before decoding.
+///
+/// The robot takes only the active operator's actions. An operator takes
+/// what its subscription asks for, so a controller with `None` pays nothing
+/// on the receive path. In every case the sender must be a recognised
+/// operator: a pointer seeded from a token or set over RPC can name any
+/// identity.
+fn gate_action(
+    ctx: &EventContext,
+    participant: Option<&RemoteParticipant>,
+) -> Option<ActionOrigin> {
+    let subscription = match ctx.config.role {
+        Role::Robot => ActionSubscription::Active,
+        Role::Operator | Role::Observer => ctx.config.action_subscription,
+    };
+    if subscription == ActionSubscription::None {
+        return None;
+    }
+    let sender = participant?.identity().as_str().to_string();
+    if !ctx.controller.operators.lock().contains(&sender) {
+        return None;
+    }
+    let active = ctx.controller.active_operator.lock().as_deref() == Some(sender.as_str());
+    if !active && subscription == ActionSubscription::Active {
+        return None;
+    }
+    Some(ActionOrigin { sender, active })
+}
+
 fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
     match event {
         RoomEvent::TrackSubscribed { track, publication, .. } => {
-            if ctx.config.role != Role::Operator {
+            if ctx.config.role == Role::Robot {
                 return;
             }
             if let RemoteTrack::Video(video_track) = track {
                 let track_name = publication.name();
                 if ctx.config.video_tracks.iter().any(|s| s.name == track_name) {
                     log::info!("[{}] subscribed to video track '{track_name}'", ctx.config.session);
-                    if let Some(sync_buffer) = &ctx.sync_buffer {
-                        let slots = ctx
-                            .video_tracks
-                            .get(track_name.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| Arc::new(VideoTrackSlots::new()));
-                        let track_metrics = ctx
-                            .metrics
-                            .track(track_name.as_str())
-                            .expect("track metrics registered at construction");
+                    let slots = ctx
+                        .video_tracks
+                        .get(track_name.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(VideoTrackSlots::new()));
+                    let track_metrics = ctx
+                        .metrics
+                        .track(track_name.as_str())
+                        .expect("track metrics registered at construction");
 
-                        let stream = NativeVideoStream::new(video_track.rtc_track());
-                        let receiver = VideoReceiver::spawn(
-                            track_name.to_string(),
-                            stream,
-                            sync_buffer.clone(),
-                            slots,
-                            ctx.obs_sink.clone(),
-                            track_metrics,
-                        );
-                        ctx.video_receivers.lock().insert(track_name.to_string(), receiver);
-                    }
+                    let stream = NativeVideoStream::new(video_track.rtc_track());
+                    let receiver = VideoReceiver::spawn(
+                        track_name.to_string(),
+                        stream,
+                        ctx.sync_buffer.clone(),
+                        slots,
+                        ctx.obs_sink.clone(),
+                        track_metrics,
+                    );
+                    ctx.video_receivers.lock().insert(track_name.to_string(), receiver);
                 }
             }
         }
         RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. } => {
-            // Active-operator gate. Drop incoming actions whose sender does
-            // not match `active_operator`. Applies to both the robot (always
-            // processes ACTION_TOPIC) and operators with subscription on
-            // (recorders, shadow eval, live monitoring). Operators without
-            // subscription short-circuit before the deserialize so the
-            // receive hot path costs nothing for the common controller-only
-            // case. Non-action topics (state, RTT) bypass the gate and pass
-            // an empty sender — those records don't carry a sender field.
-            let gate_sender: String = match (ctx.config.role, topic.as_str()) {
-                (Role::Robot, ACTION_TOPIC) => {
-                    let Some(p) = &participant else {
+            if topic == CLOCK_TOPIC {
+                if let Some(p) = &participant {
+                    ctx.clock.handle_packet(&payload, p.identity().as_str());
+                }
+                return;
+            }
+            if topic == KEYPOINT_TOPIC {
+                let Some(p) = &participant else {
+                    return;
+                };
+                let sender = p.identity().as_str().to_string();
+                if ctx.controller.is_known_peer(&sender) {
+                    ctx.keypoints.handle_packet(&payload, sender);
+                }
+                return;
+            }
+            // Actions go through the gate; state carries no sender.
+            let origin = match topic.as_str() {
+                ACTION_TOPIC => {
+                    let Some(origin) = gate_action(ctx, participant.as_ref()) else {
                         return;
                     };
-                    let sender_id = p.identity().as_str().to_string();
-                    let active = ctx.controller.active_operator.lock().clone();
-                    if active.as_deref() != Some(sender_id.as_str()) {
-                        return;
-                    }
-                    sender_id
+                    origin
                 }
-                (Role::Operator, ACTION_TOPIC) => {
-                    if !ctx.config.action_subscription {
-                        return;
-                    }
-                    let Some(p) = &participant else {
-                        return;
-                    };
-                    let sender_id = p.identity().as_str().to_string();
-                    let active = ctx.controller.active_operator.lock().clone();
-                    if active.as_deref() != Some(sender_id.as_str()) {
-                        return;
-                    }
-                    sender_id
-                }
-                _ => String::new(),
+                _ => ActionOrigin { sender: String::new(), active: false },
             };
             let output = handle_data_received(
                 &payload,
@@ -1558,104 +1614,50 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 &ctx.state,
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
-                &ctx.rtt,
-                gate_sender,
+                origin,
+                ctx.time.estimate_us(),
             );
             if !output.is_empty() {
                 ctx.obs_sink.dispatch(output);
             }
         }
-        RoomEvent::ByteStreamOpened { reader, topic, participant_identity } => {
-            // Two Portal byte-stream topics, each owned by a different role:
-            //   * `portal_action_chunk` — operator → robot. Action chunks
-            //     too big to fit in a 15 KB data packet.
-            //   * `portal_frame_video`  — robot → operator. Per-frame
-            //     RGB/PNG/MJPEG payloads that bypass the WebRTC media path.
-            // We `take_if` on the topic so this Portal only consumes streams
-            // it owns; other applications using byte streams on unrelated
-            // topics are left untouched.
-            match (ctx.config.role, topic.as_str()) {
-                (Role::Robot, ACTION_CHUNK_TOPIC) | (Role::Operator, ACTION_CHUNK_TOPIC) => {
-                    // Robot always consumes chunks. Operators only consume
-                    // when subscription is on (HITL recording, shadow eval).
-                    // Bail out early on operators with subscription off so
-                    // we never spawn the read task.
-                    if matches!(ctx.config.role, Role::Operator) && !ctx.config.action_subscription
-                    {
-                        return;
-                    }
-                    let Some(reader) = reader.take() else {
-                        return;
-                    };
-                    let chunk_slots = ctx.chunk_slots.clone();
-                    let unknown_fp_warns = ctx.unknown_chunk_fp_warns.clone();
-                    let metrics = ctx.metrics.clone();
-                    let controller = ctx.controller.clone();
-                    let sender_id = participant_identity.as_str().to_string();
-                    tokio::spawn(async move {
-                        use livekit::StreamReader;
-                        match reader.read_all().await {
-                            Ok(payload) => {
-                                // Apply the active-operator gate at delivery
-                                // time. Sender at delivery wins; a chunk
-                                // started under one operator and finishing
-                                // under another is dropped if the new active
-                                // is different.
-                                let active = controller.active_operator.lock().clone();
-                                if active.as_deref() != Some(sender_id.as_str()) {
-                                    return;
-                                }
-                                dispatch_chunk_payload(
-                                    &payload,
-                                    &chunk_slots,
-                                    &unknown_fp_warns,
-                                    &metrics,
-                                    sender_id,
-                                )
-                            }
-                            Err(e) => {
-                                log::warn!("[bad-payload] failed to read chunk byte stream: {e}")
-                            }
-                        }
-                    });
-                }
-                (Role::Operator, FRAME_VIDEO_TOPIC) => {
-                    // Operator-side: each byte stream carries one frame for
-                    // some declared frame-video track. The header in the
-                    // payload routes it to the right entry (spec + slots
-                    // + metrics fused; one HashMap lookup at dispatch).
-                    if ctx.frame_video_entries.is_empty() {
-                        return;
-                    }
-                    let Some(reader) = reader.take() else {
-                        return;
-                    };
-                    let Some(sync_buffer) = ctx.sync_buffer.clone() else {
-                        return;
-                    };
-                    let _ = participant_identity;
-                    // Refcount bumps only — no map or HashMap clone.
-                    let entries = ctx.frame_video_entries.clone();
-                    let obs_sink = ctx.obs_sink.clone();
-                    tokio::spawn(async move {
-                        use livekit::StreamReader;
-                        match reader.read_all().await {
-                            // `Bytes::from(Vec)` is a move. Subsequent
-                            // `Bytes::slice(...)` in the dispatch path is a
-                            // refcount bump, so the `Raw` codec gets a
-                            // zero-copy view of the wire payload all the
-                            // way to `VideoFrameData.data`.
-                            Ok(payload) => {
-                                dispatch_frame_payload(payload, &entries, &sync_buffer, &obs_sink)
-                            }
-                            Err(e) => log::warn!(
-                                "[bad-payload] failed to read frame_video byte stream: {e}"
-                            ),
-                        }
-                    });
-                }
-                _ => {}
+        RoomEvent::ByteStreamOpened { reader, topic, .. } => {
+            // Portal owns one byte-stream topic, `portal_frame_video`
+            // (robot → operator): per-frame RGB/PNG/MJPEG payloads that
+            // bypass the WebRTC media path. We `take` only matching streams
+            // so other applications using byte streams on unrelated topics
+            // are left untouched. The header in each payload routes it to
+            // the right entry (spec + slots + metrics fused; one HashMap
+            // lookup at dispatch).
+            if ctx.config.role == Role::Robot
+                || topic != FRAME_VIDEO_TOPIC
+                || ctx.frame_video_entries.is_empty()
+            {
+                return;
             }
+            let sync_buffer = ctx.sync_buffer.clone();
+            let Some(reader) = reader.take() else {
+                return;
+            };
+            // Refcount bumps only — no map or HashMap clone.
+            let entries = ctx.frame_video_entries.clone();
+            let obs_sink = ctx.obs_sink.clone();
+            tokio::spawn(async move {
+                use livekit::StreamReader;
+                match reader.read_all().await {
+                    // `Bytes::from(Vec)` is a move. Subsequent
+                    // `Bytes::slice(...)` in the dispatch path is a
+                    // refcount bump, so the `Raw` codec gets a
+                    // zero-copy view of the wire payload all the
+                    // way to `VideoFrameData.data`.
+                    Ok(payload) => {
+                        dispatch_frame_payload(payload, &entries, sync_buffer.as_ref(), &obs_sink)
+                    }
+                    Err(e) => {
+                        log::warn!("[bad-payload] failed to read frame_video byte stream: {e}")
+                    }
+                }
+            });
         }
         RoomEvent::ParticipantConnected(participant) => {
             // Snapshot the peer's attributes once they are visible. We may
@@ -1689,9 +1691,11 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             if ctx.controller.operators.lock().remove(&id_str) {
                 ctx.controller.fire_op_left(&id_str);
             }
+            ctx.controller.observers.lock().remove(&id_str);
             let mut robot_slot = ctx.controller.robot_identity.lock();
             if robot_slot.as_deref() == Some(id_str.as_str()) {
                 *robot_slot = None;
+                ctx.clock.robot_left();
             }
         }
         RoomEvent::Reconnected => {
@@ -1708,9 +1712,6 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             ctx.obs_sink.clear();
             ctx.action.clear();
             ctx.state.clear();
-            for slot in &ctx.chunk_slots {
-                slot.clear();
-            }
             for slots in ctx.video_tracks.values() {
                 slots.clear();
             }
@@ -1723,5 +1724,127 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             ctx.controller.clear_for_reconnect();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attrs(role: &str, version: Option<&str>) -> HashMap<String, String> {
+        let mut attrs = HashMap::from([(ROLE_ATTR_KEY.to_string(), role.to_string())]);
+        if let Some(v) = version {
+            attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), v.to_string());
+        }
+        attrs
+    }
+
+    #[test]
+    fn matching_version_is_classified() {
+        assert_eq!(classify_role(&attrs("robot", Some(PROTOCOL_VERSION))), Some(Role::Robot));
+        assert_eq!(classify_role(&attrs("operator", Some(PROTOCOL_VERSION))), Some(Role::Operator));
+    }
+
+    #[test]
+    fn missing_or_other_version_is_ignored() {
+        assert_eq!(classify_role(&attrs("operator", None)), None);
+        assert_eq!(classify_role(&attrs("operator", Some("2"))), None);
+        assert_eq!(classify_role(&attrs("robot", Some(""))), None);
+        assert_eq!(classify_role(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn mismatched_peer_stays_out_of_rosters() {
+        let controller = ControllerState::new();
+        let id = ParticipantIdentity::from("old-operator".to_string());
+        classify_and_update(&controller, Role::Robot, &id, &attrs("operator", None));
+        classify_and_update(&controller, Role::Robot, &id, &attrs("operator", Some("2")));
+        assert!(controller.operators.lock().is_empty());
+        assert!(controller.version_mismatch_warned.lock().contains("old-operator"));
+
+        let robot = ParticipantIdentity::from("old-robot".to_string());
+        classify_and_update(&controller, Role::Operator, &robot, &attrs("robot", Some("2")));
+        assert!(controller.robot_identity.lock().is_none());
+    }
+
+    #[test]
+    fn observers_have_their_own_roster() {
+        assert_eq!(classify_role(&attrs("observer", Some(PROTOCOL_VERSION))), Some(Role::Observer));
+
+        let controller = ControllerState::new();
+        let joined = Arc::new(Mutex::new(Vec::new()));
+        let log = joined.clone();
+        *controller.on_operator_joined.lock() =
+            Some(Box::new(move |id| log.lock().push(id.to_string())));
+
+        let obs = ParticipantIdentity::from("recorder".to_string());
+        let op = ParticipantIdentity::from("teleop".to_string());
+        classify_and_update(
+            &controller,
+            Role::Robot,
+            &obs,
+            &attrs("observer", Some(PROTOCOL_VERSION)),
+        );
+        classify_and_update(
+            &controller,
+            Role::Robot,
+            &op,
+            &attrs("operator", Some(PROTOCOL_VERSION)),
+        );
+
+        assert!(controller.observers.lock().contains("recorder"));
+        assert!(!controller.operators.lock().contains("recorder"));
+        assert_eq!(*joined.lock(), vec!["teleop".to_string()], "observers are not operators");
+    }
+
+    #[test]
+    fn observers_mirror_the_active_operator() {
+        let controller = ControllerState::new();
+        let robot = ParticipantIdentity::from("robot".to_string());
+        let mut robot_attrs = attrs("robot", Some(PROTOCOL_VERSION));
+        robot_attrs.insert(ACTIVE_OPERATOR_ATTR_KEY.to_string(), "teleop".to_string());
+        classify_and_update(&controller, Role::Observer, &robot, &robot_attrs);
+        assert_eq!(controller.active_operator.lock().as_deref(), Some("teleop"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_operators_and_observers_may_steer() {
+        let controller = ControllerState::new();
+        controller.operators.lock().insert("teleop".to_string());
+        controller.observers.lock().insert("recorder".to_string());
+        assert!(caller_may_steer(&controller, "teleop").await);
+        assert!(caller_may_steer(&controller, "recorder").await);
+        assert!(!caller_may_steer(&controller, "stranger").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_strangers_do_not_hold_up_other_callers() {
+        let controller = Arc::new(ControllerState::new());
+        controller.operators.lock().insert("teleop".to_string());
+        let start = tokio::time::Instant::now();
+        let strangers: Vec<_> = (0..50)
+            .map(|i| {
+                let controller = controller.clone();
+                tokio::spawn(async move { caller_may_steer(&controller, &format!("s{i}")).await })
+            })
+            .collect();
+        let late = {
+            let controller = controller.clone();
+            tokio::spawn(async move { caller_may_steer(&controller, "late").await })
+        };
+
+        assert!(caller_may_steer(&controller, "teleop").await);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        // A caller whose role shows up during the wait is let in.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        controller.observers.lock().insert("late".to_string());
+        assert!(late.await.expect("task"));
+        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT);
+
+        for s in strangers {
+            assert!(!s.await.expect("task"));
+        }
+        // Refused together after one wait, not one wait each.
+        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT + Duration::from_millis(100));
     }
 }

@@ -14,8 +14,10 @@
 
 use crate::codec::Codec;
 use crate::dtype::DType;
-use crate::types::{Role, StallBehavior, StallConfig, SyncConfig};
-use std::collections::HashMap;
+use crate::types::{
+    ActionSubscription, Role, StallBehavior, StallConfig, SyncConfig, TimeSyncSource,
+};
+use std::collections::{BTreeSet, HashMap};
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
 /// explicit value. Tuned for inference workloads: visually near-lossless on
@@ -60,6 +62,37 @@ impl From<FieldSpec> for (String, DType) {
     }
 }
 
+/// Frame size, in pixels, that a WebRTC track's encoder is set up for before
+/// the first frame arrives. Both dimensions must be even, as I420 requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Per-track options for `PortalConfig::add_video`. Each is read by one
+/// transport and ignored by the other; `add_video` documents which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoOptions {
+    pub quality: u8,
+    pub max_bitrate_kbps: Option<u32>,
+    pub simulcast: Option<bool>,
+    pub screencast: Option<bool>,
+    pub resolution: Option<Resolution>,
+}
+
+impl Default for VideoOptions {
+    fn default() -> Self {
+        Self {
+            quality: DEFAULT_MJPEG_QUALITY,
+            max_bitrate_kbps: None,
+            simulcast: None,
+            screencast: None,
+            resolution: None,
+        }
+    }
+}
+
 /// One declared video track: name, codec, and the per-codec options.
 ///
 /// One type for every track regardless of transport, because `add_video` is
@@ -80,6 +113,8 @@ impl From<FieldSpec> for (String, DType) {
 ///     `DEFAULT_H264_MAX_BITRATE_KBPS`.
 ///   * `simulcast` / `screencast` — WebRTC only, both `false` by default.
 ///     See `PortalConfig::add_video` for what each one does.
+///   * `resolution` — WebRTC only. The frame size the encoder is set up for.
+///     `None` means 640x480.
 ///
 /// An option set against the wrong transport is rejected by the YAML loader
 /// and ignored by `add_video`, so a spec may carry a value its own codec
@@ -102,6 +137,8 @@ pub struct VideoTrackSpec {
     /// congestion and CPU pressure drop framerate instead of rescaling the
     /// frame.
     pub screencast: bool,
+    /// Frame size the encoder is set up for. `None` means 640x480.
+    pub resolution: Option<Resolution>,
 }
 
 impl VideoTrackSpec {
@@ -112,8 +149,17 @@ impl VideoTrackSpec {
         max_bitrate_kbps: Option<u32>,
         simulcast: bool,
         screencast: bool,
+        resolution: Option<Resolution>,
     ) -> Self {
-        Self { name: name.into(), codec, quality, max_bitrate_kbps, simulcast, screencast }
+        Self {
+            name: name.into(),
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            resolution,
+        }
     }
 
     /// Whether this track rides the WebRTC media path. The one question the
@@ -121,30 +167,6 @@ impl VideoTrackSpec {
     /// undifferentiated.
     pub fn is_webrtc(&self) -> bool {
         self.codec.is_webrtc()
-    }
-}
-
-/// Schema for one named action chunk: a fixed-horizon batch of per-field
-/// values that the operator publishes as a single packet.
-///
-/// Equivalent to a `[horizon, fields.len()]` tensor with per-field dtype.
-/// Multiple chunks can be declared on a Portal — each is dispatched to the
-/// right callback by its own schema fingerprint, so chunk names are unique
-/// per Portal but cross-Portal collisions are impossible by construction.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChunkSpec {
-    pub name: String,
-    pub horizon: u32,
-    pub fields: Vec<FieldSpec>,
-}
-
-impl ChunkSpec {
-    pub fn new(
-        name: impl Into<String>,
-        horizon: u32,
-        fields: impl IntoIterator<Item = impl Into<FieldSpec>>,
-    ) -> Self {
-        Self { name: name.into(), horizon, fields: fields.into_iter().map(Into::into).collect() }
     }
 }
 
@@ -159,13 +181,15 @@ pub struct PortalConfig {
     pub(crate) video_tracks: Vec<VideoTrackSpec>,
     pub(crate) state_schema: Vec<FieldSpec>,
     pub(crate) action_schema: Vec<FieldSpec>,
-    pub(crate) action_chunks: Vec<ChunkSpec>,
     pub(crate) state_reliable: bool,
     pub(crate) action_reliable: bool,
     pub(crate) fps: u32,
     pub(crate) slack: u32,
     pub(crate) tolerance: f32,
-    pub(crate) ping_ms: u64,
+    /// Test hook: shifts this peer's local clock to simulate hosts whose
+    /// clocks disagree. See `set_clock_skew_us`.
+    pub(crate) clock_skew_us: i64,
+    pub(crate) time_sync_source: TimeSyncSource,
     /// Deprecated alias, retained so existing callers keep working. Folded
     /// into the stall behavior in `sync_config()`; see `set_reuse_stale_frames`.
     pub(crate) reuse_stale_frames: bool,
@@ -179,19 +203,15 @@ pub struct PortalConfig {
     pub(crate) track_stall_behavior: HashMap<String, StallBehavior>,
     pub(crate) track_max_lag_ms: HashMap<String, u32>,
     pub(crate) shared_key: Option<Vec<u8>>,
-    /// Operator-side: subscribe to executed actions. Off by default —
-    /// most operators are pure controllers and do not want the bandwidth
-    /// or callback noise. Recorders, shadow eval policies, and live
-    /// monitoring opt in. When on:
-    ///   * `(Role::Operator, ACTION_TOPIC)` packets are deserialized and
-    ///     fired through `on_action` / `get_action`, gated by
-    ///     `sender == active_operator` (same gate the robot applies)
-    ///   * `(Role::Operator, ACTION_CHUNK_TOPIC)` byte streams are read
-    ///     and fired through `on_action_chunk` / `get_action_chunk`
-    ///   * `send_action` / `send_action_chunk` echo a local copy after
-    ///     publish when `local_identity == active_operator`, since
-    ///     LiveKit does not fan out a publisher's own data packets
-    pub(crate) action_subscription: bool,
+    /// Operator-side: which received actions reach `on_action`. See
+    /// `set_action_subscription`.
+    pub(crate) action_subscription: ActionSubscription,
+    /// Operator-side: bundle state and frames into observations. See
+    /// `set_observation_sync`.
+    pub(crate) observation_sync: bool,
+    /// Sync-only options the caller set explicitly, so a peer with sync off
+    /// can warn that they do nothing.
+    pub(crate) sync_options_set: BTreeSet<&'static str>,
 }
 
 impl PortalConfig {
@@ -202,35 +222,72 @@ impl PortalConfig {
             video_tracks: Vec::new(),
             state_schema: Vec::new(),
             action_schema: Vec::new(),
-            action_chunks: Vec::new(),
             state_reliable: true,
             action_reliable: true,
             fps: 30,
             slack: 5,
             tolerance: 1.5,
-            ping_ms: 1000,
+            clock_skew_us: 0,
+            time_sync_source: TimeSyncSource::Portal,
             reuse_stale_frames: false,
             stall_behavior: StallBehavior::Drop,
             max_lag_ms: None,
             track_stall_behavior: HashMap::new(),
             track_max_lag_ms: HashMap::new(),
             shared_key: None,
-            action_subscription: false,
+            // Observers watch what the robot does and record raw streams, so
+            // they want the executed actions and have no use for bundles.
+            action_subscription: match role {
+                Role::Observer => ActionSubscription::Active,
+                Role::Robot | Role::Operator => ActionSubscription::None,
+            },
+            observation_sync: role != Role::Observer,
+            sync_options_set: BTreeSet::new(),
         }
     }
 
-    /// Operator-side opt-in for receiving executed actions. Off by default.
-    /// When on, the operator subscribes to actions and chunks from the
-    /// active operator and gets a local echo of its own sends when active.
-    /// Used by recorders, shadow eval policies, and monitoring UIs.
-    /// No-op on the Robot side — the robot always processes actions.
-    pub fn set_action_subscription(&mut self, enable: bool) {
-        self.action_subscription = enable;
+    /// Operator-side: which actions reach `on_action` / `get_action`.
+    /// `None` (default) delivers nothing, `Active` the active operator's
+    /// actions, `All` every operator's, each tagged with `Action::active`.
+    /// A local filter, not part of the wire contract. Since LiveKit does
+    /// not fan out a publisher's own data packets, `send_action` also
+    /// echoes a local copy when the subscription would have delivered it.
+    /// No-op on the Robot side, which always processes the active
+    /// operator's actions.
+    pub fn set_action_subscription(&mut self, subscription: ActionSubscription) {
+        self.action_subscription = subscription;
     }
 
-    /// Whether action subscription is enabled for this config.
-    pub fn action_subscription(&self) -> bool {
+    pub fn action_subscription(&self) -> ActionSubscription {
         self.action_subscription
+    }
+
+    /// Operator-side: bundle state and frames into `Observation`s. On by
+    /// default for operators. Only a peer that consumes bundles live needs
+    /// it, in practice a policy; a teleoperator flies on the newest frame,
+    /// and a recorder stores raw streams for offline alignment.
+    ///
+    /// Off means the sync buffer never runs: `on_observation` and
+    /// `get_observation` return `ObservationSyncDisabled`, `on_drop` never
+    /// fires, `metrics().sync` stays empty, and `slack`, `tolerance`,
+    /// `stall_behavior` and `max_lag_ms` do nothing. Frames and states
+    /// still arrive through `on_video_frame` and `on_state`. A local choice,
+    /// not part of the wire contract.
+    pub fn set_observation_sync(&mut self, enable: bool) {
+        self.observation_sync = enable;
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.observation_sync
+    }
+
+    /// Sync-only options that were set explicitly but do nothing because
+    /// observation sync is off. Empty when sync is on.
+    pub(crate) fn ignored_sync_options(&self) -> Vec<&'static str> {
+        match self.observation_sync {
+            true => Vec::new(),
+            false => self.sync_options_set.iter().copied().collect(),
+        }
     }
 
     /// Set a shared E2EE key. Both peers must call this with the same key
@@ -279,6 +336,13 @@ impl PortalConfig {
     ///   unchanging resolution matters more than smooth motion. A policy
     ///   consuming fixed-shape frames is the usual case.
     ///
+    /// `resolution` is the frame size `send_video_frame` will send on a WebRTC
+    /// track. libwebrtc sets up the encoder for it when the track is published,
+    /// before any frame exists, and `None` sets it up for 640x480. Frames of
+    /// another size still go out, but an encoder set up for the wrong size
+    /// adds latency, tens of milliseconds with H.264 at 720p and above. Both
+    /// dimensions must be even. Ignored for the byte-stream codecs.
+    ///
     /// Track names must be unique across all `add_video` calls regardless
     /// of codec; a duplicate panics.
     ///
@@ -288,15 +352,8 @@ impl PortalConfig {
     /// codec whose encoded size fits in one chunk for low-latency
     /// closed-loop work. MJPEG at 224×224 to 480p typically does. Raw at
     /// anything above ~70×70 spills into multiple chunks.
-    pub fn add_video(
-        &mut self,
-        name: impl Into<String>,
-        codec: Codec,
-        quality: u8,
-        max_bitrate_kbps: Option<u32>,
-        simulcast: Option<bool>,
-        screencast: Option<bool>,
-    ) {
+    pub fn add_video(&mut self, name: impl Into<String>, codec: Codec, options: VideoOptions) {
+        let VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution } = options;
         let name = name.into();
         assert!(
             !self.has_track(&name),
@@ -312,6 +369,12 @@ impl PortalConfig {
         if let Some(kbps) = max_bitrate_kbps {
             assert!(kbps > 0, "max_bitrate_kbps must be > 0, got {kbps}");
         }
+        if let Some(Resolution { width, height }) = resolution {
+            assert!(
+                width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
+                "resolution must be even and non-zero, got {width}x{height}"
+            );
+        }
         // Only the MJPEG encoder reads `quality`. Canonicalize it to 0
         // everywhere else so a spec never reports a JPEG quality nothing will
         // use, and so a YAML-built config compares equal to the same config
@@ -324,6 +387,7 @@ impl PortalConfig {
             max_bitrate_kbps,
             simulcast.unwrap_or(false),
             screencast.unwrap_or(false),
+            resolution,
         ));
     }
 
@@ -357,31 +421,6 @@ impl PortalConfig {
         self.action_schema.extend(schema.into_iter().map(Into::into));
     }
 
-    /// Declare an action chunk: a named, fixed-horizon batch of typed
-    /// per-field values published as one packet. Multiple chunks can be
-    /// declared. Names must be unique within a Portal — a duplicate panics
-    /// at config time so the bug doesn't surface as a silent late-bind
-    /// dispatch ambiguity at receive time.
-    ///
-    /// Use this in place of repeated `send_action` calls when a policy
-    /// emits a horizon of future actions per inference step (the standard
-    /// VLA shape).
-    pub fn add_action_chunk(
-        &mut self,
-        name: impl Into<String>,
-        horizon: u32,
-        fields: impl IntoIterator<Item = impl Into<FieldSpec>>,
-    ) {
-        assert!(horizon > 0, "action chunk horizon must be > 0");
-        let spec = ChunkSpec::new(name, horizon, fields);
-        assert!(
-            !self.action_chunks.iter().any(|c| c.name == spec.name),
-            "duplicate action chunk name '{}'",
-            spec.name
-        );
-        self.action_chunks.push(spec);
-    }
-
     /// Unified observation rate (set to the video capture rate if state and
     /// video differ). Drives `search_range = tolerance/fps`.
     pub fn set_fps(&mut self, fps: u32) {
@@ -406,6 +445,7 @@ impl PortalConfig {
     pub fn set_tolerance(&mut self, ticks: f32) {
         assert!(ticks > 0.0, "tolerance must be > 0");
         self.tolerance = ticks;
+        self.sync_options_set.insert("tolerance");
     }
 
     /// Ticks of pipeline headroom — how much jitter, loss-detection latency,
@@ -415,6 +455,7 @@ impl PortalConfig {
     pub fn set_slack(&mut self, ticks: u32) {
         assert!(ticks > 0, "slack must be > 0");
         self.slack = ticks;
+        self.sync_options_set.insert("slack");
     }
 
     pub fn set_state_reliable(&mut self, reliable: bool) {
@@ -425,10 +466,22 @@ impl PortalConfig {
         self.action_reliable = reliable;
     }
 
-    /// RTT ping cadence. Set to `0` to disable active pinging on this side;
-    /// the pong echo path remains active so the peer can still measure.
-    pub fn set_ping_ms(&mut self, ms: u64) {
-        self.ping_ms = ms;
+    /// Where `now_us()` comes from. `Portal` (default) syncs to the robot's
+    /// clock; `System` trusts the host clock, for hosts already kept in step
+    /// by PTP or GPS. A per-peer choice: both kinds of peer share a room.
+    pub fn set_time_sync_source(&mut self, source: TimeSyncSource) {
+        self.time_sync_source = source;
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.time_sync_source
+    }
+
+    /// Shift this peer's local clock by `skew_us`. Only for tests that need
+    /// peers with disagreeing clocks on a single host.
+    #[doc(hidden)]
+    pub fn set_clock_skew_us(&mut self, skew_us: i64) {
+        self.clock_skew_us = skew_us;
     }
 
     /// When enabled, a state whose video match window has elapsed reuses
@@ -461,6 +514,7 @@ impl PortalConfig {
     )]
     pub fn set_reuse_stale_frames(&mut self, enable: bool) {
         self.reuse_stale_frames = enable;
+        self.sync_options_set.insert("reuse_stale_frames");
     }
 
     /// How a moment is resolved when a video track goes silent past its
@@ -485,6 +539,7 @@ impl PortalConfig {
     /// policy or writing it to a dataset.
     pub fn set_stall_behavior(&mut self, behavior: StallBehavior) {
         self.stall_behavior = behavior;
+        self.sync_options_set.insert("stall_behavior");
     }
 
     /// How far the fastest-advancing stream may run past a moment before it
@@ -504,6 +559,7 @@ impl PortalConfig {
     /// **Receiving side only**, like [`set_stall_behavior`](Self::set_stall_behavior).
     pub fn set_max_lag_ms(&mut self, ms: u32) {
         self.max_lag_ms = Some(ms);
+        self.sync_options_set.insert("max_lag_ms");
     }
 
     /// Per-track override for [`set_stall_behavior`](Self::set_stall_behavior). Use it
@@ -513,11 +569,13 @@ impl PortalConfig {
     /// take the rest of the frame set down with it.
     pub fn set_track_stall_behavior(&mut self, track: impl Into<String>, behavior: StallBehavior) {
         self.track_stall_behavior.insert(track.into(), behavior);
+        self.sync_options_set.insert("stall_behavior");
     }
 
     /// Per-track override for [`set_max_lag_ms`](Self::set_max_lag_ms).
     pub fn set_track_max_lag_ms(&mut self, track: impl Into<String>, ms: u32) {
         self.track_max_lag_ms.insert(track.into(), ms);
+        self.sync_options_set.insert("max_lag_ms");
     }
 
     /// Effective stall config for one track, after applying per-track
@@ -611,11 +669,6 @@ impl PortalConfig {
         &self.action_schema
     }
 
-    /// All declared action chunks.
-    pub fn action_chunks(&self) -> &[ChunkSpec] {
-        &self.action_chunks
-    }
-
     /// Session name this config was built for.
     pub fn session(&self) -> &str {
         &self.session
@@ -639,11 +692,6 @@ impl PortalConfig {
     /// Frame-match window, in tick intervals at `fps`. Defaults to 1.5.
     pub fn tolerance(&self) -> f32 {
         self.tolerance
-    }
-
-    /// RTT ping cadence in milliseconds; `0` means active pinging is off.
-    pub fn ping_ms(&self) -> u64 {
-        self.ping_ms
     }
 
     /// Whether state packets are published on the reliable channel.
@@ -686,6 +734,27 @@ mod tests {
 
     fn cfg() -> PortalConfig {
         PortalConfig::new("demo", Role::Robot)
+    }
+
+    #[test]
+    fn add_video_keeps_resolution() {
+        let mut c = cfg();
+        let hd = Resolution { width: 1280, height: 720 };
+        c.add_video("a", Codec::H264, VideoOptions { resolution: Some(hd), ..Default::default() });
+        c.add_video("b", Codec::Vp8, VideoOptions::default());
+        assert_eq!(c.video_tracks()[0].resolution, Some(hd));
+        assert_eq!(c.video_tracks()[1].resolution, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "resolution must be even")]
+    fn add_video_rejects_odd_resolution() {
+        let odd = Resolution { width: 1279, height: 720 };
+        cfg().add_video(
+            "a",
+            Codec::H264,
+            VideoOptions { resolution: Some(odd), ..Default::default() },
+        );
     }
 
     /// The default budget is the point state-buffer capacity would have

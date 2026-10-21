@@ -23,9 +23,9 @@ Each logical channel maps to one LiveKit primitive on one reserved topic.
 |---|---|---|---|---|
 | State | `portal_state` | data packet | yes | robot |
 | Action | `portal_action` | data packet | yes | operator |
-| Action chunk | `portal_action_chunk` | byte stream | yes | operator |
 | Frame video | `portal_frame_video` | byte stream | yes | robot |
-| RTT | `portal_rtt` | data packet | no | both |
+| Clock | `portal_clock` | data packet | no | robot answers, others ping |
+| Keypoint | `portal_keypoint` | data packet | yes | any role |
 | WebRTC video | the track name | media track | n/a | robot |
 
 All topic names are exact, case-sensitive literals. A peer must filter incoming
@@ -34,7 +34,7 @@ share the room on other topics without interfering.
 
 The publisher column is the default direction. With
 [operator-side action subscription](../03-portal-api.md#operator-side-action-subscription)
-on, an operator also reads `portal_action` and `portal_action_chunk`.
+on, an operator also reads `portal_action`.
 
 ## Identity, roles, and discovery
 
@@ -42,17 +42,25 @@ The room name and participant identities come from the access token, not from
 Portal. The `session` string in Portal config is a local log label and is never
 compared against the room name. Pick identities at token-mint time.
 
-On connect, every Portal peer self-sets one participant attribute.
+On connect, every Portal peer self-sets its role and protocol version.
 
 | Attribute key | Value | Set by |
 |---|---|---|
-| `lk.portal.role` | `"robot"` or `"operator"` | every peer, on connect |
+| `lk.portal.role` | `"robot"`, `"operator"` or `"observer"` | every peer, on connect |
+| `lk.portal.version` | protocol version, currently `"3"` | every peer, on connect |
 | `lk.portal.active_operator` | active operator identity, or `""` | robot only |
 
 Discovery falls out of that. The robot is the remote participant with
 `lk.portal.role == "robot"`, and there is at most one. Operators are every
-participant with `lk.portal.role == "operator"`. A participant with no
-`lk.portal.role` is not a Portal peer and should be ignored.
+participant with `lk.portal.role == "operator"`, and observers every participant
+with `lk.portal.role == "observer"`. Observers never publish state or actions;
+they subscribe like operators. A participant with no `lk.portal.role` is not a
+Portal peer and should be ignored.
+
+Peers only recognise each other when `lk.portal.version` matches exactly. A
+peer with a missing or different version is logged as `[version-mismatch]` and
+left out of every roster. A robot also drops actions from any sender that is not
+a recognised operator, even if the active-operator pointer names it.
 
 Both are plain participant attributes. Read them from the
 participant-attributes-changed event, and from the initial participant list on
@@ -96,7 +104,9 @@ Field bytes follow in declared schema order. Each field's width is fixed by its
 dtype. There is no per-field tag and no per-field length. **The schema, shared out
 of band, is the only thing that makes the payload parseable.**
 
-`timestamp_us` is microseconds since the Unix epoch on the sender's clock.
+`timestamp_us` is microseconds since the Unix epoch on the robot's clock. It is
+the sender's `now_us()` unless the caller passed one. See
+[Timestamps and clocks](#timestamps-and-clocks).
 
 `in_reply_to_ts_us` lets an operator stamp which observation an action answers.
 `0` is the no-correlation sentinel, which is safe because a real epoch timestamp
@@ -129,8 +139,8 @@ for each field:
 return h
 ```
 
-The state topic uses that value directly. Action and chunk topics xor a
-per-stream tag onto it, so a peer running an older wire format without the
+The state topic uses that value directly. The action topic xors a stream tag
+onto it, so a peer running an older wire format without the
 `in_reply_to_ts_us` slot fails the fingerprint check instead of misparsing the
 header:
 
@@ -138,9 +148,6 @@ header:
 state_fingerprint  = schema_fingerprint(state_fields)
 action_fingerprint = schema_fingerprint(action_fields) XOR 0xa1c0b001
 ```
-
-The chunk fingerprint mixes in the chunk name and horizon as well. See
-[action chunks](#action-chunks).
 
 This hash is not cryptographic. It is a cheap agreement check, not a security
 boundary.
@@ -169,48 +176,6 @@ becomes `0`, or `false` for `Bool`.
 
 There is no in-band signal that a value saturated. The publisher logs it locally
 and the peer only ever sees the clipped value.
-
-## Action chunks
-
-An action chunk is a fixed-horizon batch of actions, which is the standard output
-of a VLA policy that emits several future steps per inference. Chunks travel as
-byte streams on `portal_action_chunk`, not data packets, because a horizon of rows
-can exceed the packet size limit.
-
-A chunk schema is a named tensor of shape `[horizon, n_fields]` with a per-field
-dtype. The payload:
-
-```
-[u32 fingerprint        little-endian]
-[u64 timestamp_us       little-endian]
-[u64 in_reply_to_ts_us  little-endian]
-[row 0: field 0, field 1, ... in schema order]
-[row 1: field 0, field 1, ...]
-...
-[row horizon-1: ...]
-```
-
-The header is the same 20-byte correlated header as an action packet. The body is
-row-major: every field of timestep 0, then every field of timestep 1, and so on
-for `horizon` rows. Each field uses its own dtype width.
-
-The chunk fingerprint extends the base fingerprint with the name and horizon, then
-xors a distinct stream tag, so a chunk and an action with identical fields can
-never collide:
-
-```
-h = schema_fingerprint(chunk.fields)
-for each byte b of chunk.name (UTF-8):
-    h = (h XOR b) * prime
-h = (h XOR 0xff) * prime
-for each byte b of chunk.horizon as u32 little-endian:   # 4 bytes
-    h = (h XOR b) * prime
-chunk_fingerprint = h XOR 0xc1c0b001
-```
-
-A peer can register more than one chunk schema. The receiver dispatches each
-incoming stream by matching the header fingerprint. An unknown fingerprint is
-dropped.
 
 ## Frame video
 
@@ -253,7 +218,7 @@ Two requirements bind a Portal-compatible publisher.
 ends must negotiate the same codec, so AV1 and H.265 depend on peer support.
 
 **Per-frame timestamp.** Every published frame must carry `user_timestamp` in its
-LiveKit packet-trailer metadata, in microseconds on the sender's clock. The
+LiveKit packet-trailer metadata, in microseconds on the robot's clock. The
 publisher must enable `PacketTrailerFeatures.user_timestamp` on the track.
 
 That second one is **mandatory, not optional.** The operator's synchronization
@@ -267,22 +232,48 @@ the configured fps. Neither is required for interop, but matching them avoids
 surprises. Simulcast is per-track configurable via `add_video(simulcast=True)`,
 as is libwebrtc's content-type hint via `screencast=True`.
 
-## RTT
+## Clock
 
-An optional liveness and latency probe. It is a data packet on `portal_rtt`, sent
-**unreliable** so retransmits cannot inflate the measurement.
+Time sync, NTP-style. Every peer except the robot estimates the robot's clock
+from a ping/pong exchange on `portal_clock`. Packets are **unreliable** so
+retransmits cannot inflate the round trip, and addressed to one participant
+(`destination_identities`), never broadcast. All integers are little-endian.
 
 ```
-[u8  kind = 0 ping | 1 pong]
-[u64 timestamp_us  little-endian]
+ping  [u8 kind = 0][u32 seq][u64 t1]                    peer → robot
+pong  [u8 kind = 1][u32 seq][u64 t1][u64 t2][u64 t3]    robot → pinger
 ```
 
-A peer sends a ping carrying its current timestamp on a timer. The receiver echoes
-the payload back as a pong, **preserving the original timestamp**. The original
-sender computes RTT as now minus the echoed timestamp.
+`t1` is when the peer sent the ping, on its own clock. The robot answers every
+ping, echoing `seq` and `t1` and adding `t2` (ping received) and `t3` (pong
+sent), both on the robot's clock. The peer notes `t4` when the pong arrives and
+computes:
 
-A peer that does not implement RTT can ignore the topic entirely. Nothing else
-depends on it.
+```
+offset = ((t2 - t1) + (t3 - t4)) / 2      robot clock minus local clock
+rtt    = (t4 - t1) - (t3 - t2)
+```
+
+Portal pings at 4 Hz until synced, then 1 Hz. It keeps a 10 s window of samples
+and uses the offset from the one with the smallest `rtt`, since the
+least-delayed sample is closest to the true offset. It needs 4 samples before
+the first estimate. A sample implying a jump of more than 1 s is ignored unless
+30 in a row agree, which counts as a resync. When the robot leaves the room the
+estimate starts over.
+
+The first estimate applies at once, in either direction: until then the peer
+stamps with its own clock, a different timeline, and slewing over to the
+robot's would stamp everything ahead of it for as long as that takes. After
+that the estimate never moves timestamps backwards. A forward correction
+applies at once. A backward correction is absorbed gradually: the clock runs at
+half speed while it is more than 100 ms behind, then at 95% until it has caught
+up. A 10 s step back takes about 22 s to absorb. While it does, this peer's
+timestamps advance slower than real time, so intervals computed from them read
+short.
+
+A packet with an unknown kind or the wrong length is ignored. A peer that does
+not implement time sync can ignore the topic; it just keeps timestamping on its
+own clock.
 
 ## Control plane: active operator
 
@@ -307,7 +298,10 @@ pointer.
 The robot's handler writes its attribute and updates its internal pointer, and the
 change propagates to everyone through the normal attribute-changed event. On
 failure the handler returns an RPC error: code `2001` if the robot is not
-connected, `2002` if the attribute write failed.
+connected, `2002` if the attribute write failed, `2003` if the caller is neither
+an operator nor an observer. A caller's role attribute can reach the robot after
+its RPC does, so the robot waits up to 1.5 s for an unknown caller to appear
+before refusing.
 
 When the active operator disconnects, the robot leaves the pointer pinned at that
 identity, so a reconnect with the same identity resumes control. To reassign, any
@@ -315,6 +309,23 @@ peer calls the RPC again.
 
 To claim control as an operator, call `portal.set_active_operator` on the robot
 with your own identity as the payload.
+
+## Keypoint
+
+A free-form annotation, broadcast as a **reliable** data packet on
+`portal_keypoint`. The payload is UTF-8 JSON:
+
+```json
+{"type": "recording", "payload": {"task_description": "pick the blue cube"}, "timestamp_us": 1790184569394000}
+```
+
+- `type` is any string and `payload` any JSON object; `payload` may be omitted
+  and reads as `{}`. Portal defines nothing else and interprets neither field.
+- `timestamp_us` is where the mark belongs, on the robot's clock.
+- Receivers ignore unknown fields, and drop malformed packets and packets from
+  participants that are not a recognised Portal peer.
+- A keypoint must fit in one data packet (64 KB negotiated on a local server);
+  a larger one fails at send time.
 
 ## Application RPC
 
@@ -339,25 +350,28 @@ key or all traffic fails to decrypt, silently. See [E2EE](e2ee.md).
 
 ## Timestamps and clocks
 
-Every timestamp on the wire is `u64` microseconds since the Unix epoch, taken from
-the sender's wall clock, little-endian. State, action, chunk, frame video, and RTT
-all use this unit.
+Every timestamp on the wire is `u64` microseconds since the Unix epoch,
+little-endian. State, action, frame video, and clock packets all use this unit.
+
+Portal stamps state, frames and actions with `now_us()`: the robot's clock on
+the robot, and the time sync estimate of it everywhere else (see [Clock](#clock)).
+A peer may pass its own timestamps instead.
 
 The operator's synchronization compares a state timestamp against each video frame
 timestamp, so **the robot must stamp its state packets and its frames from the same
 clock.** Two different clocks on the robot is the one mistake that breaks matching
 in a way that looks like network trouble.
 
-Operator and robot clocks do not need to be tightly synchronized for the gate to
-work. Large skew does shift which frames match which state, so keep both peers on
-NTP.
+Operator and robot clocks do not need to be synchronized for the gate to work.
+Time sync puts actions on the robot's timeline anyway, so recordings from
+several peers line up without NTP.
 
 ## Minimal implementation checklist
 
 To act as an **operator** against a Portal robot:
 
 1. Connect with a token granting `can_update_own_metadata`. Set your own
-   `lk.portal.role` attribute to `"operator"`.
+   `lk.portal.role` attribute to `"operator"` and `lk.portal.version` to `"3"`.
 2. Find the robot: the remote participant with `lk.portal.role == "robot"`.
 3. Subscribe to its video tracks by name. For WebRTC tracks, read `user_timestamp`
    from each frame's packet trailer. For byte-stream tracks, read
@@ -383,8 +397,8 @@ To act as a **robot** against Portal operators:
 5. Read `portal_action` packets. **Drop any whose sender identity is not your
    current active operator.** Then verify the fingerprint and parse.
 
-The shared schemas, meaning state fields, action fields, chunk specs, and video
-track names and codecs, are the out-of-band contract that makes any of these bytes
+The shared schemas, meaning state fields, action fields, and video track names
+and codecs, are the out-of-band contract that makes any of these bytes
 parseable. Distribute them as a [YAML config file](config-file.md) or agree on
 them some other way. The fingerprints only detect disagreement. They cannot
 describe the schema for you.

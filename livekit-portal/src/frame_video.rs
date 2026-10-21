@@ -72,9 +72,10 @@ use bytes::Bytes;
 use livekit::StreamByteOptions;
 use livekit::prelude::*;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::clock::anchored_now_us;
 use crate::codec::{Codec, decode_frame, encode_frame_into, estimated_encoded_size};
 use crate::config::VideoTrackSpec;
 use crate::error::{PortalError, PortalResult};
@@ -106,13 +107,6 @@ const WIRE_VERSION: u8 = 1;
 ///   1 (version) + 1 (codec) + 2 (w) + 2 (h) + 8 (ts) + 2 (name_len) = 16
 const HEADER_FIXED_LEN: usize = 16;
 
-/// Bound on the in-flight publish queue per track. Sized for ~1 second of
-/// frames at 60 fps. The bound exists so a stalled byte-stream send
-/// (slow link, SFU backpressure) cannot grow memory without limit; on
-/// overflow we drop the newest frame and warn rather than block the
-/// caller's send path. Video already tolerates frame loss, so dropping
-/// is the right policy here.
-const PUBLISH_QUEUE_CAP: usize = 60;
 
 /// Cap on track-name length on the wire. The framing header allots a `u16`
 /// (65535 bytes), but a name longer than this is almost certainly malformed
@@ -244,14 +238,13 @@ pub(crate) struct FrameVideoTrackEntry {
 // --- Publisher ---
 
 /// Publishes one frame-video track's frames as a sequence of LiveKit byte
-/// streams. Sends are serialized through an mpsc onto a single drainer
-/// task — one byte stream in flight at a time per track. A faster send
-/// rate that backs up the queue spills into newest-frame-drops at the
-/// `try_send` boundary (video tolerates loss; latency under load is more
-/// important than fidelity).
+/// streams, one in flight at a time per track. Frames wait in a single
+/// latest-wins slot: a frame sent while the previous one is still pending
+/// replaces it, so latency stays at one frame when the link is slower than
+/// the send rate instead of growing with a queue.
 pub(crate) struct FrameVideoPublisher {
     spec: VideoTrackSpec,
-    tx: mpsc::Sender<Vec<u8>>,
+    pending: Arc<PendingFrame>,
     task: Option<JoinHandle<()>>,
     metrics: Arc<TrackMetrics>,
 }
@@ -262,11 +255,20 @@ impl FrameVideoPublisher {
         local_participant: LocalParticipant,
         metrics: Arc<TrackMetrics>,
     ) -> Self {
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(PUBLISH_QUEUE_CAP);
+        let pending = Arc::new(PendingFrame::default());
         let track_name = spec.name.clone();
+        // MJPEG and PNG are already compressed, so deflating them only costs
+        // CPU. Raw usually shrinks enough to be worth it on a slow link.
+        let compress = spec.codec == Codec::Raw;
+        let slot = pending.clone();
+        let task_metrics = metrics.clone();
         let task = tokio::spawn(async move {
-            while let Some(payload) = rx.recv().await {
-                let options = StreamByteOptions::new_with_topic(FRAME_VIDEO_TOPIC);
+            loop {
+                slot.ready.notified().await;
+                let Some(payload) = slot.frame.lock().take() else { continue };
+                task_metrics.record_sent_bytes(payload.len());
+                let options =
+                    StreamByteOptions::new_with_topic(FRAME_VIDEO_TOPIC).with_compress(compress);
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
                     log::warn!(
                         "[publish-failed] frame_video '{track_name}' byte stream failed: {e}"
@@ -274,7 +276,7 @@ impl FrameVideoPublisher {
                 }
             }
         });
-        Self { spec, tx, task: Some(task), metrics }
+        Self { spec, pending, task: Some(task), metrics }
     }
 
     /// Encode one RGB frame and queue it for publish. `rgb_data` is packed
@@ -299,24 +301,18 @@ impl FrameVideoPublisher {
             rgb_data,
             self.spec.quality,
         )?;
-        let payload_len = payload.len();
-        match self.tx.try_send(payload) {
-            Ok(()) => self.metrics.record_sent_bytes(payload_len),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metrics.record_dropped_publisher_full();
-                log::warn!(
-                    "[publish-full] frame_video '{}' queue full (cap={}), dropping frame",
-                    self.spec.name,
-                    PUBLISH_QUEUE_CAP
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                // Drainer task gone (disconnect / drop). Caller is in
-                // teardown; silent.
-            }
+        if self.pending.frame.lock().replace(payload).is_some() {
+            self.metrics.record_dropped_publisher_full();
         }
+        self.pending.ready.notify_one();
         Ok(())
     }
+}
+
+#[derive(Default)]
+struct PendingFrame {
+    frame: Mutex<Option<Vec<u8>>>,
+    ready: Notify,
 }
 
 impl Drop for FrameVideoPublisher {
@@ -342,7 +338,7 @@ impl Drop for FrameVideoPublisher {
 pub(crate) fn dispatch_frame_payload(
     payload: Bytes,
     entries: &HashMap<String, Arc<FrameVideoTrackEntry>>,
-    sync_buffer: &Arc<Mutex<SyncBuffer>>,
+    sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     obs_sink: &Arc<ObservationSink>,
 ) {
     let wire_len = payload.len();
@@ -395,7 +391,7 @@ pub(crate) fn dispatch_frame_payload(
         }
     };
 
-    entry.metrics.record_received_bytes(timestamp_us, now_us(), wire_len);
+    entry.metrics.record_received_bytes(timestamp_us, anchored_now_us(), wire_len);
 
     let frame = Arc::new(VideoFrameData {
         width: decoded.width,
@@ -420,6 +416,9 @@ pub(crate) fn dispatch_frame_payload(
     }
     *entry.slots.latest.lock() = Some((*frame).clone());
 
+    let Some(sync_buffer) = sync_buffer else {
+        return;
+    };
     let output = sync_buffer.lock().push_frame(track_name_for_dispatch, frame);
     if !output.is_empty() {
         obs_sink.dispatch(output);

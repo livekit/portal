@@ -121,6 +121,17 @@ await op.set_active_operator(op.local_identity())
 If you are on the lerobot plugins with `auto_claim_control=False`, something else
 has to claim on your behalf.
 
+If the pointer is right, the robot may not count the sender as an operator. It
+only takes actions from a participant whose `lk.portal.role` is `"operator"` and
+whose `lk.portal.version` matches its own. Check the robot's roster:
+
+```python
+print(robot.operators())        # the sender must be listed
+```
+
+If it is missing, look for a [`version-mismatch`](#version-mismatch) line and
+upgrade every peer to the same release.
+
 ### `ImportError` or `ffi not initialized`
 
 The native library did not load. Rebuild it:
@@ -146,6 +157,35 @@ If it is populated and large, decompose it. Subtract RTT to get everything that
 is not network. Compare the remainder against your inference time. Frame video
 adds a per-chunk floor on top, covered in
 [Frame video](05-frame-video.md#the-latency-floor).
+
+On a WebRTC track sending frames larger than 640x480, pass the frame size to
+`add_video`. Without it the encoder is set up for 640x480, which adds tens of
+milliseconds at 720p and above with H.264:
+
+```python
+cfg.add_video("front", width=1280, height=720)
+```
+
+See [Frame size](03-portal-api.md#frame-size).
+
+### Time sync never completes
+
+`metrics().time_sync.synced` stays `False` and `on_time_synced` never fires.
+Every peer except the robot syncs to the robot, so nothing can sync until the
+robot is in the room. Once it is, the first sync takes about a second.
+
+The other `time_sync` fields tell you how good the estimate is:
+
+- **`uncertainty_us`** is half the round trip of the best sample in the last
+  10 s. A large value means a slow or congested link, not a bug.
+- **`samples_rejected`** counts samples more than 1 s away from the estimate.
+  A few are normal. A steady climb followed by a `resyncs` increment means the
+  robot's clock moved while it stayed in the room.
+- **With `time_sync_source: system`**, `synced` is `True` from the start. Watch
+  `measured_offset_us` instead. A value far from zero means the hosts' PTP or
+  NTP has drifted.
+
+See [Time sync](03-portal-api.md#time-sync).
 
 ### Frames arrive at a resolution that changes mid-session
 
@@ -215,12 +255,12 @@ See [Choosing `tolerance`](04-tuning.md#choosing-tolerance).
 ### state-overflow
 
 ```
-[state-overflow] state buffer full (5), dropped 2 oldest. Further drops in this burst won't be re-logged.
+[state-overflow] state buffer full (5), dropped 2 oldest (40 more overflows since the last warning)
 ```
 
 The state buffer hit its cap and shed its oldest entries. States piled up with no
-frame to match against, which usually means a video track stalled completely.
-Logs once per burst.
+frame to match against, which usually means a video track stalled completely, or
+state is published faster than the video frame rate. Logs at most once every 5 s.
 
 **Fix.** Raise `slack` to tolerate longer stalls, or lower `max_lag` so stuck
 moments resolve before they pile up. Set `stall_behavior` to `FREEZE` or `OMIT` if a
@@ -230,12 +270,12 @@ robot, not in the buffer.
 ### video-overflow
 
 ```
-[video-overflow] 'front' buffer full, evicted 3 frame(s)
+[video-overflow] 'front' buffer full, evicted 1 frame(s) (148 more evictions since the last warning)
 ```
 
 A video track's buffer hit its cap and dropped its oldest frames. This is normal
 when video arrives faster than state. The newest frames are kept, so matching
-still works.
+still works. Logs at most once every 5 s per track.
 
 **Fix.** Usually nothing. If it pairs with [`sync-drop`](#sync-drop), the buffer
 is too shallow to bridge the two rates, so raise `slack`. The cumulative count is
@@ -265,24 +305,38 @@ in a one-off burst.
 
 ```
 [publish-full] topic 'state' queue full (cap=1024), dropping packet
-[publish-full] frame_video 'front' queue full (cap=1024), dropping frame
 ```
 
-The outbound queue for a topic, chunk, or frame-video track filled and a packet
-was dropped before leaving the machine. The link cannot ship data as fast as you
-produce it.
+The outbound queue for a topic filled and a packet was dropped before leaving
+the machine. The link cannot ship data as fast as you produce it.
+
+Frame-video tracks don't log this. They keep only the newest unsent frame, and
+each replaced frame counts in `metrics.transport.frames_dropped_publisher_full`.
 
 **Fix.** Lower the publish rate, the resolution, or the frame rate. Check the
 network. A persistent warning is sustained backpressure, not a spike. Track it
 with `metrics.transport.frames_dropped_publisher_full`. If you would rather shed
 load than queue it, use a WebRTC video track instead of frame video.
 
+### playout-delay
+
+```
+[playout-delay] zero playout delay not enabled: the WebRTC runtime is already initialized without zero playout delay
+```
+
+Something in this process connected to LiveKit before Portal did, so libwebrtc's
+runtime started with its default playout delay and Portal cannot change it.
+Video still arrives, but libwebrtc holds frames back to smooth playback, which
+adds tens of milliseconds on VP8, VP9 and AV1.
+
+**Fix.** Connect Portal before any other LiveKit room in the same process, or run
+it in its own process.
+
 ### publish-failed
 
 ```
 [publish-failed] data publish failed: <error>
-[publish-failed] chunk 'grip' byte stream failed: <error>
-[publish-failed] rtt publish failed: <error>
+[publish-failed] clock publish failed: <error>
 ```
 
 A publish call returned a transport error. The room is disconnected, or the peer
@@ -333,42 +387,6 @@ The peer receives the clamped value and never learns the original. `NaN` becomes
 
 **Fix.** Widen the dtype, or scale the value before sending.
 
-### chunk-length
-
-```
-[chunk-length] chunk 'act': field 'j3' has 10 of 16 timesteps, padded with 6 zeros
-[chunk-length] chunk 'act': field 'j4' missing, padded with 16 zeros
-[chunk-length] chunk 'act': field 'j5' has 20 of 16 timesteps, truncated to 16
-```
-
-A chunk column was not exactly `horizon` long. The send still goes out: short
-columns and missing columns zero-pad, long ones truncate. Logged once per field,
-then silent.
-
-Read the zeros literally. A chunk is a whole unit, not a partial update, so an
-omitted column does **not** carry forward the way an omitted scalar action field
-does. Zero is a real commanded value, and for a position target it means move to
-zero.
-
-**Fix.** Send the full column. If your policy emits a shorter horizon than you
-declared, redeclare the chunk at the horizon it actually produces rather than
-letting the tail pad.
-
-### unknown-chunk
-
-```
-[unknown-chunk] on_action_chunk: chunk 'grip' not declared, callback ignored
-[unknown-chunk] topic 'portal_action_chunk': unknown fingerprint 0x1A2B3C4D, dropping byte stream
-```
-
-A chunk name or fingerprint matches no declared chunk. Either you registered a
-callback for a chunk that was never declared, or a byte stream arrived for a chunk
-this side does not know. Receive-side warnings cap at 256 unique fingerprints,
-then suppress.
-
-**Fix.** Declare the chunk with the same name, horizon, and fields on both ends
-before registering the callback or sending.
-
 ### unknown-track
 
 ```
@@ -408,7 +426,7 @@ or encoder problem on the sender.
 ```
 [bad-payload] frame_video: bad header (<error>)
 [bad-payload] state deserialize failed: <error>
-[bad-payload] failed to read chunk byte stream: <error>
+[bad-payload] failed to read frame_video byte stream: <error>
 ```
 
 A received payload could not be parsed. The header was malformed, the body failed
@@ -417,6 +435,19 @@ continues.
 
 **Fix.** Usually a transport hiccup or version skew between peers. If it persists,
 confirm both ends run the same Portal version and the same schema.
+
+### version-mismatch
+
+```
+[version-mismatch] ignoring 'teleop': it speaks Portal protocol "2", this peer speaks "3"; upgrade both sides to the same release
+```
+
+A peer's `lk.portal.version` is missing or different. It is left out of the
+rosters, so its actions, keypoints and `set_active_operator` calls are ignored.
+Logged once per identity.
+
+**Fix.** Run the same Portal release on every peer. See
+[Migrating to v0.3](09-migrating-to-v0.3.md).
 
 ### callback-panic
 
@@ -454,7 +485,6 @@ they are not tagged. `SESSION` below is your session label, not a tag.
 | `[SESSION] ready to publish frame-video track 'TRACK' via byte stream` | A byte-stream video track is set up. |
 | `[SESSION] ready to publish state via MODE data (N fields)` | The state publisher is set up. |
 | `[SESSION] ready to publish action via MODE data (N fields)` | The action publisher is set up. |
-| `[SESSION] ready to publish chunk 'NAME' via byte stream` | A chunk publisher is set up. |
 | `[SESSION] subscribed to video track 'TRACK'` | The operator is receiving a robot track. |
 | `[SESSION] participant 'ID' disconnected` | Someone left the room. |
 | `[SESSION] reconnected, clearing sync buffers and latest slots` | The session recovered. Buffers were flushed. |

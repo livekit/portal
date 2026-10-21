@@ -25,7 +25,6 @@
 use std::io::Cursor;
 
 use bytes::Bytes;
-use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 
@@ -206,13 +205,8 @@ pub fn encode_frame_into(
                 .map_err(|e| CodecError::EncodeFailed(e.to_string()))?;
             Ok(())
         }
-        Codec::Mjpeg => {
-            let mut encoder = JpegEncoder::new_with_quality(&mut *out, quality);
-            encoder
-                .encode(rgb, width, height, ExtendedColorType::Rgb8)
-                .map_err(|e| CodecError::EncodeFailed(e.to_string()))?;
-            Ok(())
-        }
+        Codec::Mjpeg => crate::jpeg::encode_rgb_into(out, rgb, width, height, quality)
+            .ok_or_else(|| CodecError::EncodeFailed("libjpeg rejected the frame".into())),
         Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
             "WebRTC codecs ride the WebRTC media path, not the byte-stream encode path"
         ),
@@ -346,6 +340,36 @@ mod tests {
             .sum();
         let avg = total as f64 / rgb.len() as f64;
         assert!(avg < 5.0, "avg pixel error {avg} should be small at q=95");
+    }
+
+    /// Sampling factors of each component in the baseline frame header.
+    fn jpeg_sampling(jpeg: &[u8]) -> Vec<u8> {
+        let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).expect("baseline SOF0 marker");
+        let count = jpeg[sof + 9] as usize;
+        (0..count).map(|i| jpeg[sof + 10 + i * 3 + 1]).collect()
+    }
+
+    #[test]
+    fn mjpeg_keeps_full_chroma_resolution() {
+        let rgb = gradient(64, 48);
+        let bytes = encode_frame(&rgb, 64, 48, Codec::Mjpeg, 90).unwrap();
+        assert_eq!(jpeg_sampling(&bytes), vec![0x11, 0x11, 0x11], "4:4:4, no chroma subsampling");
+    }
+
+    #[test]
+    fn mjpeg_quality_trades_size() {
+        let rgb = gradient(64, 48);
+        let low = encode_frame(&rgb, 64, 48, Codec::Mjpeg, 30).unwrap();
+        let high = encode_frame(&rgb, 64, 48, Codec::Mjpeg, 95).unwrap();
+        assert!(low.len() < high.len(), "q=30 ({}) should be smaller than q=95 ({})", low.len(), high.len());
+    }
+
+    #[test]
+    fn mjpeg_roundtrip_keeps_odd_dimensions() {
+        let rgb = gradient(33, 17);
+        let bytes = encode_frame(&rgb, 33, 17, Codec::Mjpeg, 90).unwrap();
+        let decoded = decode_frame(Bytes::from(bytes), Codec::Mjpeg, 33, 17).unwrap();
+        assert_eq!((decoded.width, decoded.height), (33, 17));
     }
 
     #[test]

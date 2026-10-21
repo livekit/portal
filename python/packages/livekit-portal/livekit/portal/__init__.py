@@ -39,6 +39,7 @@ delivery, frame-video frames are codec-decoded to RGB. Use
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import numbers
 import os
@@ -50,6 +51,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 _log = logging.getLogger(__name__)
 
 from . import _frame
+from ._recording import ObserverMetrics, Recorder, SessionInfo, Sink, _Converters
 from . import livekit_portal_ffi as _ffi
 from ._frame import frame_bytes_to_numpy_rgb
 
@@ -60,18 +62,20 @@ DType = _ffi.DType
 VideoCodec = _ffi.VideoCodec
 FrameSource = _ffi.FrameSource
 StallBehavior = _ffi.StallBehavior
+ActionSubscription = _ffi.ActionSubscription
+TimeSyncSource = _ffi.TimeSyncSource
 FieldSpec = _ffi.FieldSpec
 VideoTrackSpec = _ffi.VideoTrackSpec
 # Deprecated alias. `FrameVideoSpec` was the byte-stream-only record; there is
 # now one spec type for every track, and `frame_video_tracks` returns it.
 FrameVideoSpec = VideoTrackSpec
-ChunkSpec = _ffi.ChunkSpec
 VideoFrameData = _ffi.VideoFrame
 PortalMetrics = _ffi.PortalMetrics
 SyncMetrics = _ffi.SyncMetrics
 TransportMetrics = _ffi.TransportMetrics
 BufferMetrics = _ffi.BufferMetrics
 RttMetrics = _ffi.RttMetrics
+TimeSyncMetrics = _ffi.TimeSyncMetrics
 PolicyMetrics = _ffi.PolicyMetrics
 PortalError = _ffi.PortalError
 ConfigFileError = _ffi.ConfigFileError
@@ -93,6 +97,21 @@ SchemaEntry = Union[Tuple[str, DType], FieldSpec]
 # reason about the shape of `action.values` / `state.values` /
 # `observation.state`.
 TypedScalar = Union[bool, int, float]
+
+
+def _to_action_subscription(value: Any) -> "ActionSubscription":
+    """Accept `ActionSubscription` or its name; reject v0.2's bool loudly."""
+    if isinstance(value, bool):
+        raise TypeError(
+            "set_action_subscription no longer takes a bool; pass one of "
+            f"'none', 'active', 'all' (v0.2's {value} is now "
+            f"'{'active' if value else 'none'}')"
+        )
+    if isinstance(value, ActionSubscription):
+        return value
+    if isinstance(value, str) and value.upper() in ActionSubscription.__members__:
+        return ActionSubscription[value.upper()]
+    raise ValueError(f"action subscription must be one of 'none', 'active', 'all', got {value!r}")
 
 
 def _to_field_specs(schema: Iterable[SchemaEntry]) -> List[FieldSpec]:
@@ -235,31 +254,27 @@ class Action:
     own identity). Use this rather than `Operator.active_operator()` to
     label rows in a recording dataset — it is set at gate time and
     cannot race with a handoff."""
+    active: bool
+    """Whether `sender` was the active operator at gate time. `False` marks
+    a shadow action the robot ignored, only seen with
+    `ActionSubscription.ALL`. It means the action passed the gate, not that
+    the robot carried it out."""
     in_reply_to_ts_us: Optional[int] = None
 
 
 @dataclass(frozen=True, slots=True)
-class ActionChunk:
-    """An action chunk received from the operator.
+class Keypoint:
+    """An annotation: `{type, payload}`, and that is all Portal defines.
 
-    `data` is `field -> numpy.ndarray` per the declared chunk schema.
-    Each array has length `horizon` and dtype matching the field's
-    declared `DType`. `raw_data` is the same payload as
-    `Dict[str, list[float]]` — the lossless f64 view, useful when you
-    want to skip the per-field numpy reconstruction.
-
-    `in_reply_to_ts_us` matches the same field on `Action`.
+    Portal delivers keypoints but never interprets them. `timestamp_us` is
+    where the mark belongs, on the robot's clock. `sender` is the identity
+    of the participant that sent it.
     """
 
-    name: str
-    horizon: int
-    data: Dict[str, Any]
-    raw_data: Dict[str, List[float]]
+    type: str
+    payload: Dict[str, Any]
     timestamp_us: int
     sender: str
-    """Same semantics as `Action.sender`: the operator that produced this
-    chunk, captured at the gate."""
-    in_reply_to_ts_us: Optional[int] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,111 +310,6 @@ class Observation:
     timestamp_us: int
 
 
-def _validate_chunk_column(
-    name: str, column: Any, dtype: DType
-) -> None:
-    """Reject a chunk column whose element types disagree with the declared
-    dtype. The scalar counterpart is `_validate_send_values`, and the rules
-    are identical — this is the same category check applied per element.
-
-    Like the scalar path, the claim is a *category*, not an exact dtype: a
-    Python `int` is a legitimate `I8` and `I32` both, so this cannot narrow
-    further and does not try. Out-of-range values still saturate at encode
-    and warn once per `(t, field)`, exactly as an out-of-range action does.
-
-    numpy columns are checked once via `column.dtype`, not per element, so a
-    long horizon costs the same as a short one. Only list-like columns pay
-    per-element cost, and only up to the first offender.
-    """
-    if _np is not None and isinstance(column, _np.ndarray):
-        kind = column.dtype.kind
-        if dtype == DType.BOOL:
-            ok = kind == "b"
-        elif dtype in _INT_DTYPES:
-            ok = kind in ("i", "u")
-        else:  # float dtype
-            ok = kind in ("f", "i", "u")
-        if not ok:
-            raise PortalError.DtypeMismatch(
-                f"chunk field '{name}' declared as {dtype} but sent as an "
-                f"array of {column.dtype}"
-            )
-        return
-    for value in column:
-        if dtype == DType.BOOL:
-            ok = isinstance(value, _NUMPY_BOOL_TYPES)
-        elif dtype in _INT_DTYPES:
-            ok = (
-                isinstance(value, numbers.Integral)
-                and not isinstance(value, _NUMPY_BOOL_TYPES)
-            )
-        else:  # float dtype
-            ok = (
-                isinstance(value, numbers.Real)
-                and not isinstance(value, _NUMPY_BOOL_TYPES)
-            )
-        if not ok:
-            raise PortalError.DtypeMismatch(
-                f"chunk field '{name}' declared as {dtype} but sent as "
-                f"{type(value).__name__}"
-            )
-
-
-def _normalize_chunk_data(
-    data: Any, schema: List[FieldSpec]
-) -> Dict[str, "_ffi.ChunkColumn"]:
-    """Coerce send-side chunk data into the `Dict[str, ChunkColumn]` the FFI
-    accepts. Two input shapes:
-
-    * `numpy.ndarray` of shape `(horizon, len(schema))` — split into
-      per-field columns in declared order. Convenient for uniform-dtype
-      VLA tensors.
-    * `Dict[str, ndarray | list]` — pass-through, with each column cast
-      to a `list[float]`. Unknown keys go through to the core, which
-      warns once each.
-
-    The dict form is dtype-checked per column (see `_validate_chunk_column`).
-    The ndarray form is **not**: one uniform tensor spread across a mixed
-    schema is the case that shape exists for, and an `f32` array is a
-    legitimate way to express a `Bool` gripper column there. It is validated
-    for shape only.
-
-    Every column crosses the FFI with `dtype=None`, waiving the core's
-    `check_chunk_dtypes`, because the category check above has already run
-    and a Python value cannot claim an exact dtype honestly. `dtype` is for
-    Rust callers, who can.
-    """
-    if _np is not None and isinstance(data, _np.ndarray):
-        if data.ndim != 2 or data.shape[1] != len(schema):
-            raise PortalError.Deserialization(
-                f"chunk ndarray must be shape (horizon, {len(schema)}); got {data.shape}"
-            )
-        cols: Dict[str, "_ffi.ChunkColumn"] = {}
-        for i, field in enumerate(schema):
-            cols[field.name] = _ffi.ChunkColumn(
-                values=data[:, i].astype(_np.float64).tolist(), dtype=None
-            )
-        return cols
-    if not isinstance(data, dict):
-        raise PortalError.Deserialization(
-            "chunk data must be a dict or 2D numpy array"
-        )
-    declared: Dict[str, DType] = {f.name: f.dtype for f in schema}
-    cols = {}
-    for name, column in data.items():
-        dtype = declared.get(name)
-        # Unknown keys skip validation — the core warns once each, matching
-        # how `_validate_send_values` leaves them to the publisher.
-        if dtype is not None:
-            _validate_chunk_column(name, column, dtype)
-        if _np is not None and isinstance(column, _np.ndarray):
-            values = column.astype(_np.float64).tolist()
-        else:
-            values = [float(v) for v in column]
-        cols[name] = _ffi.ChunkColumn(values=values, dtype=None)
-    return cols
-
-
 def _wrap_action(
     action: _ffi.Action, schema: List[FieldSpec]
 ) -> Action:
@@ -409,60 +319,16 @@ def _wrap_action(
         timestamp_us=action.timestamp_us,
         in_reply_to_ts_us=action.in_reply_to_ts_us,
         sender=action.sender,
+        active=action.active,
     )
 
 
-# Numpy dtype mapping for chunk reconstruction. Defined once at import so
-# the per-frame hot path doesn't re-allocate the lookup table.
-try:
-    import numpy as _np
-    _NUMPY_DTYPE_MAP = {
-        DType.F64: _np.float64,
-        DType.F32: _np.float32,
-        DType.I32: _np.int32,
-        DType.I16: _np.int16,
-        DType.I8: _np.int8,
-        DType.U32: _np.uint32,
-        DType.U16: _np.uint16,
-        DType.U8: _np.uint8,
-        DType.BOOL: _np.bool_,
-    }
-except ImportError:  # pragma: no cover
-    _np = None
-    _NUMPY_DTYPE_MAP = {}
-
-
-def _wrap_action_chunk(
-    chunk: _ffi.ActionChunk, schema_by_name: Dict[str, List[FieldSpec]]
-) -> ActionChunk:
-    """Reconstruct typed numpy arrays per field. The FFI hands us
-    `Dict[str, list[float]]` because the core pipeline is f64; we cast each
-    column back to its declared dtype so policies that emit `float32[H]`
-    don't pay an unwanted widening on receipt.
-    """
-    fields = schema_by_name.get(chunk.name, [])
-    raw_data: Dict[str, List[float]] = chunk.data
-    if _np is None:
-        # numpy is a hard runtime dep on this package, so this branch only
-        # exists for hypothetical embedded builds. Hand back the raw lists
-        # in `data` so callers can still consume the chunk.
-        data: Dict[str, Any] = dict(raw_data)
-    else:
-        data = {}
-        for field in fields:
-            column = chunk.data.get(field.name)
-            if column is None:
-                continue
-            np_dtype = _NUMPY_DTYPE_MAP.get(field.dtype, _np.float64)
-            data[field.name] = _np.asarray(column, dtype=np_dtype)
-    return ActionChunk(
-        name=chunk.name,
-        horizon=chunk.horizon,
-        data=data,
-        raw_data=raw_data,
-        timestamp_us=chunk.timestamp_us,
-        in_reply_to_ts_us=chunk.in_reply_to_ts_us,
-        sender=chunk.sender,
+def _wrap_keypoint(keypoint: _ffi.Keypoint) -> Keypoint:
+    return Keypoint(
+        type=keypoint.kind,
+        payload=json.loads(keypoint.payload_json),
+        timestamp_us=keypoint.timestamp_us,
+        sender=keypoint.sender,
     )
 
 
@@ -503,7 +369,6 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self,
         action_schema: List[FieldSpec],
         state_schema: List[FieldSpec],
-        chunk_schemas: Dict[str, List[FieldSpec]],
     ) -> None:
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -513,18 +378,20 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._drop_cb: Optional[Callable[[List[Dict[str, Any]]], Any]] = None
         # Per-track video callback: track_name → callable(track_name, frame).
         self._video_cbs: Dict[str, Callable[[str, VideoFrameData], Any]] = {}
-        # Per-chunk callback: chunk_name → callable(chunk).
-        self._chunk_cbs: Dict[str, Callable[[ActionChunk], Any]] = {}
         # Multi-controller callbacks (v0.2). All three are optional; nothing
         # fires when unset.
         self._operator_joined_cb: Optional[Callable[[str], Any]] = None
         self._operator_left_cb: Optional[Callable[[str], Any]] = None
         self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
+        self._time_synced_cb: Optional[Callable[[], Any]] = None
+        self._keypoint_cb: Optional[Callable[[Keypoint], Any]] = None
+        # Recording tap: sees every raw record on the delivering thread,
+        # ahead of (and independent of) the user callbacks.
+        self._tap: Optional[Callable[[str, Any], None]] = None
         # Schemas are frozen at Portal construction and read by the wrap
         # helpers below on every delivery.
         self._action_schema = action_schema
         self._state_schema = state_schema
-        self._chunk_schemas = chunk_schemas
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         with self._lock:
@@ -540,11 +407,17 @@ class _Dispatcher(_ffi.PortalCallbacks):
     # --- PortalCallbacks trait impls (called from Rust/tokio thread) --------
 
     def on_action(self, action: _ffi.Action) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("action", action)
         cb = self._action_cb
         if cb is not None:
             self._schedule(cb, _wrap_action(action, self._action_schema))
 
     def on_state(self, state: _ffi.State) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("state", state)
         cb = self._state_cb
         if cb is not None:
             self._schedule(cb, _wrap_state(state, self._state_schema))
@@ -557,6 +430,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
             )
 
     def on_video_frame(self, track_name: str, frame: VideoFrameData) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("frame", (track_name, frame))
         cb = self._video_cbs.get(track_name)
         if cb is not None:
             self._schedule(cb, track_name, frame)
@@ -569,11 +445,6 @@ class _Dispatcher(_ffi.PortalCallbacks):
             # same shape it gets from `on_state` / `on_observation`.
             typed = [_cast_values(d, self._state_schema) for d in dropped]
             self._schedule(cb, typed)
-
-    def on_action_chunk(self, chunk: _ffi.ActionChunk) -> None:
-        cb = self._chunk_cbs.get(chunk.name)
-        if cb is not None:
-            self._schedule(cb, _wrap_action_chunk(chunk, self._chunk_schemas))
 
     def on_operator_joined(self, identity: str) -> None:
         cb = self._operator_joined_cb
@@ -589,6 +460,19 @@ class _Dispatcher(_ffi.PortalCallbacks):
         cb = self._active_operator_changed_cb
         if cb is not None:
             self._schedule(cb, identity)
+
+    def on_time_synced(self) -> None:
+        cb = self._time_synced_cb
+        if cb is not None:
+            self._schedule(cb)
+
+    def on_keypoint(self, keypoint: _ffi.Keypoint) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("keypoint", keypoint)
+        cb = self._keypoint_cb
+        if cb is not None:
+            self._schedule(cb, _wrap_keypoint(keypoint))
 
     # --- Registration (from Python user thread) -----------------------------
 
@@ -607,11 +491,6 @@ class _Dispatcher(_ffi.PortalCallbacks):
     def set_video(self, track_name: str, cb: Callable[[str, VideoFrameData], Any]) -> None:
         self._video_cbs[track_name] = cb
 
-    def set_action_chunk(
-        self, chunk_name: str, cb: Callable[[ActionChunk], Any]
-    ) -> None:
-        self._chunk_cbs[chunk_name] = cb
-
     def set_operator_joined(self, cb: Callable[[str], Any]) -> None:
         self._operator_joined_cb = cb
 
@@ -620,6 +499,15 @@ class _Dispatcher(_ffi.PortalCallbacks):
 
     def set_active_operator_changed(self, cb: Callable[[Optional[str]], Any]) -> None:
         self._active_operator_changed_cb = cb
+
+    def set_time_synced(self, cb: Callable[[], Any]) -> None:
+        self._time_synced_cb = cb
+
+    def set_tap(self, tap: Optional[Callable[[str, Any], None]]) -> None:
+        self._tap = tap
+
+    def set_keypoint(self, cb: Callable[[Keypoint], Any]) -> None:
+        self._keypoint_cb = cb
 
 
 _uniffi_bound_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -718,7 +606,6 @@ class PortalConfig:
         "_video_track_specs",
         "_state_schema",
         "_action_schema",
-        "_action_chunks",
     )
 
     def __init__(self, session: str, role: Role) -> None:
@@ -728,7 +615,6 @@ class PortalConfig:
         self._video_track_specs: List[VideoTrackSpec] = []
         self._state_schema: List[FieldSpec] = []
         self._action_schema: List[FieldSpec] = []
-        self._action_chunks: List[ChunkSpec] = []
 
     @classmethod
     def from_yaml_str(
@@ -784,7 +670,6 @@ class PortalConfig:
         instance._video_track_specs = list(inner.video_track_specs())
         instance._state_schema = list(inner.state_schema())
         instance._action_schema = list(inner.action_schema())
-        instance._action_chunks = list(inner.action_chunks())
         return instance
 
     @property
@@ -841,11 +726,6 @@ class PortalConfig:
     def action_schema(self) -> List[FieldSpec]:
         return list(self._action_schema)
 
-    @property
-    def action_chunks(self) -> List[ChunkSpec]:
-        """All declared action chunks, in declaration order."""
-        return list(self._action_chunks)
-
     # Sync / transport knobs are not mirrored Python-side — read them back
     # from the FFI config, which owns the authoritative value.
 
@@ -865,11 +745,6 @@ class PortalConfig:
         return self._inner.tolerance()
 
     @property
-    def ping_ms(self) -> int:
-        """RTT ping cadence in milliseconds; `0` means active pinging is off."""
-        return self._inner.ping_ms()
-
-    @property
     def state_reliable(self) -> bool:
         """Whether state packets go out on the reliable channel."""
         return self._inner.state_reliable()
@@ -887,9 +762,9 @@ class PortalConfig:
         return self._inner.reuse_stale_frames()
 
     @property
-    def action_subscription(self) -> bool:
-        """Whether action subscription is enabled. Operator-side only —
-        the robot always processes actions.
+    def action_subscription(self) -> "ActionSubscription":
+        """Which received actions reach `on_action`. Operator-side only —
+        the robot always processes the active operator's actions.
         """
         return self._inner.action_subscription()
 
@@ -911,6 +786,8 @@ class PortalConfig:
         screencast: Optional[bool] = None,
         stall_behavior: Optional["StallBehavior"] = None,
         max_lag_ms: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> None:
         """Declare a video track.
 
@@ -966,6 +843,14 @@ class PortalConfig:
             and drops frames under the same pressure. Turn this on when a
             policy needs a fixed frame shape more than it needs smooth motion.
 
+        `width` and `height` are keyword-only and give the frame size you will
+        pass to `send_video_frame` on a WebRTC track. libwebrtc sets up the
+        encoder for this size when the track is published, before any frame
+        exists. Leave both out and it is set up for 640x480: larger frames
+        still go out, but with added latency, tens of milliseconds with H264
+        at 720p and above. Give both or neither; both must be even. Ignored
+        for the byte-stream codecs.
+
         **Byte-stream latency** (non-H264 codecs): each frame's payload is
         fragmented at the LiveKit chunk size (15 KB) and shipped over a
         single SCTP data channel. Per-frame latency is roughly `1 ms + 2 ms
@@ -975,6 +860,8 @@ class PortalConfig:
         typical inference resolutions (224×224 to 480p) MJPEG q=80–95
         usually does.
         """
+        if (width is None) != (height is None):
+            raise ValueError("width and height must be given together")
         self._inner.add_video(
             name,
             codec,
@@ -984,6 +871,8 @@ class PortalConfig:
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         )
         self._video_track_specs = list(self._inner.video_track_specs())
 
@@ -1007,29 +896,6 @@ class PortalConfig:
         self._inner.add_action_typed(specs)
         self._action_schema.extend(specs)
 
-    def add_action_chunk(
-        self,
-        name: str,
-        horizon: int,
-        fields: Iterable[SchemaEntry],
-    ) -> None:
-        """Declare a named action chunk: a fixed-horizon batch of typed
-        per-field values published as one byte stream.
-
-        Use this for VLA policies that emit a horizon of future actions
-        per inference step. Multiple chunks can be declared. Names must
-        be unique. The chunk's payload uses LiveKit byte streams (not
-        data packets), so it isn't bounded by the 15 KB packet limit.
-
-        Both peers must declare the same chunks (same name, horizon, and
-        ordered fields) — a fingerprint mismatch drops the packet.
-        """
-        specs = _to_field_specs(fields)
-        self._inner.add_action_chunk(name, horizon, specs)
-        self._action_chunks.append(
-            ChunkSpec(name=name, horizon=horizon, fields=specs)
-        )
-
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
 
@@ -1045,8 +911,39 @@ class PortalConfig:
     def set_action_reliable(self, reliable: bool) -> None:
         self._inner.set_action_reliable(reliable)
 
-    def set_ping_ms(self, ms: int) -> None:
-        self._inner.set_ping_ms(ms)
+    def _set_clock_skew_us(self, skew_us: int) -> None:
+        """Test hook: shift this peer's local clock by `skew_us`."""
+        self._inner.set_clock_skew_us(skew_us)
+
+    def set_observation_sync(self, enable: bool) -> None:
+        """Bundle state and frames into observations. On by default for
+        operators. Only a peer that consumes bundles live needs it, in
+        practice a policy: a teleoperator flies on the newest frame and a
+        recorder stores raw streams for offline alignment.
+
+        Off means the sync buffer never runs: `on_observation` and
+        `get_observation` raise `PortalError.ObservationSyncDisabled`,
+        `on_drop` never fires, `metrics().sync` stays empty, and `slack`,
+        `tolerance`, `stall_behavior` and `max_lag_ms` do nothing (Portal
+        warns once if you set them). Frames and states still arrive through
+        `on_video_frame` and `on_state`.
+        """
+        self._inner.set_observation_sync(enable)
+
+    @property
+    def observation_sync(self) -> bool:
+        return self._inner.observation_sync()
+
+    def set_time_sync_source(self, source: "TimeSyncSource") -> None:
+        """Where `now_us()` comes from. `TimeSyncSource.PORTAL` (default)
+        syncs to the robot's clock. `TimeSyncSource.SYSTEM` trusts the host
+        clock, for hosts already kept in step by PTP or GPS.
+        """
+        self._inner.set_time_sync_source(source)
+
+    @property
+    def time_sync_source(self) -> "TimeSyncSource":
+        return self._inner.time_sync_source()
 
     def set_e2ee_key(self, key: bytes) -> None:
         """Set a shared E2EE key. Both peers must call this with the same key
@@ -1129,18 +1026,20 @@ class PortalConfig:
         """Per-track override for `set_max_lag_ms`."""
         self._inner.set_track_max_lag_ms(track, ms)
 
-    def set_action_subscription(self, enable: bool) -> None:
-        """Operator-side opt-in to receiving executed actions.
+    def set_action_subscription(self, subscription: "ActionSubscription | str") -> None:
+        """Operator-side: which received actions reach `on_action` /
+        `get_action`. Pass an `ActionSubscription` or its name:
 
-        Off by default. When on, the operator subscribes to actions and
-        chunks from the active operator and gets a local echo of its own
-        sends when active. Used by recorders, shadow eval policies, and
-        live monitoring. No-op on the Robot side — the robot always
-        processes actions.
+        - `"none"` (default): nothing.
+        - `"active"`: the active operator's actions, what the robot executes.
+        - `"all"`: every operator's actions. `Action.active` is `False` for
+          the ones the gate dropped, e.g. to record a shadow policy.
 
-        The `Operator` class re-exposes this directly on `OperatorConfig`.
+        A local filter: actions are broadcast either way. The operator also
+        sees its own sends, echoed locally, whenever the subscription would
+        have delivered them. No-op on the Robot side.
         """
-        self._inner.set_action_subscription(enable)
+        self._inner.set_action_subscription(_to_action_subscription(subscription))
 
     def close(self) -> None:
         """No-op: UniFFI releases the Rust-side handle when Python GC drops
@@ -1169,8 +1068,6 @@ class Portal:
         "_state_schema",
         "_action_schema",
         "_video_tracks",
-        "_action_chunks",
-        "_chunk_schemas",
     )
 
     def __init__(self, config: PortalConfig) -> None:
@@ -1182,7 +1079,6 @@ class Portal:
             lambda dispatcher: _ffi.Portal(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
-            config.action_chunks,
         )
 
     @classmethod
@@ -1191,7 +1087,6 @@ class Portal:
         inner_factory: Callable[["_Dispatcher"], Any],
         state_schema: List[FieldSpec],
         action_schema: List[FieldSpec],
-        action_chunks: List[ChunkSpec],
     ) -> "Portal":
         """Build a Portal over a prebuilt FFI object. `inner_factory`
         receives the dispatcher and must return the FFI object constructed
@@ -1200,7 +1095,7 @@ class Portal:
         while this ergonomic layer stays shared.
         """
         self = cls.__new__(cls)
-        self._init(inner_factory, state_schema, action_schema, action_chunks)
+        self._init(inner_factory, state_schema, action_schema)
         return self
 
     def _init(
@@ -1208,20 +1103,13 @@ class Portal:
         inner_factory: Callable[["_Dispatcher"], Any],
         state_schema: List[FieldSpec],
         action_schema: List[FieldSpec],
-        action_chunks: List[ChunkSpec],
     ) -> None:
         # Schema snapshots let delivery records reconstruct Python types
         # per declared dtype — the FFI boundary delivers everything as
         # `Dict[str, float]` (the core pipeline is f64 throughout).
         self._state_schema: List[FieldSpec] = list(state_schema)
         self._action_schema: List[FieldSpec] = list(action_schema)
-        self._action_chunks: List[ChunkSpec] = list(action_chunks)
-        self._chunk_schemas: Dict[str, List[FieldSpec]] = {
-            spec.name: list(spec.fields) for spec in self._action_chunks
-        }
-        self._dispatcher = _Dispatcher(
-            self._action_schema, self._state_schema, self._chunk_schemas
-        )
+        self._dispatcher = _Dispatcher(self._action_schema, self._state_schema)
         self._inner = inner_factory(self._dispatcher)
         # Snapshot what the Rust side confirmed it was built with.
         self._state_fields: List[str] = list(self._inner.state_fields())
@@ -1287,33 +1175,6 @@ class Portal:
         _validate_send_values(values, self._action_schema)
         self._inner.send_action(values, timestamp_us, in_reply_to_ts_us)
 
-    def send_action_chunk(
-        self,
-        chunk_name: str,
-        data: Any,
-        timestamp_us: Optional[int] = None,
-        in_reply_to_ts_us: Optional[int] = None,
-    ) -> None:
-        """Publish an action chunk on the named declaration.
-
-        `data` may be any of:
-          - `Dict[str, ndarray | list[float]]` — one column per field of
-            length `horizon`.
-          - `numpy.ndarray` of shape `(horizon, len(fields))` and a single
-            dtype — split into per-field columns by declared field order.
-            Convenient for VLA policies that emit a uniform tensor.
-
-        Wrong-length columns are zero-padded by the core. Unknown fields
-        are warned-and-ignored once each.
-        """
-        schema = self._chunk_schemas.get(chunk_name)
-        if schema is None:
-            raise PortalError.UnknownChunk(f"unknown action chunk: {chunk_name}")
-        ffi_data = _normalize_chunk_data(data, schema)
-        self._inner.send_action_chunk(
-            chunk_name, ffi_data, timestamp_us, in_reply_to_ts_us
-        )
-
     # -- pull (sync, latest-wins) --------------------------------------------
 
     def get_observation(self) -> Optional[Observation]:
@@ -1331,15 +1192,6 @@ class Portal:
     def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
         return self._inner.get_video_frame(track_name)
 
-    def get_action_chunk(self, chunk_name: str) -> Optional[ActionChunk]:
-        """Latest chunk received for `chunk_name`, or `None` if none has
-        arrived yet (or the chunk wasn't declared).
-        """
-        raw = self._inner.get_action_chunk(chunk_name)
-        if raw is None:
-            return None
-        return _wrap_action_chunk(raw, self._chunk_schemas)
-
     # -- push callbacks ------------------------------------------------------
 
     def on_action(self, callback: Callable[[Action], Any]) -> None:
@@ -1349,6 +1201,11 @@ class Portal:
         self._dispatcher.set_state(callback)
 
     def on_observation(self, callback: Callable[[Observation], Any]) -> None:
+        if not self._inner.observation_sync():
+            raise PortalError.ObservationSyncDisabled(
+                "observation sync is off on this peer; turn it on with "
+                "set_observation_sync(True), or use on_state and on_video_frame"
+            )
         self._dispatcher.set_observation(callback)
 
     def on_video_frame(
@@ -1357,22 +1214,6 @@ class Portal:
         callback: Callable[[str, VideoFrameData], Any],
     ) -> None:
         self._dispatcher.set_video(track_name, callback)
-
-    def on_action_chunk(
-        self,
-        chunk_name: str,
-        callback: Callable[[ActionChunk], Any],
-    ) -> None:
-        """Register a callback for the named chunk declaration. Fires on
-        every chunk received for that name. Per-field columns in
-        `chunk.data` are reconstructed as numpy arrays of the declared
-        dtype; use `chunk.raw_data` for the f64 list view.
-        """
-        if chunk_name not in self._chunk_schemas:
-            raise PortalError.UnknownChunk(
-                f"unknown action chunk: {chunk_name}"
-            )
-        self._dispatcher.set_action_chunk(chunk_name, callback)
 
     def on_drop(
         self,
@@ -1415,6 +1256,11 @@ class Portal:
         """Identities of currently-connected operators (excluding self)."""
         return list(self._inner.operators())
 
+    def observers(self) -> List[str]:
+        """Connected observers (excluding self). Listed apart from
+        `operators()`, since observers never drive."""
+        return self._inner.observers()
+
     def robot_identity(self) -> Optional[str]:
         """Identity of the robot in the room, or `None`. Operator-side
         helper, derived from the robot's `lk.portal.role` attribute.
@@ -1441,6 +1287,56 @@ class Portal:
         the new identity, or `None` if cleared.
         """
         self._dispatcher.set_active_operator_changed(callback)
+
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock. On the robot this is its
+        own clock; before the first sync it is local time. At the first sync it
+        switches to the robot's clock in one step, possibly backwards; after
+        that it never repeats and never goes backwards.
+        """
+        return self._inner.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each
+        resync. Runs on this Portal's asyncio loop.
+        """
+        self._dispatcher.set_time_synced(callback)
+
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to everyone in the room, this peer included.
+
+        A keypoint is `{type, payload}`: `type` is any string and `payload`
+        any JSON object (default `{}`). Portal never interprets either.
+        `timestamp_us` is where the mark belongs and defaults to `now_us()`;
+        a teleoperator passes the timestamp of the frame on screen.
+
+        Returns the observers that were present. An empty list means no one
+        recorded the mark.
+
+        The encoded keypoint must fit in one data packet, about 64 KB on a
+        default LiveKit server. A larger one raises `PortalError.Room` with the
+        server's limit; put bulky data elsewhere and reference it.
+        """
+        if not isinstance(type, str):
+            raise TypeError(f"keypoint type must be a str, got {type.__class__.__name__}")
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise TypeError(f"keypoint payload must be a dict, got {payload.__class__.__name__}")
+        return list(await self._inner.send_keypoint(type, json.dumps(payload), timestamp_us))
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._dispatcher.set_keypoint(callback)
 
     def register_rpc_method(
         self,
@@ -1576,10 +1472,6 @@ class _RoleConfigBase:
         return list(self._inner.action_schema())
 
     @property
-    def action_chunks(self) -> List[ChunkSpec]:
-        return list(self._inner.action_chunks())
-
-    @property
     def fps(self) -> int:
         """Unified observation rate in Hz. Defaults to 30."""
         return self._inner.fps()
@@ -1593,11 +1485,6 @@ class _RoleConfigBase:
     def tolerance(self) -> float:
         """Frame-match window, in tick intervals at `fps`. Defaults to 1.5."""
         return self._inner.tolerance()
-
-    @property
-    def ping_ms(self) -> int:
-        """RTT ping cadence in milliseconds; `0` means active pinging is off."""
-        return self._inner.ping_ms()
 
     @property
     def state_reliable(self) -> bool:
@@ -1617,10 +1504,9 @@ class _RoleConfigBase:
         return self._inner.reuse_stale_frames()
 
     @property
-    def action_subscription(self) -> bool:
-        """Whether action subscription is enabled. Reports what was set;
-        on `RobotConfig` the flag has no effect — the robot always
-        processes actions.
+    def action_subscription(self) -> "ActionSubscription":
+        """Which received actions reach `on_action`. Reports what was set;
+        on `RobotConfig` it has no effect.
         """
         return self._inner.action_subscription()
 
@@ -1642,7 +1528,12 @@ class _RoleConfigBase:
         screencast: Optional[bool] = None,
         stall_behavior: Optional["StallBehavior"] = None,
         max_lag_ms: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> None:
+        """Declare a video track. See `PortalConfig.add_video`."""
+        if (width is None) != (height is None):
+            raise ValueError("width and height must be given together")
         self._inner.add_video(
             name,
             codec,
@@ -1652,6 +1543,8 @@ class _RoleConfigBase:
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         )
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:
@@ -1659,14 +1552,6 @@ class _RoleConfigBase:
 
     def add_action_typed(self, schema: Iterable[SchemaEntry]) -> None:
         self._inner.add_action_typed(_to_field_specs(schema))
-
-    def add_action_chunk(
-        self,
-        name: str,
-        horizon: int,
-        fields: Iterable[SchemaEntry],
-    ) -> None:
-        self._inner.add_action_chunk(name, horizon, _to_field_specs(fields))
 
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
@@ -1683,8 +1568,20 @@ class _RoleConfigBase:
     def set_action_reliable(self, reliable: bool) -> None:
         self._inner.set_action_reliable(reliable)
 
-    def set_ping_ms(self, ms: int) -> None:
-        self._inner.set_ping_ms(ms)
+    def _set_clock_skew_us(self, skew_us: int) -> None:
+        """Test hook: shift this peer's local clock by `skew_us`."""
+        self._inner.set_clock_skew_us(skew_us)
+
+    def set_time_sync_source(self, source: "TimeSyncSource") -> None:
+        """Where `now_us()` comes from. `TimeSyncSource.PORTAL` (default)
+        syncs to the robot's clock. `TimeSyncSource.SYSTEM` trusts the host
+        clock, for hosts already kept in step by PTP or GPS.
+        """
+        self._inner.set_time_sync_source(source)
+
+    @property
+    def time_sync_source(self) -> "TimeSyncSource":
+        return self._inner.time_sync_source()
 
     def set_e2ee_key(self, key: bytes) -> None:
         self._inner.set_e2ee_key(bytes(key))
@@ -1704,12 +1601,12 @@ class _RoleConfigBase:
     def set_track_max_lag_ms(self, track: str, ms: int) -> None:
         self._inner.set_track_max_lag_ms(track, ms)
 
-    def set_action_subscription(self, enable: bool) -> None:
-        """Operator-side opt-in to receiving executed actions ("HITL
-        recording"). Off by default. See `PortalConfig.set_action_subscription`
-        for full semantics. No-op on `RobotConfig`.
+    def set_action_subscription(self, subscription: "ActionSubscription | str") -> None:
+        """Which received actions reach `on_action`: `"none"` (default),
+        `"active"` or `"all"`. See `PortalConfig.set_action_subscription`.
+        No-op on `RobotConfig`.
         """
-        self._inner.set_action_subscription(enable)
+        self._inner.set_action_subscription(_to_action_subscription(subscription))
 
 
 class RobotConfig(_RoleConfigBase):
@@ -1756,6 +1653,25 @@ class OperatorConfig(_RoleConfigBase):
     def __init__(self, session: str) -> None:
         super().__init__(_ffi.OperatorConfig(session), session, Role.OPERATOR)
 
+    def set_observation_sync(self, enable: bool) -> None:
+        """Bundle state and frames into observations. On by default for
+        operators. Only a peer that consumes bundles live needs it, in
+        practice a policy: a teleoperator flies on the newest frame and a
+        recorder stores raw streams for offline alignment.
+
+        Off means the sync buffer never runs: `on_observation` and
+        `get_observation` raise `PortalError.ObservationSyncDisabled`,
+        `on_drop` never fires, `metrics().sync` stays empty, and `slack`,
+        `tolerance`, `stall_behavior` and `max_lag_ms` do nothing (Portal
+        warns once if you set them). Frames and states still arrive through
+        `on_video_frame` and `on_state`.
+        """
+        self._inner.set_observation_sync(enable)
+
+    @property
+    def observation_sync(self) -> bool:
+        return self._inner.observation_sync()
+
     @classmethod
     def from_yaml_str(cls, yaml: str, session: str) -> "OperatorConfig":
         """Build an `OperatorConfig` from a YAML string. See
@@ -1776,12 +1692,61 @@ class OperatorConfig(_RoleConfigBase):
             return cls.from_yaml_str(f.read(), session)
 
 
+
+class ObserverConfig(_RoleConfigBase):
+    """Observer-side session config. Same declarative surface as
+    `OperatorConfig`, but defaults to `action_subscription="active"` and
+    observation sync off: an observer records raw streams and the actions
+    the robot executes. Declare the same schemas and tracks as the robot.
+    """
+
+    def __init__(self, session: str) -> None:
+        super().__init__(_ffi.ObserverConfig(session), session, Role.OBSERVER)
+
+    def set_observation_sync(self, enable: bool) -> None:
+        """Bundle state and frames into observations. On by default for
+        operators. Only a peer that consumes bundles live needs it, in
+        practice a policy: a teleoperator flies on the newest frame and a
+        recorder stores raw streams for offline alignment.
+
+        Off means the sync buffer never runs: `on_observation` and
+        `get_observation` raise `PortalError.ObservationSyncDisabled`,
+        `on_drop` never fires, `metrics().sync` stays empty, and `slack`,
+        `tolerance`, `stall_behavior` and `max_lag_ms` do nothing (Portal
+        warns once if you set them). Frames and states still arrive through
+        `on_video_frame` and `on_state`.
+        """
+        self._inner.set_observation_sync(enable)
+
+    @property
+    def observation_sync(self) -> bool:
+        return self._inner.observation_sync()
+
+    @classmethod
+    def from_yaml_str(cls, yaml: str, session: str) -> "ObserverConfig":
+        """Build an `ObserverConfig` from a YAML string. See
+        `PortalConfig.from_yaml_str` for the schema and semantics.
+        """
+        inner = _ffi.ObserverConfig.from_yaml_str(yaml, session)
+        obj = cls.__new__(cls)
+        _RoleConfigBase.__init__(obj, inner, session, Role.OBSERVER)
+        return obj
+
+    @classmethod
+    def from_yaml_file(
+        cls,
+        path: Union[str, os.PathLike],
+        session: str,
+    ) -> "ObserverConfig":
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.from_yaml_str(f.read(), session)
+
 class Robot:
     """Robot-side Portal facade.
 
     Wraps a `Portal` instance constructed with `Role.ROBOT` and exposes only
     the methods that make sense on the robot side (publish state and video,
-    receive actions and chunks, control plane). Callers who want the
+    receive actions, control plane). Callers who want the
     unified surface can keep using `Portal` directly.
     """
 
@@ -1795,7 +1760,6 @@ class Robot:
             lambda dispatcher: _ffi.Robot(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
-            config.action_chunks,
         )
 
     # -- lifecycle -----------------------------------------------------------
@@ -1833,18 +1797,8 @@ class Robot:
     def on_action(self, callback: Callable[[Action], Any]) -> None:
         self._portal.on_action(callback)
 
-    def on_action_chunk(
-        self,
-        chunk_name: str,
-        callback: Callable[[ActionChunk], Any],
-    ) -> None:
-        self._portal.on_action_chunk(chunk_name, callback)
-
     def get_action(self) -> Optional[Action]:
         return self._portal.get_action()
-
-    def get_action_chunk(self, chunk_name: str) -> Optional[ActionChunk]:
-        return self._portal.get_action_chunk(chunk_name)
 
     # -- multi-controller ----------------------------------------------------
 
@@ -1860,6 +1814,9 @@ class Robot:
     def operators(self) -> List[str]:
         return self._portal.operators()
 
+    def observers(self) -> List[str]:
+        return self._portal.observers()
+
     def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
         self._portal.on_operator_joined(callback)
 
@@ -1871,6 +1828,31 @@ class Robot:
         callback: Callable[[Optional[str]], Any],
     ) -> None:
         self._portal.on_active_operator_changed(callback)
+
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock."""
+        return self._portal.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each resync."""
+        self._portal.on_time_synced(callback)
+
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to the room. See `Portal.send_keypoint`."""
+        return await self._portal.send_keypoint(type, payload, timestamp_us)
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._portal.on_keypoint(callback)
 
     # -- rpc -----------------------------------------------------------------
 
@@ -1908,8 +1890,8 @@ class Operator:
     """Operator-side Portal facade.
 
     Wraps a `Portal` instance constructed with `Role.OPERATOR` and exposes
-    only the methods that make sense on the operator side (publish actions
-    and chunks, receive observations and video, control plane). Callers who
+    only the methods that make sense on the operator side (publish actions,
+    receive observations and video, control plane). Callers who
     want the unified surface can keep using `Portal` directly.
     """
 
@@ -1922,7 +1904,6 @@ class Operator:
             lambda dispatcher: _ffi.Operator(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
-            config.action_chunks,
         )
 
     # -- lifecycle -----------------------------------------------------------
@@ -1945,17 +1926,6 @@ class Operator:
         in_reply_to_ts_us: Optional[int] = None,
     ) -> None:
         self._portal.send_action(values, timestamp_us, in_reply_to_ts_us)
-
-    def send_action_chunk(
-        self,
-        chunk_name: str,
-        data: Any,
-        timestamp_us: Optional[int] = None,
-        in_reply_to_ts_us: Optional[int] = None,
-    ) -> None:
-        self._portal.send_action_chunk(
-            chunk_name, data, timestamp_us, in_reply_to_ts_us
-        )
 
     # -- receive (operator-side) ---------------------------------------------
 
@@ -1990,37 +1960,20 @@ class Operator:
     # -- action subscription (HITL recording, shadow eval) -------------------
 
     def on_action(self, callback: Callable[[Action], Any]) -> None:
-        """Fire on every executed action when `set_action_subscription(True)`
-        is enabled on the `OperatorConfig`. `action.sender` labels the
-        operator that produced the action; use it for dataset row labels
-        rather than `active_operator()` to avoid handoff races.
+        """Fire on each action the `OperatorConfig`'s action subscription
+        lets through (`"active"` or `"all"`). `action.sender` and
+        `action.active` are stamped at gate time; use them for dataset row
+        labels rather than `active_operator()` to avoid handoff races.
 
-        No-op without `set_action_subscription(True)` — the receive side
-        does not subscribe to actions, so the callback is never invoked.
+        Never fires with the default `"none"` subscription.
         """
         self._portal.on_action(callback)
 
-    def on_action_chunk(
-        self,
-        chunk_name: str,
-        callback: Callable[[ActionChunk], Any],
-    ) -> None:
-        """Same as `on_action` but for chunks declared via
-        `add_action_chunk`. Requires `set_action_subscription(True)`.
-        """
-        self._portal.on_action_chunk(chunk_name, callback)
-
     def get_action(self) -> Optional[Action]:
-        """Latest executed action, or `None` if none received. Requires
-        `set_action_subscription(True)` for any value to land here.
+        """Latest delivered action, or `None` if none received. Requires an
+        action subscription other than `"none"` for any value to land here.
         """
         return self._portal.get_action()
-
-    def get_action_chunk(self, chunk_name: str) -> Optional[ActionChunk]:
-        """Latest executed chunk for `chunk_name`, or `None`. Requires
-        `set_action_subscription(True)`.
-        """
-        return self._portal.get_action_chunk(chunk_name)
 
     # -- multi-controller ----------------------------------------------------
 
@@ -2036,6 +1989,9 @@ class Operator:
     def operators(self) -> List[str]:
         return self._portal.operators()
 
+    def observers(self) -> List[str]:
+        return self._portal.observers()
+
     def robot_identity(self) -> Optional[str]:
         return self._portal.robot_identity()
 
@@ -2050,6 +2006,31 @@ class Operator:
         callback: Callable[[Optional[str]], Any],
     ) -> None:
         self._portal.on_active_operator_changed(callback)
+
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock."""
+        return self._portal.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each resync."""
+        self._portal.on_time_synced(callback)
+
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to the room. See `Portal.send_keypoint`."""
+        return await self._portal.send_keypoint(type, payload, timestamp_us)
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._portal.on_keypoint(callback)
 
     # -- rpc -----------------------------------------------------------------
 
@@ -2083,34 +2064,290 @@ class Operator:
         self._portal.reset_metrics()
 
 
+
+class Observer:
+    """Observer-side Portal facade.
+
+    An observer sees everything in the room but never sends state or
+    actions. Use it to record, or to orchestrate by handing control between
+    operators with `set_active_operator`. The robot accepts that call from
+    operators and observers alike.
+    """
+
+    __slots__ = ("_portal", "_config", "_recorder")
+
+    def __init__(self, config: ObserverConfig) -> None:
+        # Back the facade with `_ffi.Operator` — the role-split surface
+        # defined in Rust. `Portal._over` layers the shared ergonomics on top.
+        self._portal = Portal._over(
+            lambda dispatcher: _ffi.Observer(config._inner, dispatcher),
+            config.state_schema,
+            config.action_schema,
+        )
+        self._config = config
+        self._recorder: Optional[Recorder] = None
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def connect(self, url: str, token: str) -> None:
+        await self._portal.connect(url, token)
+
+    async def disconnect(self) -> None:
+        """Disconnect, then finish any recording: queued records are written
+        and the sink is closed."""
+        await self._portal.disconnect()
+        await asyncio.to_thread(self.stop_recording)
+
+    def close(self) -> None:
+        self.stop_recording()
+        self._portal.close()
+
+    # -- recording -----------------------------------------------------------
+
+    def record_to(
+        self,
+        sink: Sink,
+        *,
+        max_queued_frames: int = 64,
+        metrics_interval_s: Optional[float] = 1.0,
+    ) -> None:
+        """Write everything this observer hears to `sink`: state, video
+        frames, actions (per the action subscription) and keypoints, in the
+        order they arrive, plus `metrics()` every `metrics_interval_s`
+        seconds (`None` turns that off).
+
+        Calls `sink.open` right away and raises what it raises. The sink is
+        then fed from a writer thread behind a queue. When more than
+        `max_queued_frames` video frames are waiting, new frames are dropped
+        and counted in `metrics().observer.frames_dropped`; state, actions
+        and keypoints are never dropped. A write that raises is logged and
+        skipped. Recording to a second sink before `stop_recording` raises.
+        """
+        if self._recorder is not None:
+            raise RuntimeError("already recording; call stop_recording() first")
+        portal = self._portal
+        recorder = Recorder(
+            sink,
+            _Converters(
+                state=lambda raw: _wrap_state(raw, portal._state_schema),
+                action=lambda raw: _wrap_action(raw, portal._action_schema),
+                keypoint=_wrap_keypoint,
+                metrics=portal.metrics,
+            ),
+            max_queued_frames=max_queued_frames,
+            metrics_interval_s=metrics_interval_s,
+        )
+        recorder.start(
+            SessionInfo(
+                session=self._config.session,
+                local_identity=portal.local_identity(),
+                state_schema=list(self._config.state_schema),
+                action_schema=list(self._config.action_schema),
+                video_tracks=list(self._config.video_track_specs),
+                time_sync_source=self._config.time_sync_source,
+                started_at_us=portal.now_us(),
+                now_us=portal.now_us,
+            )
+        )
+        self._recorder = recorder
+        portal._dispatcher.set_tap(recorder.enqueue)
+
+    def stop_recording(self) -> None:
+        """Stop feeding the sink, write what is already queued, and close it.
+        Blocks until the writer thread is done. A no-op when not recording."""
+        recorder = self._recorder
+        if recorder is None:
+            return
+        self._portal._dispatcher.set_tap(None)
+        self._recorder = None
+        recorder.stop()
+
+    # -- no publishing ------------------------------------------------------
+
+    def send_action(self, *args: Any, **kwargs: Any) -> None:
+        """Observers never drive: always raises `PortalError.WrongRole`."""
+        raise PortalError.WrongRole("an observer cannot send actions")
+
+    def send_state(self, *args: Any, **kwargs: Any) -> None:
+        """Observers never publish state: always raises `PortalError.WrongRole`."""
+        raise PortalError.WrongRole("an observer cannot send state")
+
+    def send_video_frame(self, *args: Any, **kwargs: Any) -> None:
+        """Observers never publish video: always raises `PortalError.WrongRole`."""
+        raise PortalError.WrongRole("an observer cannot send video")
+
+    # -- receive ---------------------------------------------
+
+    def on_state(self, callback: Callable[[State], Any]) -> None:
+        self._portal.on_state(callback)
+
+    def on_observation(self, callback: Callable[[Observation], Any]) -> None:
+        self._portal.on_observation(callback)
+
+    def on_video_frame(
+        self,
+        track_name: str,
+        callback: Callable[[str, VideoFrameData], Any],
+    ) -> None:
+        self._portal.on_video_frame(track_name, callback)
+
+    def on_drop(
+        self,
+        callback: Callable[[List[Dict[str, Any]]], Any],
+    ) -> None:
+        self._portal.on_drop(callback)
+
+    def get_state(self) -> Optional[State]:
+        return self._portal.get_state()
+
+    def get_observation(self) -> Optional[Observation]:
+        return self._portal.get_observation()
+
+    def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
+        return self._portal.get_video_frame(track_name)
+
+    # -- action subscription (HITL recording, shadow eval) -------------------
+
+    def on_action(self, callback: Callable[[Action], Any]) -> None:
+        """Fire on each action the `ObserverConfig`'s action subscription
+        lets through (`"active"` or `"all"`). `action.sender` and
+        `action.active` are stamped at gate time; use them for dataset row
+        labels rather than `active_operator()` to avoid handoff races.
+
+        Observers default to `"active"`: what the robot executes.
+        """
+        self._portal.on_action(callback)
+
+    def get_action(self) -> Optional[Action]:
+        """Latest delivered action, or `None` if none received. Requires an
+        action subscription other than `"none"` for any value to land here.
+        """
+        return self._portal.get_action()
+
+    # -- multi-controller ----------------------------------------------------
+
+    def local_identity(self) -> Optional[str]:
+        return self._portal.local_identity()
+
+    def active_operator(self) -> Optional[str]:
+        return self._portal.active_operator()
+
+    async def set_active_operator(self, identity: Optional[str]) -> None:
+        await self._portal.set_active_operator(identity)
+
+    def operators(self) -> List[str]:
+        return self._portal.operators()
+
+    def observers(self) -> List[str]:
+        return self._portal.observers()
+
+    def robot_identity(self) -> Optional[str]:
+        return self._portal.robot_identity()
+
+    def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
+        self._portal.on_operator_joined(callback)
+
+    def on_operator_left(self, callback: Callable[[str], Any]) -> None:
+        self._portal.on_operator_left(callback)
+
+    def on_active_operator_changed(
+        self,
+        callback: Callable[[Optional[str]], Any],
+    ) -> None:
+        self._portal.on_active_operator_changed(callback)
+
+    # -- time sync -----------------------------------------------------------
+
+    def now_us(self) -> int:
+        """Now, in microseconds on the robot's clock."""
+        return self._portal.now_us()
+
+    def on_time_synced(self, callback: Callable[[], Any]) -> None:
+        """Fire on the first sync with the robot's clock, and after each resync."""
+        self._portal.on_time_synced(callback)
+
+    # -- keypoints -----------------------------------------------------------
+
+    async def send_keypoint(
+        self,
+        type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> List[str]:
+        """Send an annotation to the room. See `Portal.send_keypoint`."""
+        return await self._portal.send_keypoint(type, payload, timestamp_us)
+
+    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
+        """Fire on every keypoint in the room, this peer's own included."""
+        self._portal.on_keypoint(callback)
+
+    # -- rpc -----------------------------------------------------------------
+
+    def register_rpc_method(
+        self,
+        method: str,
+        handler: Callable[[RpcInvocationData], Any],
+    ) -> None:
+        self._portal.register_rpc_method(method, handler)
+
+    def unregister_rpc_method(self, method: str) -> None:
+        self._portal.unregister_rpc_method(method)
+
+    async def perform_rpc(
+        self,
+        method: str,
+        payload: str = "",
+        destination: Optional[str] = None,
+        response_timeout_ms: Optional[int] = None,
+    ) -> str:
+        return await self._portal.perform_rpc(
+            method, payload, destination, response_timeout_ms
+        )
+
+    # -- metrics -------------------------------------------------------------
+
+    def metrics(self) -> PortalMetrics:
+        """Portal metrics plus `.observer`, the recording counters."""
+        m = self._portal.metrics()
+        recorder = self._recorder
+        m.observer = recorder.metrics() if recorder is not None else ObserverMetrics()
+        return m
+
+    def reset_metrics(self) -> None:
+        self._portal.reset_metrics()
+
 __all__ = [
     "Role",
     "DType",
     "VideoCodec",
     "FrameSource",
     "StallBehavior",
+    "ActionSubscription",
     "FieldSpec",
     "VideoTrackSpec",
     "FrameVideoSpec",
-    "ChunkSpec",
     "TypedScalar",
     "DEFAULT_MJPEG_QUALITY",
     "PortalConfig",
     "Portal",
     "RobotConfig",
     "OperatorConfig",
+    "ObserverConfig",
     "Robot",
     "Operator",
+    "Observer",
     "Observation",
     "Action",
-    "ActionChunk",
     "State",
+    "Keypoint",
     "VideoFrameData",
     "PortalMetrics",
     "SyncMetrics",
     "TransportMetrics",
     "BufferMetrics",
     "RttMetrics",
+    "TimeSyncMetrics",
+    "TimeSyncSource",
     "PolicyMetrics",
     "PortalError",
     "ConfigFileError",

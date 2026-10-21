@@ -100,11 +100,14 @@ action_reliable: true
 stall_behavior: drop               # drop | freeze | omit
 max_lag_ms: 166              # wait this long first; default is slack / fps
 
-# Heartbeat
-ping_ms: 1000                # RTT probe cadence. 0 disables probing here.
+# Clock
+time_sync_source: portal     # portal (sync to the robot) | system (trust the host clock)
 
-# Operator-only opt-in
-action_subscription: false   # receive executed actions, for HITL recording
+# Operator-side bundling of state and frames into observations
+observation_sync: true       # false: raw on_state / on_video_frame only
+
+# Operator-side
+action_subscription: none    # none | active | all: which actions reach on_action
 
 # Video tracks
 videos:
@@ -123,14 +126,6 @@ action:
   - { name: joint_pos, dtype: f32 }
   - { name: gripper, dtype: bool }
   - { name: mode, dtype: i8 }
-
-# VLA-style fixed-horizon batched actions
-action_chunks:
-  - name: vla
-    horizon: 16
-    fields:
-      - { name: joint_pos, dtype: f32 }
-      - { name: gripper, dtype: bool }
 ```
 
 ## Top level
@@ -146,12 +141,12 @@ action_chunks:
 | `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
 | `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |
 | `reuse_stale_frames` | bool | `false` | Deprecated. Alias for `stall_behavior: freeze` with `max_lag_ms: 0`. |
-| `ping_ms` | int | `1000` | RTT probe cadence in ms. `0` disables probing on this side. The echo path stays active. |
-| `action_subscription` | bool | `false` | Operator-side opt-in for receiving executed actions. No-op on the robot. |
+| `observation_sync` | bool | `true` | Operator-side: bundle state and frames into observations. `false` skips the sync buffer; `slack`, `tolerance`, `stall_behavior` and `max_lag_ms` then do nothing. |
+| `time_sync_source` | string | `portal` | Where `now_us()` comes from. `portal` syncs to the robot's clock. `system` trusts the host clock, for hosts kept in step by PTP or GPS. |
+| `action_subscription` | string | `none` | Operator-side: which received actions reach `on_action`. `active` is the active operator's, `all` is every operator's, tagged with `active`. A bool is an error. No-op on the robot. |
 | `videos` | list | `[]` | Declared video tracks. |
 | `state` | list | `[]` | Declared state schema. |
 | `action` | list | `[]` | Declared action schema. |
-| `action_chunks` | list | `[]` | Declared action chunks. |
 
 Anything else at the top level is a hard error. The loader uses
 `deny_unknown_fields` at every level, so a misspelled `tolarance: 1.5` raises
@@ -161,7 +156,7 @@ instead of silently doing nothing.
 
 ```yaml
 videos:
-  - { name: front,   codec: h264, max_bitrate_kbps: 8000, screencast: true }
+  - { name: front,   codec: h264, max_bitrate_kbps: 8000, screencast: true, width: 1280, height: 720 }
   - { name: wide,    codec: vp9, simulcast: true }
   - { name: wrist,   codec: mjpeg, quality: 90 }
   - { name: depth,   codec: png }
@@ -178,13 +173,14 @@ videos:
 | `max_lag_ms` | int | Optional. Per-track override of the top-level `max_lag_ms`. |
 | `simulcast` | bool | Optional. Publish several spatial layers. Defaults to `false`. Rejected on the byte-stream codecs. |
 | `screencast` | bool | Optional. Pin the resolution and drop frames under pressure instead of rescaling. Defaults to `false`. Rejected on the byte-stream codecs. |
+| `width`, `height` | int | Optional. The frame size you send, so the encoder is set up for it. Give both or neither, both even. Defaults to 640x480. Rejected on the byte-stream codecs. See [Frame size](../03-portal-api.md#frame-size). |
 
 The codec picks both the encoding and the transport.
 
 **`h264`, `vp8`, `vp9`, `av1`, `h265`** use the WebRTC media path. Real-time
 RTP, lossy, best-effort delivery. libwebrtc picks the operating bitrate up to
 `max_bitrate_kbps`. Lowest end-to-end latency at scale. These are also the only
-codecs that honor `simulcast` and `screencast`.
+codecs that honor `simulcast`, `screencast`, `width` and `height`.
 
 `screencast: true` is the setting to reach for when a track arrives at a
 resolution that changes mid-session. By default libwebrtc treats the source as
@@ -226,44 +222,6 @@ any rename, reorder, or dtype change drops packets at the receiver with a
 Values cast to and from the declared dtype at the wire boundary. Integer overflow
 saturates, so `mode: 500` into an `i8` arrives as `127`.
 
-## `action_chunks`
-
-A chunk is a fixed-horizon batch of typed per-field values, published as one
-payload. This is the natural shape for a VLA policy that emits several future
-timesteps per inference.
-
-```yaml
-action_chunks:
-  - name: vla
-    horizon: 16
-    fields:
-      - { name: joint_pos, dtype: f32 }
-      - { name: gripper,   dtype: bool }
-  - name: pose_targets
-    horizon: 4
-    fields:
-      - { name: x,   dtype: f32 }
-      - { name: y,   dtype: f32 }
-      - { name: yaw, dtype: f32 }
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Chunk name. Unique within this file. |
-| `horizon` | int | Timesteps per published chunk. Must be greater than `0`. |
-| `fields` | list | Per-field schema, same shape as `state` and `action`. |
-
-Multiple chunks are allowed. Each is dispatched to its own callback by schema
-fingerprint, and the fingerprint mixes in the name and horizon, so two chunks
-cannot collide.
-
-These dtypes do more than fix the wire width. Received columns arrive as NumPy
-arrays already in the declared dtype, and outgoing columns are type-checked
-against it. See [Action chunks](../03-portal-api.md#action-chunks).
-
-Chunks travel as byte streams rather than data packets, so a full horizon is not
-bounded by the 15 KB packet limit.
-
 ## What is deliberately not in the file
 
 Three things must be supplied at load time or set afterwards.
@@ -303,19 +261,19 @@ The loader produces the same config you would build by hand.
 | `stall_behavior` | `cfg.set_stall_behavior(...)` / `cfg.set_track_stall_behavior(...)` |
 | `max_lag_ms` | `cfg.set_max_lag_ms(...)` / `cfg.set_track_max_lag_ms(...)` |
 | `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` (deprecated) |
-| `ping_ms` | `cfg.set_ping_ms(...)` |
+| `observation_sync` | `cfg.set_observation_sync(...)` |
+| `time_sync_source` | `cfg.set_time_sync_source(...)` |
 | `action_subscription` | `cfg.set_action_subscription(...)` |
-| `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=...)` |
+| `videos[]` | `cfg.add_video(name, codec, quality, max_bitrate_kbps, simulcast=..., screencast=..., width=..., height=...)` |
 | `state[]` | `cfg.add_state_typed([...])` |
 | `action[]` | `cfg.add_action_typed([...])` |
-| `action_chunks[]` | `cfg.add_action_chunk(name, horizon, fields)` |
 
 Two configs built from the same YAML and from the matching code are observably
 identical: same fingerprints, same registered tracks, same sync config.
 
 ## Errors
 
-`ConfigFileError` has four variants.
+`ConfigFileError` variants:
 
 | Variant | Raised when |
 |---|---|
@@ -324,10 +282,11 @@ identical: same fingerprints, same registered tracks, same sync config.
 | `Invalid` | Pre-flight validation failure. See the list below. |
 | `Io` | `from_yaml_file` only. The file could not be opened. |
 
-`Invalid` covers duplicate track names, duplicate chunk names, `horizon: 0`,
-MJPEG quality outside `1..=100`, `max_bitrate_kbps` on a byte-stream codec or set
-to zero, `simulcast` or `screencast` on a byte-stream codec, and `fps`, `slack`,
-or `tolerance` at zero or negative.
+`Invalid` covers duplicate track names, MJPEG quality outside `1..=100`,
+`max_bitrate_kbps` on a byte-stream codec or set to zero, `simulcast`,
+`screencast`, `width` or `height` on a byte-stream codec, only one of `width`
+and `height`, an odd or zero `width` or `height`, and `fps`, `slack`, or
+`tolerance` at zero or negative.
 
 ```python
 from livekit.portal import ConfigFileError, RobotConfig
@@ -420,16 +379,6 @@ videos:
 ```
 
 Raises `Invalid`. The range is `1..=100`, and omitting `quality` gives you `90`.
-
-**A zero horizon.**
-
-```yaml
-version: 1
-action_chunks:
-  - { name: vla, horizon: 0, fields: [{ name: x, dtype: f32 }] }
-```
-
-Raises `Invalid("action chunk 'vla' horizon must be > 0")`.
 
 **A future file format.**
 

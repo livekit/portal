@@ -41,9 +41,6 @@ pub enum PortalError {
     #[error("unknown video track: {name}")]
     UnknownVideoTrack { name: String },
 
-    #[error("unknown action chunk: {name}")]
-    UnknownChunk { name: String },
-
     #[error("wrong frame size: expected {expected} bytes, got {got}")]
     WrongFrameSize { expected: usize, got: usize },
 
@@ -58,6 +55,12 @@ pub enum PortalError {
 
     #[error("operation not available for role {0:?}")]
     WrongRole(Role),
+
+    #[error(
+        "observation sync is off on this peer, so no observations are built; turn it on with \
+         set_observation_sync(true), or consume on_state and on_video_frame directly"
+    )]
+    ObservationSyncDisabled,
 
     #[error(
         "field '{field}' declared as {expected:?} but sent as {got}; use the matching TypedValue variant or redeclare the dtype"

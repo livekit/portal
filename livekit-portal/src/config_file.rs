@@ -33,9 +33,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::codec::Codec;
-use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig};
+use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig, Resolution, VideoOptions};
 use crate::dtype::DType;
-use crate::types::{Role, StallBehavior};
+use crate::types::{ActionSubscription, Role, StallBehavior, TimeSyncSource};
 
 /// Errors raised by `PortalConfig::from_yaml_*`.
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +51,12 @@ pub enum ConfigFileError {
 
     #[error("invalid config: {0}")]
     Invalid(String),
+
+    #[error(
+        "`action_chunks` is no longer supported: action chunks were removed in v0.3. \
+         Declare the per-step fields under `action` and call `send_action` once per control tick"
+    )]
+    ActionChunksRemoved,
 }
 
 /// The single supported major version. Bump when an incompatible change
@@ -66,6 +72,43 @@ fn parse_stall_behavior(s: &str, context: &str) -> Result<StallBehavior, ConfigF
         "omit" => Ok(StallBehavior::Omit),
         other => Err(ConfigFileError::Invalid(format!(
             "{context}: expected one of drop, freeze, omit — got '{other}'"
+        ))),
+    }
+}
+
+/// `action_subscription` as written. v0.2 took a bool; v0.3 names the mode,
+/// so a bool gets a targeted error instead of a generic type mismatch.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ActionSubscriptionFile {
+    Name(String),
+    Bool(bool),
+}
+
+fn parse_action_subscription(
+    v: &ActionSubscriptionFile,
+) -> Result<ActionSubscription, ConfigFileError> {
+    match v {
+        ActionSubscriptionFile::Name(s) if s == "none" => Ok(ActionSubscription::None),
+        ActionSubscriptionFile::Name(s) if s == "active" => Ok(ActionSubscription::Active),
+        ActionSubscriptionFile::Name(s) if s == "all" => Ok(ActionSubscription::All),
+        ActionSubscriptionFile::Name(other) => Err(ConfigFileError::Invalid(format!(
+            "action_subscription: expected one of none, active, all — got '{other}'"
+        ))),
+        ActionSubscriptionFile::Bool(b) => Err(ConfigFileError::Invalid(format!(
+            "action_subscription: booleans are no longer accepted; use one of none, active, \
+             all (v0.2's {b} is now '{}')",
+            if *b { "active" } else { "none" }
+        ))),
+    }
+}
+
+fn parse_time_sync_source(s: &str) -> Result<TimeSyncSource, ConfigFileError> {
+    match s {
+        "portal" => Ok(TimeSyncSource::Portal),
+        "system" => Ok(TimeSyncSource::System),
+        other => Err(ConfigFileError::Invalid(format!(
+            "time_sync_source: expected one of portal, system — got '{other}'"
         ))),
     }
 }
@@ -95,9 +138,11 @@ struct ConfigFileV1 {
     #[serde(default)]
     max_lag_ms: Option<u32>,
     #[serde(default)]
-    ping_ms: Option<u64>,
+    time_sync_source: Option<String>,
     #[serde(default)]
-    action_subscription: Option<bool>,
+    observation_sync: Option<bool>,
+    #[serde(default)]
+    action_subscription: Option<ActionSubscriptionFile>,
 
     #[serde(default)]
     videos: Vec<VideoEntry>,
@@ -105,8 +150,11 @@ struct ConfigFileV1 {
     state: Vec<FieldEntry>,
     #[serde(default)]
     action: Vec<FieldEntry>,
-    #[serde(default)]
-    action_chunks: Vec<ChunkEntry>,
+    /// Removed in v0.3. Accepted by the parser only so its presence
+    /// surfaces as `ActionChunksRemoved` rather than a generic unknown-key
+    /// parse error.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    action_chunks: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +185,12 @@ struct VideoEntry {
     /// Defaults to `false`.
     #[serde(default)]
     screencast: Option<bool>,
+    /// Frame size the encoder is set up for, given together with `height`.
+    /// WebRTC codecs only. Omit for 640x480.
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,12 +201,12 @@ struct FieldEntry {
     dtype: DType,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChunkEntry {
-    name: String,
-    horizon: u32,
-    fields: Vec<FieldEntry>,
+/// `true` whenever the key is present, whatever its value (including null).
+fn deserialize_present<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(d).map(|_| true)
 }
 
 fn deserialize_codec<'de, D>(d: D) -> Result<Codec, D::Error>
@@ -217,6 +271,10 @@ impl PortalConfig {
             });
         }
 
+        if parsed.action_chunks {
+            return Err(ConfigFileError::ActionChunksRemoved);
+        }
+
         validate(&parsed)?;
 
         let mut cfg = PortalConfig::new(session, role);
@@ -226,7 +284,16 @@ impl PortalConfig {
                 Codec::Mjpeg => DEFAULT_MJPEG_QUALITY,
                 _ => 0,
             });
-            cfg.add_video(&v.name, v.codec, quality, v.max_bitrate_kbps, v.simulcast, v.screencast);
+            let resolution =
+                v.width.zip(v.height).map(|(width, height)| Resolution { width, height });
+            let options = VideoOptions {
+                quality,
+                max_bitrate_kbps: v.max_bitrate_kbps,
+                simulcast: v.simulcast,
+                screencast: v.screencast,
+                resolution,
+            };
+            cfg.add_video(&v.name, v.codec, options);
         }
 
         if !parsed.state.is_empty() {
@@ -234,13 +301,6 @@ impl PortalConfig {
         }
         if !parsed.action.is_empty() {
             cfg.add_action_typed(parsed.action.iter().map(|f| (f.name.clone(), f.dtype)));
-        }
-        for chunk in &parsed.action_chunks {
-            cfg.add_action_chunk(
-                &chunk.name,
-                chunk.horizon,
-                chunk.fields.iter().map(|f| (f.name.clone(), f.dtype)),
-            );
         }
 
         if let Some(v) = parsed.fps {
@@ -261,6 +321,7 @@ impl PortalConfig {
         if let Some(v) = parsed.reuse_stale_frames {
             // Deprecated alias; `stall_for` folds it into the stall behavior.
             cfg.reuse_stale_frames = v;
+            cfg.sync_options_set.insert("reuse_stale_frames");
         }
         if let Some(v) = &parsed.stall_behavior {
             cfg.set_stall_behavior(parse_stall_behavior(v, "stall_behavior")?);
@@ -277,11 +338,14 @@ impl PortalConfig {
                 cfg.set_track_max_lag_ms(v.name.clone(), ms);
             }
         }
-        if let Some(v) = parsed.ping_ms {
-            cfg.set_ping_ms(v);
+        if let Some(v) = parsed.observation_sync {
+            cfg.set_observation_sync(v);
         }
-        if let Some(v) = parsed.action_subscription {
-            cfg.set_action_subscription(v);
+        if let Some(v) = &parsed.time_sync_source {
+            cfg.set_time_sync_source(parse_time_sync_source(v)?);
+        }
+        if let Some(v) = &parsed.action_subscription {
+            cfg.set_action_subscription(parse_action_subscription(v)?);
         }
 
         Ok(cfg)
@@ -341,6 +405,33 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
                 )));
             }
         }
+        match (v.width, v.height) {
+            (None, None) => {}
+            (Some(width), Some(height)) => {
+                if !v.codec.is_webrtc() {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "video '{}': width and height apply to the WebRTC codecs only, not {:?}",
+                        v.name, v.codec
+                    )));
+                }
+                if width == 0
+                    || height == 0
+                    || !width.is_multiple_of(2)
+                    || !height.is_multiple_of(2)
+                {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "video '{}': width and height must be even and non-zero, got {width}x{height}",
+                        v.name
+                    )));
+                }
+            }
+            _ => {
+                return Err(ConfigFileError::Invalid(format!(
+                    "video '{}': width and height must be given together",
+                    v.name
+                )));
+            }
+        }
     }
 
     if let Some(fps) = p.fps
@@ -362,19 +453,6 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
         }
     }
 
-    let mut seen_chunk = std::collections::HashSet::new();
-    for c in &p.action_chunks {
-        if !seen_chunk.insert(c.name.as_str()) {
-            return Err(ConfigFileError::Invalid(format!("duplicate action chunk '{}'", c.name)));
-        }
-        if c.horizon == 0 {
-            return Err(ConfigFileError::Invalid(format!(
-                "action chunk '{}' horizon must be > 0",
-                c.name
-            )));
-        }
-    }
-
     Ok(())
 }
 
@@ -391,8 +469,8 @@ tolerance: 1.0
 state_reliable: false
 action_reliable: false
 reuse_stale_frames: true
-ping_ms: 500
-action_subscription: true
+time_sync_source: system
+action_subscription: all
 videos:
   - { name: front, codec: h264, max_bitrate_kbps: 4000 }
   - { name: wrist, codec: mjpeg, quality: 80 }
@@ -402,11 +480,6 @@ state:
   - { name: gripper, dtype: bool }
 action:
   - { name: joint_pos, dtype: f32 }
-action_chunks:
-  - name: vla
-    horizon: 16
-    fields:
-      - { name: joint_pos, dtype: f32 }
 "#
     }
 
@@ -431,19 +504,16 @@ action_chunks:
         let action: Vec<&str> = cfg.action_fields().collect();
         assert_eq!(action, vec!["joint_pos"]);
 
-        assert_eq!(cfg.action_chunks().len(), 1);
-        assert_eq!(cfg.action_chunks()[0].horizon, 16);
-
         assert_eq!(cfg.session(), "demo");
         assert_eq!(cfg.role(), Role::Robot);
         assert_eq!(cfg.fps(), 60);
         assert_eq!(cfg.slack(), 8);
         assert_eq!(cfg.tolerance(), 1.0);
-        assert_eq!(cfg.ping_ms(), 500);
         assert!(!cfg.state_reliable());
         assert!(!cfg.action_reliable());
         assert!(cfg.reuse_stale_frames());
-        assert!(cfg.action_subscription());
+        assert_eq!(cfg.time_sync_source(), TimeSyncSource::System);
+        assert_eq!(cfg.action_subscription(), ActionSubscription::All);
         assert!(!cfg.has_e2ee_key());
     }
 
@@ -456,15 +526,51 @@ action_chunks:
         assert_eq!(cfg.frame_video_tracks().count(), 0);
         assert_eq!(cfg.state_schema().len(), 0);
         assert_eq!(cfg.action_schema().len(), 0);
-        assert_eq!(cfg.action_chunks().len(), 0);
         assert_eq!(cfg.fps(), 30);
         assert_eq!(cfg.slack(), 5);
         assert_eq!(cfg.tolerance(), 1.5);
-        assert_eq!(cfg.ping_ms(), 1000);
         assert!(cfg.state_reliable());
         assert!(cfg.action_reliable());
         assert!(!cfg.reuse_stale_frames());
-        assert!(!cfg.action_subscription());
+        assert_eq!(cfg.time_sync_source(), TimeSyncSource::Portal);
+        assert_eq!(cfg.action_subscription(), ActionSubscription::None);
+    }
+
+    #[test]
+    fn action_subscription_bool_is_rejected_with_the_new_names() {
+        for (value, replacement) in [("true", "'active'"), ("false", "'none'")] {
+            let yaml = format!("version: 1\naction_subscription: {value}\n");
+            let err = PortalConfig::from_yaml_str(&yaml, "demo", Role::Operator).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("none, active, all") && msg.contains(replacement), "{msg}");
+        }
+        let yaml = "version: 1\naction_subscription: sometimes\n";
+        assert!(PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).is_err());
+    }
+
+    #[test]
+    fn observation_sync_off_lists_the_sync_options_it_ignores() {
+        let yaml = "version: 1\nobservation_sync: false\nslack: 3\nstall_behavior: freeze\n\
+                    videos:\n  - { name: cam, codec: raw, max_lag_ms: 40 }\n";
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).unwrap();
+        assert!(!cfg.observation_sync());
+        assert_eq!(cfg.ignored_sync_options(), vec!["max_lag_ms", "slack", "stall_behavior"]);
+
+        let yaml = "version: 1\nslack: 3\n";
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).unwrap();
+        assert!(cfg.observation_sync(), "on by default");
+        assert!(cfg.ignored_sync_options().is_empty(), "nothing is ignored while sync is on");
+
+        let yaml = "version: 1\nobservation_sync: false\n";
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Operator).unwrap();
+        assert!(cfg.ignored_sync_options().is_empty(), "defaults are not warned about");
+    }
+
+    #[test]
+    fn unknown_time_sync_source_is_rejected() {
+        let yaml = "version: 1\ntime_sync_source: ntp\n";
+        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+        assert!(err.to_string().contains("portal, system"), "{err}");
     }
 
     #[test]
@@ -578,6 +684,37 @@ videos:
     }
 
     #[test]
+    fn resolution_parsed_and_defaults_to_none() {
+        let yaml = r#"
+version: 1
+videos:
+  - { name: a, codec: h264, width: 1280, height: 720 }
+  - { name: b, codec: vp8 }
+"#;
+        let cfg = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap();
+        let t = cfg.video_tracks();
+        assert_eq!(t[0].resolution, Some(Resolution { width: 1280, height: 720 }));
+        assert_eq!(t[1].resolution, None);
+    }
+
+    #[test]
+    fn invalid_resolution_rejected() {
+        for (entry, needle) in [
+            ("{ name: cam, codec: h264, width: 1280 }", "together"),
+            ("{ name: cam, codec: h264, height: 720 }", "together"),
+            ("{ name: cam, codec: h264, width: 1279, height: 720 }", "even"),
+            ("{ name: cam, codec: h264, width: 0, height: 720 }", "even"),
+            ("{ name: cam, codec: mjpeg, width: 1280, height: 720 }", "WebRTC"),
+        ] {
+            let yaml = format!("version: 1\nvideos:\n  - {entry}\n");
+            match PortalConfig::from_yaml_str(&yaml, "demo", Role::Robot).unwrap_err() {
+                ConfigFileError::Invalid(msg) => assert!(msg.contains(needle), "{entry}: {msg}"),
+                other => panic!("expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn bitrate_on_byte_stream_codec_rejected() {
         let yaml = r#"
 version: 1
@@ -639,26 +776,25 @@ videos:
     }
 
     #[test]
-    fn duplicate_chunk_rejected() {
+    fn action_chunks_key_rejected_as_removed() {
         let yaml = r#"
 version: 1
+action:
+  - { name: x, dtype: f32 }
 action_chunks:
-  - { name: vla, horizon: 4, fields: [{ name: x, dtype: f32 }] }
   - { name: vla, horizon: 4, fields: [{ name: x, dtype: f32 }] }
 "#;
         let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
-        assert!(matches!(err, ConfigFileError::Invalid(_)));
+        assert!(matches!(err, ConfigFileError::ActionChunksRemoved), "got {err:?}");
+        assert!(err.to_string().contains("removed in v0.3"), "{err}");
     }
 
     #[test]
-    fn zero_horizon_rejected() {
-        let yaml = r#"
-version: 1
-action_chunks:
-  - { name: vla, horizon: 0, fields: [{ name: x, dtype: f32 }] }
-"#;
-        let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
-        assert!(matches!(err, ConfigFileError::Invalid(_)));
+    fn empty_action_chunks_key_still_rejected() {
+        for yaml in ["version: 1\naction_chunks: []\n", "version: 1\naction_chunks:\n"] {
+            let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
+            assert!(matches!(err, ConfigFileError::ActionChunksRemoved), "got {err:?}");
+        }
     }
 
     #[test]

@@ -178,6 +178,7 @@ class LiveKitTeleoperator(Teleoperator):
 
         self._portal_cfg = PortalRobotConfig(self.config.session or "lerobot")
         for cam in self._camera_names:
+            width, height = _frame_size(self._cameras[cam])
             self._portal_cfg.add_video(
                 cam,
                 codec=self.config.video_codec,
@@ -185,6 +186,8 @@ class LiveKitTeleoperator(Teleoperator):
                 max_bitrate_kbps=self.config.video_max_bitrate_kbps,
                 simulcast=self.config.video_simulcast,
                 screencast=self.config.video_screencast,
+                width=width,
+                height=height,
             )
         if self._state_motors:
             self._portal_cfg.add_state_typed(
@@ -335,3 +338,14 @@ class LiveKitTeleoperator(Teleoperator):
 
 def _strip_pos(key: str) -> str:
     return key[: -len(".pos")] if key.endswith(".pos") else key
+
+
+def _frame_size(shape: tuple) -> tuple[int | None, int | None]:
+    """`(width, height)` from an `(H, W, 3)` camera shape, or `(None, None)`
+    when the shape is unknown or odd-sized, which Portal can't take."""
+    if len(shape) != 3:
+        return None, None
+    height, width = shape[0], shape[1]
+    if width % 2 or height % 2:
+        return None, None
+    return width, height

@@ -106,7 +106,7 @@ async def main() -> None:
 
     def on_action(action: Action) -> None:
         v = action.values
-        glass_us = int(time.time() * 1_000_000) - int(v["t_capture_us"])
+        glass_us = robot.now_us() - int(v["t_capture_us"])
         stats.record(int(v["seq"]), glass_us, int(v["codec_lag_us"]))
 
     robot.on_action(on_action)
@@ -129,7 +129,7 @@ async def main() -> None:
 
     try:
         for seq in range(DURATION_S * FPS):
-            capture_us = int(time.time() * 1_000_000)
+            capture_us = robot.now_us()
             frame = make_frame(seq, capture_us)
             # Same timestamp on the frame and the state so they fuse into one
             # observation on the policy side.

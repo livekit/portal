@@ -51,7 +51,6 @@ class _Recorder(ffi.PortalCallbacks):
         self.states: list = []
         self.observations: list = []
         self.frames: list = []
-        self.chunks: list = []
         self.active_changes: list = []
 
     def on_action(self, action) -> None:
@@ -69,9 +68,6 @@ class _Recorder(ffi.PortalCallbacks):
     def on_drop(self, dropped) -> None:
         pass
 
-    def on_action_chunk(self, chunk) -> None:
-        self.chunks.append(chunk)
-
     def on_operator_joined(self, identity) -> None:
         pass
 
@@ -80,6 +76,12 @@ class _Recorder(ffi.PortalCallbacks):
 
     def on_active_operator_changed(self, identity) -> None:
         self.active_changes.append(identity)
+
+    def on_time_synced(self) -> None:
+        pass
+
+    def on_keypoint(self, keypoint) -> None:
+        pass
 
 
 def _f(name: str):
@@ -97,12 +99,12 @@ async def ffi_pair():
     robot_cfg = ffi.RobotConfig(room)
     robot_cfg.add_state_typed([_f("j")])
     robot_cfg.add_action_typed([_f("a")])
-    robot_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None, None, None, None, None)
+    robot_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None, None, None, None, None, None, None)
 
     operator_cfg = ffi.OperatorConfig(room)
     operator_cfg.add_state_typed([_f("j")])
     operator_cfg.add_action_typed([_f("a")])
-    operator_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None, None, None, None, None)
+    operator_cfg.add_video("cam", ffi.VideoCodec.MJPEG, 90, None, None, None, None, None, None, None)
 
     robot_cb = _Recorder()
     operator_cb = _Recorder()

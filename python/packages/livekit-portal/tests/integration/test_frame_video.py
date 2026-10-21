@@ -51,6 +51,8 @@ from livekit.portal import (
     frame_bytes_to_numpy_rgb,
 )
 
+from .conftest import wait_for
+
 pytestmark = pytest.mark.asyncio
 
 # Frame-video receive races a few hops: byte-stream open → read_all →
@@ -458,11 +460,9 @@ async def test_uniform_fill_byte_exact(pair, fill):
 
 
 async def test_publisher_full_metric_increments_on_burst(pair):
-    """Sending more frames than the publish queue can drain in real time
-    must surface in `frames_dropped_publisher_full` rather than silently
-    disappear. Push 200 raw frames as fast as possible — at least some
-    will be dropped at the queue cap (60), and the metric must reflect
-    that count.
+    """Frames sent faster than the link drains them are replaced by newer
+    ones, and each replacement must surface in `frames_dropped_publisher_full`
+    rather than silently disappear. Push 200 raw frames as fast as possible.
     """
     pair.robot_cfg.add_video("cam", codec=VideoCodec.RAW)
     pair.operator_cfg.add_video("cam", codec=VideoCodec.RAW)
@@ -479,10 +479,29 @@ async def test_publisher_full_metric_increments_on_burst(pair):
     snap = pair.robot.metrics().transport.frames_dropped_publisher_full
     dropped = snap.get("cam", 0)
     sent = pair.robot.metrics().transport.frames_sent.get("cam", 0)
-    # The exact split depends on link speed; assert the invariants:
-    # neither both zero nor a sum below the offered load.
+    # The exact split depends on link speed. Every frame is either sent or
+    # replaced, never both.
     assert dropped > 0, f"expected drops under burst, got dropped={dropped} sent={sent}"
-    assert sent + dropped >= 200, f"sent + dropped should account for all 200; sent={sent} dropped={dropped}"
+    assert sent + dropped == 200, f"sent + dropped should account for all 200; sent={sent} dropped={dropped}"
+
+
+async def test_newest_frame_survives_a_burst(pair):
+    """Under overload the publisher sheds old frames, not new ones: the last
+    frame of a burst is always the last one delivered."""
+    pair.robot_cfg.add_video("cam", codec=VideoCodec.RAW)
+    pair.operator_cfg.add_video("cam", codec=VideoCodec.RAW)
+    received: list[VideoFrameData] = []
+    await pair.start()
+    pair.operator.on_video_frame("cam", lambda name, f: received.append(f))
+    await asyncio.sleep(SETTLE_S)
+
+    rgb = _gradient(320, 240, seed=6)
+    for i in range(1, 201):
+        pair.robot.send_video_frame("cam", rgb, timestamp_us=i)
+
+    assert await wait_for(lambda: received and received[-1].timestamp_us == 200), (
+        f"last delivered frame is {received[-1].timestamp_us if received else None}, not 200"
+    )
 
 
 async def test_random_noise_byte_exact(pair):

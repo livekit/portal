@@ -24,6 +24,11 @@ examples = [
 integration = [
     "livekit-api>=0.7",
 ]
+# `RrdSink`: record an observer to Rerun `.rrd` archives.
+rerun = [
+    "rerun-sdk>=0.24",
+    "pillow>=10",
+]
 
 [tool.pytest.ini_options]
 # `asyncio_mode = "auto"` lets async test functions run without a

@@ -23,6 +23,9 @@ use crate::dtype::DType;
 pub enum Role {
     Robot,
     Operator,
+    /// Sees everything in the room but never sends state or actions. It
+    /// records, or orchestrates by handing control between operators.
+    Observer,
 }
 
 /// A value received on the wire, reconstructed to its declared dtype.
@@ -145,86 +148,11 @@ pub struct Action {
     /// `Portal::active_operator()` to label rows so the label cannot
     /// race with a handoff.
     pub sender: String,
-}
-
-/// One column of an outgoing action chunk: `horizon` values widened to
-/// `f64`, plus the dtype the caller claims they are.
-///
-/// **Why the claim.** A scalar action crosses `Portal::send_action` as a
-/// `TypedValue`, whose variant states the caller's intent, and
-/// `check_dtypes` compares that against the declared schema. Chunk columns
-/// are `Vec<f64>` because a horizon of rows wants to stay a flat numeric
-/// buffer, so the variant tag has nowhere to live. `dtype` is that tag,
-/// hoisted to the column. It gives chunks the same send-time dtype
-/// rejection scalar actions already get.
-///
-/// Note that the check compares declarations, not values, exactly as
-/// `check_dtypes` does. Nothing here inspects the `f64`s. Out-of-range
-/// values still saturate at encode and warn once per `(t, field)`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChunkColumn {
-    /// The column, length `horizon`. Short columns zero-pad and long ones
-    /// truncate, both with a warn-once.
-    pub values: Vec<f64>,
-    /// The dtype the caller claims this column holds. `Some(d)` is checked
-    /// against the field's declared dtype and a mismatch is rejected with
-    /// `PortalError::DtypeMismatch`. `None` waives the check and coerces to
-    /// the declared dtype, which is what a uniform policy tensor needs: a
-    /// single `f32` array fanned out across a mixed schema cannot honestly
-    /// claim `Bool` for the gripper column.
-    pub dtype: Option<DType>,
-}
-
-impl ChunkColumn {
-    /// A column that claims a dtype. Mismatches against the declared field
-    /// are rejected at send.
-    pub fn typed(dtype: DType, values: Vec<f64>) -> Self {
-        Self { values, dtype: Some(dtype) }
-    }
-
-    /// A column that claims nothing and coerces to the declared dtype.
-    pub fn untyped(values: Vec<f64>) -> Self {
-        Self { values, dtype: None }
-    }
-}
-
-impl From<Vec<f64>> for ChunkColumn {
-    /// Bare columns coerce, matching the pre-`ChunkColumn` behaviour.
-    fn from(values: Vec<f64>) -> Self {
-        Self::untyped(values)
-    }
-}
-
-/// One action chunk received from the operator. Surfaces in
-/// `on_action_chunk` / `Portal::get_action_chunk`.
-///
-/// The shape is `[horizon, fields]` row-major: timestep `t` of field `f` is at
-/// `data[&f][t as usize]`. Each per-field column has length `horizon`. Fields
-/// keep their declared dtype on the wire and are widened to `f64` here for
-/// uniformity — bindings re-cast at egress.
-///
-/// **Why a chunk type, not just an Action?** VLA policies emit a horizon of
-/// future actions per inference step. Packing them as scalars would either
-/// require many `send_action` calls (one per timestep) or hand-rolled
-/// side-channel binary, defeating the schema. A first-class chunk lets the
-/// schema describe the tensor and lets the wire ship it as one packet.
-#[derive(Debug, Clone)]
-pub struct ActionChunk {
-    /// Chunk name as declared in `add_action_chunk`.
-    pub name: String,
-    /// Number of timesteps (length of every per-field column).
-    pub horizon: u32,
-    /// Per-field column, length `horizon`, dtype widened to `f64`.
-    pub data: HashMap<String, Vec<f64>>,
-    pub timestamp_us: u64,
-    /// Sender-side observation timestamp this chunk was produced from, when
-    /// the operator passed one to `send_action_chunk`. `None` means the
-    /// chunk was published unsolicited.
-    pub in_reply_to_ts_us: Option<u64>,
-    /// Identity of the operator that produced this chunk, captured at
-    /// the moment the active-operator gate accepted the byte stream. See
-    /// the note on `Action::sender` — same semantics.
-    pub sender: String,
+    /// Whether `sender` was the active operator when the action passed the
+    /// gate. `false` marks a shadow action the robot ignored; only operators
+    /// subscribed with `ActionSubscription::All` see those. It says the
+    /// action passed the gate, not that the robot carried it out.
+    pub active: bool,
 }
 
 /// One state sample received from the robot. Surfaces in `on_state` and
@@ -315,6 +243,33 @@ pub enum StallBehavior {
     /// `frames[name]` never fails. Falls back to `Drop` before the track's
     /// first frame, when its frame geometry is not yet known.
     Omit,
+}
+
+/// Which actions reach `on_action` / `get_action` on an operator (and, later,
+/// an observer). Actions are broadcast to the whole room either way, so this
+/// is a local filter and `All` costs nothing extra on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActionSubscription {
+    /// Nothing. The default for operators, which are usually pure controllers.
+    #[default]
+    None,
+    /// Only the active operator's actions: what the robot executes.
+    Active,
+    /// Every operator's actions, including the ones the gate dropped
+    /// (`Action::active == false`), e.g. to record a shadow policy.
+    All,
+}
+
+/// Where `now_us()` comes from on a peer other than the robot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeSyncSource {
+    /// Sync to the robot's clock over `portal_clock`.
+    #[default]
+    Portal,
+    /// Trust the host clock as is, for labs whose hosts are already synced
+    /// (PTP, GPS). The exchange still runs, so drift shows up in
+    /// `metrics().time_sync.measured_offset_us`.
+    System,
 }
 
 /// Per-track stall handling: how long to wait for a silent track, and how

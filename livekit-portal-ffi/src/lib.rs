@@ -59,6 +59,7 @@ fn init_logging() {
 pub enum Role {
     Robot,
     Operator,
+    Observer,
 }
 
 impl From<Role> for core::Role {
@@ -66,6 +67,7 @@ impl From<Role> for core::Role {
         match r {
             Role::Robot => core::Role::Robot,
             Role::Operator => core::Role::Operator,
+            Role::Observer => core::Role::Observer,
         }
     }
 }
@@ -75,6 +77,7 @@ impl From<core::Role> for Role {
         match r {
             core::Role::Robot => Role::Robot,
             core::Role::Operator => Role::Operator,
+            core::Role::Observer => Role::Observer,
         }
     }
 }
@@ -205,8 +208,8 @@ pub struct FieldSpec {
 /// One record for every track regardless of transport, mirroring the core
 /// `VideoTrackSpec` — `codec` says which transport it rides and therefore
 /// which options apply. `quality` is meaningful for `VideoCodec.Mjpeg`
-/// (1..=100); `max_bitrate_kbps`, `simulcast` and `screencast` are
-/// meaningful for the WebRTC codecs. Each is ignored by the other transport
+/// (1..=100); `max_bitrate_kbps`, `simulcast`, `screencast`, `width` and
+/// `height` are meaningful for the WebRTC codecs. Each is ignored by the other transport
 /// — the YAML loader rejects a mismatched option outright, while `add_video`
 /// accepts and ignores it, so a spec may carry a value its codec never
 /// reads. `quality` is the exception: it reads back as `0` on every codec
@@ -219,6 +222,12 @@ pub struct VideoTrackSpec {
     pub max_bitrate_kbps: Option<u32>,
     pub simulcast: bool,
     pub screencast: bool,
+    /// Frame size the encoder is set up for. Both are set or neither is;
+    /// neither means 640x480.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
 }
 
 fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
@@ -229,40 +238,9 @@ fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
         max_bitrate_kbps: s.max_bitrate_kbps,
         simulcast: s.simulcast,
         screencast: s.screencast,
+        width: s.resolution.map(|r| r.width),
+        height: s.resolution.map(|r| r.height),
     }
-}
-
-/// A declared action chunk: name, fixed horizon, ordered field list. The
-/// chunk's payload travels as a LiveKit byte stream (not a data packet) so
-/// it isn't bounded by the 15 KB packet limit.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct ChunkSpec {
-    pub name: String,
-    pub horizon: u32,
-    pub fields: Vec<FieldSpec>,
-}
-
-/// One column of an outgoing action chunk. Mirrors `core::ChunkColumn`:
-/// `values` is the column widened to `f64`, and `dtype` is the dtype the
-/// caller claims it holds.
-///
-/// A binding sets `dtype` when it knows the caller's intent per column, and
-/// leaves it `None` when it doesn't. The Python binding leaves it `None` and
-/// runs its own category check, for the same reason `send_action` does: a
-/// Python `int` is a legitimate `I8` *and* `I32`, so an exact claim would be
-/// invented rather than observed.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct ChunkColumn {
-    pub values: Vec<f64>,
-    pub dtype: Option<DType>,
-}
-
-fn chunk_columns_to_core(data: HashMap<String, ChunkColumn>) -> HashMap<String, core::ChunkColumn> {
-    data.into_iter()
-        .map(|(name, c)| {
-            (name, core::ChunkColumn { values: c.values, dtype: c.dtype.map(Into::into) })
-        })
-        .collect()
 }
 
 /// Where the pixels in a delivered frame came from. Mirrors
@@ -329,6 +307,64 @@ impl From<StallBehavior> for core::StallBehavior {
     }
 }
 
+/// Which received actions reach `on_action` / `get_action` on an operator:
+/// `NONE` (default), `ACTIVE` (the active operator's), or `ALL` (every
+/// operator's, with `Action.active` marking the ones the gate dropped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum ActionSubscription {
+    #[default]
+    None,
+    Active,
+    All,
+}
+
+impl From<ActionSubscription> for core::ActionSubscription {
+    fn from(s: ActionSubscription) -> Self {
+        match s {
+            ActionSubscription::None => core::ActionSubscription::None,
+            ActionSubscription::Active => core::ActionSubscription::Active,
+            ActionSubscription::All => core::ActionSubscription::All,
+        }
+    }
+}
+
+impl From<core::ActionSubscription> for ActionSubscription {
+    fn from(s: core::ActionSubscription) -> Self {
+        match s {
+            core::ActionSubscription::None => ActionSubscription::None,
+            core::ActionSubscription::Active => ActionSubscription::Active,
+            core::ActionSubscription::All => ActionSubscription::All,
+        }
+    }
+}
+
+/// Where `now_us()` comes from. `PORTAL` syncs to the robot's clock;
+/// `SYSTEM` trusts the host clock, for hosts kept in step by PTP or GPS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum TimeSyncSource {
+    #[default]
+    Portal,
+    System,
+}
+
+impl From<TimeSyncSource> for core::TimeSyncSource {
+    fn from(s: TimeSyncSource) -> Self {
+        match s {
+            TimeSyncSource::Portal => core::TimeSyncSource::Portal,
+            TimeSyncSource::System => core::TimeSyncSource::System,
+        }
+    }
+}
+
+impl From<core::TimeSyncSource> for TimeSyncSource {
+    fn from(s: core::TimeSyncSource) -> Self {
+        match s {
+            core::TimeSyncSource::Portal => TimeSyncSource::Portal,
+            core::TimeSyncSource::System => TimeSyncSource::System,
+        }
+    }
+}
+
 /// Decoded video frame. `data` is packed RGB24 (R,G,B byte order, `W*H*3`
 /// bytes) on both sides — `send_video_frame` accepts RGB, and receive-side
 /// frames are color-converted from I420 (WebRTC) or codec-decoded (frame
@@ -337,12 +373,48 @@ impl From<StallBehavior> for core::StallBehavior {
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
+    pub data: FrameBytes,
     pub timestamp_us: u64,
     /// Whether these pixels are a live match, a reused earlier frame, or a
     /// synthesized placeholder. Always `Live` outside of `Observation`.
     pub source: FrameSource,
 }
+
+/// Frame pixels. Crosses the FFI exactly like `Vec<u8>` (foreign bindings see
+/// `bytes`), but uniffi writes a `Vec<u8>` one element at a time: about 3 ms
+/// per 1080p frame. This writes it with one copy, straight from the core's
+/// shared buffer.
+#[derive(Debug, Clone)]
+pub struct FrameBytes(bytes::Bytes);
+
+// SAFETY: the FFI type, the serialized layout (a big-endian `i32` length,
+// then the bytes) and the type metadata are all `Vec<u8>`'s, so foreign code
+// reads and writes it as `bytes`.
+unsafe impl uniffi::FfiConverter<crate::UniFfiTag> for FrameBytes {
+    uniffi::ffi_converter_rust_buffer_lift_and_lower!(crate::UniFfiTag);
+
+    fn write(obj: Self, buf: &mut Vec<u8>) {
+        let len = i32::try_from(obj.0.len()).expect("frame larger than 2 GiB");
+        buf.reserve(4 + obj.0.len());
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&obj.0);
+    }
+
+    fn try_read(buf: &mut &[u8]) -> uniffi::Result<Self> {
+        uniffi::check_remaining(buf, 4)?;
+        let (len, rest) = buf.split_at(4);
+        let len = usize::try_from(i32::from_be_bytes(len.try_into()?))?;
+        uniffi::check_remaining(rest, len)?;
+        let (data, rest) = rest.split_at(len);
+        *buf = rest;
+        Ok(Self(bytes::Bytes::copy_from_slice(data)))
+    }
+
+    const TYPE_ID_META: uniffi::MetadataBuffer =
+        <Vec<u8> as uniffi::TypeId<crate::UniFfiTag>>::TYPE_ID_META;
+}
+
+uniffi::derive_ffi_traits!(local FrameBytes);
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Observation {
@@ -362,22 +434,38 @@ pub struct Action {
     /// the active-operator gate (or, for the local echo path, the
     /// publisher's own identity).
     pub sender: String,
+    /// Whether `sender` was the active operator at gate time. `false` marks
+    /// a shadow action, seen only with `ActionSubscription.ALL`.
+    pub active: bool,
 }
 
-/// A received action chunk. `data` is `field -> column of length horizon`,
-/// each column widened to `f64` (lossless for every supported dtype).
-/// Bindings may re-cast columns into typed numpy arrays per the declared
-/// chunk schema.
+/// A keypoint. `payload_json` is a JSON object: UniFFI has no dynamic value
+/// type, so the payload crosses as text and bindings decode it.
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct ActionChunk {
-    pub name: String,
-    pub horizon: u32,
-    pub data: HashMap<String, Vec<f64>>,
+pub struct Keypoint {
+    pub kind: String,
+    pub payload_json: String,
     pub timestamp_us: u64,
-    pub in_reply_to_ts_us: Option<u64>,
-    /// Identity of the operator that produced this chunk; same semantics
-    /// as `Action::sender`.
     pub sender: String,
+}
+
+impl From<&core::Keypoint> for Keypoint {
+    fn from(k: &core::Keypoint) -> Self {
+        Self {
+            kind: k.kind.clone(),
+            payload_json: serde_json::Value::Object(k.payload.clone()).to_string(),
+            timestamp_us: k.timestamp_us,
+            sender: k.sender.clone(),
+        }
+    }
+}
+
+fn keypoint_payload(json: &str) -> PortalResult<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::from_str(json) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        Ok(_) => Err(PortalError::InvalidKeypoint("payload must be a JSON object".into())),
+        Err(e) => Err(PortalError::InvalidKeypoint(format!("payload is not valid JSON: {e}"))),
+    }
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -419,12 +507,9 @@ pub struct TransportMetrics {
     pub states_received: u64,
     pub actions_sent: u64,
     pub actions_received: u64,
-    pub action_chunks_sent: u64,
-    pub action_chunks_received: u64,
     pub frame_jitter_us: HashMap<String, u64>,
     pub state_jitter_us: u64,
     pub action_jitter_us: u64,
-    pub action_chunk_jitter_us: u64,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]
@@ -450,12 +535,25 @@ pub struct RttMetrics {
     pub pongs_received: u64,
 }
 
+/// Clock sync with the robot. `reset_metrics()` only zeroes the counters.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct TimeSyncMetrics {
+    pub source: TimeSyncSource,
+    pub synced: bool,
+    pub offset_us: i64,
+    pub uncertainty_us: Option<u64>,
+    pub measured_offset_us: Option<i64>,
+    pub resyncs: u64,
+    pub samples_rejected: u64,
+}
+
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct PortalMetrics {
     pub sync: SyncMetrics,
     pub transport: TransportMetrics,
     pub buffers: BufferMetrics,
     pub rtt: RttMetrics,
+    pub time_sync: TimeSyncMetrics,
     pub policy: PolicyMetrics,
 }
 
@@ -484,9 +582,6 @@ pub enum PortalError {
     #[error("unknown video track: {0}")]
     UnknownVideoTrack(String),
 
-    #[error("unknown action chunk: {0}")]
-    UnknownChunk(String),
-
     #[error("wrong frame size: expected {expected} bytes, got {got}")]
     WrongFrameSize { expected: u64, got: u64 },
 
@@ -501,6 +596,12 @@ pub enum PortalError {
 
     #[error("operation not available for role {0:?}")]
     WrongRole(Role),
+
+    #[error("observation sync is off on this peer")]
+    ObservationSyncDisabled,
+
+    #[error("invalid keypoint: {0}")]
+    InvalidKeypoint(String),
 
     #[error("field '{field}' declared as {expected:?} but sent as {got}")]
     DtypeMismatch { field: String, expected: DType, got: String },
@@ -518,7 +619,6 @@ impl From<core::PortalError> for PortalError {
             core::PortalError::NoPeer => PortalError::NoPeer,
             core::PortalError::AmbiguousPeer => PortalError::AmbiguousPeer,
             core::PortalError::UnknownVideoTrack { name } => PortalError::UnknownVideoTrack(name),
-            core::PortalError::UnknownChunk { name } => PortalError::UnknownChunk(name),
             core::PortalError::WrongFrameSize { expected, got } => {
                 PortalError::WrongFrameSize { expected: expected as u64, got: got as u64 }
             }
@@ -528,6 +628,7 @@ impl From<core::PortalError> for PortalError {
             core::PortalError::Deserialization(s) => PortalError::Deserialization(s),
             core::PortalError::Codec(s) => PortalError::Codec(s),
             core::PortalError::WrongRole(r) => PortalError::WrongRole(r.into()),
+            core::PortalError::ObservationSyncDisabled => PortalError::ObservationSyncDisabled,
             core::PortalError::DtypeMismatch { field, expected, got } => {
                 PortalError::DtypeMismatch {
                     field,
@@ -559,6 +660,11 @@ pub enum ConfigFileError {
     UnsupportedVersion { got: u32, supported: u32 },
     #[error("invalid config: {0}")]
     Invalid(String),
+    #[error(
+        "`action_chunks` is no longer supported: action chunks were removed in v0.3. \
+         Declare the per-step fields under `action` and call `send_action` once per control tick"
+    )]
+    ActionChunksRemoved,
 }
 
 impl From<core::ConfigFileError> for ConfigFileError {
@@ -570,6 +676,7 @@ impl From<core::ConfigFileError> for ConfigFileError {
                 ConfigFileError::UnsupportedVersion { got, supported }
             }
             core::ConfigFileError::Invalid(s) => ConfigFileError::Invalid(s),
+            core::ConfigFileError::ActionChunksRemoved => ConfigFileError::ActionChunksRemoved,
         }
     }
 }
@@ -641,9 +748,6 @@ pub trait PortalCallbacks: Send + Sync {
     fn on_observation(&self, observation: Observation);
     fn on_video_frame(&self, track_name: String, frame: VideoFrame);
     fn on_drop(&self, dropped: Vec<HashMap<String, f64>>);
-    /// Fires for every chunk received. Bindings dispatch by `chunk.name`
-    /// to per-chunk user callbacks if needed.
-    fn on_action_chunk(&self, chunk: ActionChunk);
     /// Fires when an operator joins the room (post role-attribute discovery).
     fn on_operator_joined(&self, identity: String);
     /// Fires when an operator leaves the room. The robot's
@@ -653,6 +757,10 @@ pub trait PortalCallbacks: Send + Sync {
     /// the Robot side, when the local pointer is updated). Empty string
     /// means the pointer was cleared.
     fn on_active_operator_changed(&self, identity: Option<String>);
+    /// First sync with the robot's clock, and after each resync.
+    fn on_time_synced(&self);
+    /// Every keypoint in the room, this peer's own included.
+    fn on_keypoint(&self, keypoint: Keypoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +808,9 @@ impl PortalConfig {
     /// source as screen content, which pins the resolution and drops frames
     /// under CPU or bandwidth pressure instead of rescaling the frame. Both
     /// apply to the WebRTC codecs only and default to `false`.
+    /// `width` and `height` are the frame size the WebRTC encoder is set up
+    /// for, given together; both `None` means 640x480. See
+    /// `core::PortalConfig::add_video`.
     /// `stall_behavior` and `max_lag_ms` are per-track overrides of
     /// [`set_stall_behavior`] / [`set_max_lag_ms`], applied at the declaration
     /// site so a track's whole configuration reads in one place. `None` on
@@ -716,9 +827,18 @@ impl PortalConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
+        let resolution = match (width, height) {
+            (Some(width), Some(height)) => Some(core::Resolution { width, height }),
+            (None, None) => None,
+            _ => panic!("width and height must be given together"),
+        };
+        let options =
+            core::VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution };
         let mut cfg = self.inner.lock();
-        cfg.add_video(name.clone(), codec.into(), quality, max_bitrate_kbps, simulcast, screencast);
+        cfg.add_video(name.clone(), codec.into(), options);
         if let Some(b) = stall_behavior {
             cfg.set_track_stall_behavior(name.clone(), b.into());
         }
@@ -733,17 +853,6 @@ impl PortalConfig {
 
     pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
         self.inner.lock().add_action_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
-    }
-
-    /// Declare a named action chunk: a fixed-horizon batch of typed
-    /// per-field values published as one byte stream. Use this for VLA
-    /// policies that emit a horizon of future actions per inference step.
-    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
-        self.inner.lock().add_action_chunk(
-            name,
-            horizon,
-            fields.into_iter().map(|f| (f.name, f.dtype.into())),
-        );
     }
 
     pub fn set_fps(&self, fps: u32) {
@@ -766,8 +875,27 @@ impl PortalConfig {
         self.inner.lock().set_action_reliable(reliable);
     }
 
-    pub fn set_ping_ms(&self, ms: u64) {
-        self.inner.lock().set_ping_ms(ms);
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.lock().set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.lock().set_time_sync_source(source.into());
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.lock().time_sync_source().into()
+    }
+
+    /// Operator-side: bundle state and frames into observations. On by
+    /// default for operators.
+    pub fn set_observation_sync(&self, enable: bool) {
+        self.inner.lock().set_observation_sync(enable);
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.lock().observation_sync()
     }
 
     #[allow(deprecated)]
@@ -802,13 +930,10 @@ impl PortalConfig {
         self.inner.lock().set_e2ee_key(key);
     }
 
-    /// Operator-side opt-in to receiving executed actions ("HITL
-    /// recording"). Off by default. When on, `on_action` / `on_action_chunk`
-    /// / `get_action` / `get_action_chunk` fire on the operator for actions
-    /// the active operator sends, plus a local echo when self == active.
-    /// No-op on the Robot side — the robot always processes actions.
-    pub fn set_action_subscription(&self, enable: bool) {
-        self.inner.lock().set_action_subscription(enable);
+    /// Operator-side: which received actions reach `on_action` /
+    /// `get_action`. No-op on the Robot side.
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.lock().set_action_subscription(subscription.into());
     }
 
     /// Names of every declared video track, in declaration order, whatever
@@ -848,13 +973,6 @@ impl PortalConfig {
             .collect()
     }
 
-    /// Declared action chunks. Used by bindings that load a config from
-    /// YAML and need to mirror chunk schemas into their own typed-state
-    /// tracking after construction.
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.lock().action_chunks().iter().map(chunkspec_from_core).collect()
-    }
-
     /// Session name this config was built for.
     pub fn session(&self) -> String {
         self.inner.lock().session().to_string()
@@ -880,11 +998,6 @@ impl PortalConfig {
         self.inner.lock().tolerance()
     }
 
-    /// RTT ping cadence in milliseconds; `0` means active pinging is off.
-    pub fn ping_ms(&self) -> u64 {
-        self.inner.lock().ping_ms()
-    }
-
     /// Whether state packets are published on the reliable channel.
     pub fn state_reliable(&self) -> bool {
         self.inner.lock().state_reliable()
@@ -903,8 +1016,8 @@ impl PortalConfig {
     }
 
     /// Whether action subscription is enabled (operator-side opt-in).
-    pub fn action_subscription(&self) -> bool {
-        self.inner.lock().action_subscription()
+    pub fn action_subscription(&self) -> ActionSubscription {
+        self.inner.lock().action_subscription().into()
     }
 
     /// Whether a shared E2EE key has been set. The key bytes are not
@@ -928,7 +1041,6 @@ pub struct Portal {
     action_fields: Vec<String>,
     video_tracks: Vec<String>,
     video_track_specs: Vec<VideoTrackSpec>,
-    action_chunks: Vec<ChunkSpec>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -944,8 +1056,6 @@ impl Portal {
         let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
         let video_track_specs: Vec<VideoTrackSpec> =
             cfg.video_tracks().iter().map(videotrackspec_from_core).collect();
-        let action_chunks: Vec<ChunkSpec> =
-            cfg.action_chunks().iter().map(chunkspec_from_core).collect();
 
         let inner = core::Portal::new(cfg);
 
@@ -959,6 +1069,7 @@ impl Portal {
                 timestamp_us: action.timestamp_us,
                 in_reply_to_ts_us: action.in_reply_to_ts_us,
                 sender: action.sender.clone(),
+                active: action.active,
             });
         });
         let cb = callbacks.clone();
@@ -968,10 +1079,14 @@ impl Portal {
                 timestamp_us: state.timestamp_us,
             });
         });
-        let cb = callbacks.clone();
-        inner.on_observation(move |obs| {
-            cb.on_observation(observation_from_core(obs));
-        });
+        if inner.observation_sync() {
+            let cb = callbacks.clone();
+            inner
+                .on_observation(move |obs| {
+                    cb.on_observation(observation_from_core(obs));
+                })
+                .expect("observation sync is on");
+        }
         let cb = callbacks.clone();
         inner.on_drop(move |dropped| {
             // Cross with raw f64 maps. Python wraps to typed on receipt.
@@ -994,13 +1109,6 @@ impl Portal {
             });
         }
 
-        for chunk_spec in &action_chunks {
-            let cb = callbacks.clone();
-            inner.on_action_chunk(&chunk_spec.name, move |chunk| {
-                cb.on_action_chunk(actionchunk_from_core(chunk));
-            });
-        }
-
         let cb = callbacks.clone();
         inner.on_operator_joined(move |id| {
             cb.on_operator_joined(id.to_string());
@@ -1013,6 +1121,10 @@ impl Portal {
         inner.on_active_operator_changed(move |id| {
             cb.on_active_operator_changed(id.map(|s| s.to_string()));
         });
+        let cb = callbacks.clone();
+        inner.on_time_synced(move || cb.on_time_synced());
+        let cb = callbacks.clone();
+        inner.on_keypoint(move |kp| cb.on_keypoint(kp.into()));
 
         Arc::new(Self {
             inner,
@@ -1021,7 +1133,6 @@ impl Portal {
             action_fields,
             video_tracks,
             video_track_specs,
-            action_chunks,
         })
     }
 
@@ -1068,29 +1179,12 @@ impl Portal {
         self.inner.send_action(&typed, timestamp_us, in_reply_to_ts_us).map_err(Into::into)
     }
 
-    /// Publish an action chunk on the named declaration. `data` is
-    /// `field -> column of length horizon` widened to `f64`, each column
-    /// optionally claiming a dtype the core checks against the declared
-    /// field.
-    pub fn send_action_chunk(
-        &self,
-        chunk_name: String,
-        data: HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        self.inner
-            .send_action_chunk(
-                &chunk_name,
-                &chunk_columns_to_core(data),
-                timestamp_us,
-                in_reply_to_ts_us,
-            )
-            .map_err(Into::into)
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
+        Ok(self.inner.get_observation()?.as_ref().map(observation_from_core))
     }
 
-    pub fn get_observation(&self) -> Option<Observation> {
-        self.inner.get_observation().as_ref().map(observation_from_core)
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
     }
 
     pub fn get_action(&self) -> Option<Action> {
@@ -1099,11 +1193,8 @@ impl Portal {
             timestamp_us: a.timestamp_us,
             in_reply_to_ts_us: a.in_reply_to_ts_us,
             sender: a.sender,
+            active: a.active,
         })
-    }
-
-    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
-        self.inner.get_action_chunk(&chunk_name).map(|c| actionchunk_from_core(&c))
     }
 
     pub fn get_state(&self) -> Option<State> {
@@ -1116,6 +1207,22 @@ impl Portal {
 
     pub fn metrics(&self) -> PortalMetrics {
         metrics_from_core(self.inner.metrics())
+    }
+
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        let payload = keypoint_payload(&payload_json)?;
+        Ok(self.inner.send_keypoint(&kind, payload, timestamp_us).await?)
+    }
+
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
     }
 
     pub fn reset_metrics(&self) {
@@ -1153,10 +1260,6 @@ impl Portal {
             .collect()
     }
 
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.action_chunks.clone()
-    }
-
     // --- Multi-controller ---
 
     /// Own LiveKit identity once connected. `None` before `connect()`.
@@ -1180,6 +1283,10 @@ impl Portal {
     /// Currently-connected operator identities (excluding self), sorted.
     pub fn operators(&self) -> Vec<String> {
         self.inner.operators()
+    }
+
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
     }
 
     /// Robot's identity if discovered, else `None`. Operator-side helper.
@@ -1270,6 +1377,8 @@ impl RobotConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -1280,6 +1389,8 @@ impl RobotConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 
@@ -1289,10 +1400,6 @@ impl RobotConfig {
 
     pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
         self.inner.add_action_typed(schema);
-    }
-
-    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
-        self.inner.add_action_chunk(name, horizon, fields);
     }
 
     pub fn set_fps(&self, fps: u32) {
@@ -1315,8 +1422,17 @@ impl RobotConfig {
         self.inner.set_action_reliable(reliable);
     }
 
-    pub fn set_ping_ms(&self, ms: u64) {
-        self.inner.set_ping_ms(ms);
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.set_time_sync_source(source);
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.time_sync_source()
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -1353,8 +1469,8 @@ impl RobotConfig {
 
     /// No-op on the Robot side — the robot always processes actions. Kept on
     /// the surface so `RobotConfig` and `OperatorConfig` stay symmetrical.
-    pub fn set_action_subscription(&self, enable: bool) {
-        self.inner.set_action_subscription(enable);
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.set_action_subscription(subscription);
     }
 
     pub fn video_tracks(&self) -> Vec<String> {
@@ -1377,10 +1493,6 @@ impl RobotConfig {
         self.inner.action_schema()
     }
 
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
-    }
-
     pub fn session(&self) -> String {
         self.inner.session()
     }
@@ -1401,10 +1513,6 @@ impl RobotConfig {
         self.inner.tolerance()
     }
 
-    pub fn ping_ms(&self) -> u64 {
-        self.inner.ping_ms()
-    }
-
     pub fn state_reliable(&self) -> bool {
         self.inner.state_reliable()
     }
@@ -1420,7 +1528,7 @@ impl RobotConfig {
 
     /// Always reports what was set, but the robot ignores the flag — it
     /// always processes actions. Kept for surface symmetry.
-    pub fn action_subscription(&self) -> bool {
+    pub fn action_subscription(&self) -> ActionSubscription {
         self.inner.action_subscription()
     }
 
@@ -1464,6 +1572,8 @@ impl OperatorConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -1474,6 +1584,8 @@ impl OperatorConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 
@@ -1483,10 +1595,6 @@ impl OperatorConfig {
 
     pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
         self.inner.add_action_typed(schema);
-    }
-
-    pub fn add_action_chunk(&self, name: String, horizon: u32, fields: Vec<FieldSpec>) {
-        self.inner.add_action_chunk(name, horizon, fields);
     }
 
     pub fn set_fps(&self, fps: u32) {
@@ -1509,8 +1617,25 @@ impl OperatorConfig {
         self.inner.set_action_reliable(reliable);
     }
 
-    pub fn set_ping_ms(&self, ms: u64) {
-        self.inner.set_ping_ms(ms);
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.set_time_sync_source(source);
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.time_sync_source()
+    }
+
+    pub fn set_observation_sync(&self, enable: bool) {
+        self.inner.set_observation_sync(enable);
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
     }
 
     pub fn set_e2ee_key(&self, key: Vec<u8>) {
@@ -1545,11 +1670,10 @@ impl OperatorConfig {
         self.inner.set_track_max_lag_ms(track, ms);
     }
 
-    /// Operator-side opt-in to receiving executed actions ("HITL recording").
-    /// Off by default. See `PortalConfig::set_action_subscription` for full
-    /// semantics.
-    pub fn set_action_subscription(&self, enable: bool) {
-        self.inner.set_action_subscription(enable);
+    /// Which received actions reach `on_action`. See
+    /// `PortalConfig::set_action_subscription`.
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.set_action_subscription(subscription);
     }
 
     pub fn video_tracks(&self) -> Vec<String> {
@@ -1572,10 +1696,6 @@ impl OperatorConfig {
         self.inner.action_schema()
     }
 
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
-    }
-
     pub fn session(&self) -> String {
         self.inner.session()
     }
@@ -1596,10 +1716,6 @@ impl OperatorConfig {
         self.inner.tolerance()
     }
 
-    pub fn ping_ms(&self) -> u64 {
-        self.inner.ping_ms()
-    }
-
     pub fn state_reliable(&self) -> bool {
         self.inner.state_reliable()
     }
@@ -1613,7 +1729,7 @@ impl OperatorConfig {
         self.inner.reuse_stale_frames()
     }
 
-    pub fn action_subscription(&self) -> bool {
+    pub fn action_subscription(&self) -> ActionSubscription {
         self.inner.action_subscription()
     }
 
@@ -1623,7 +1739,7 @@ impl OperatorConfig {
 }
 
 /// Robot-side Portal facade. Exposes publish-state/video, receive
-/// actions/chunks, and the shared control plane. Wrong-role methods
+/// actions, and the shared control plane. Wrong-role methods
 /// (`send_action`, observation getters) are absent by construction.
 #[derive(uniffi::Object)]
 pub struct Robot {
@@ -1672,10 +1788,6 @@ impl Robot {
         self.inner.get_action()
     }
 
-    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
-        self.inner.get_action_chunk(chunk_name)
-    }
-
     // -- introspection (shared) ----------------------------------------------
 
     pub fn state_fields(&self) -> Vec<String> {
@@ -1698,10 +1810,6 @@ impl Robot {
         self.inner.frame_video_tracks()
     }
 
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
-    }
-
     // -- multi-controller + rpc + metrics (shared) ---------------------------
 
     pub fn local_identity(&self) -> Option<String> {
@@ -1718,6 +1826,10 @@ impl Robot {
 
     pub fn operators(&self) -> Vec<String> {
         self.inner.operators()
+    }
+
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
     }
 
     pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
@@ -1742,15 +1854,30 @@ impl Robot {
         self.inner.metrics()
     }
 
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        self.inner.send_keypoint(kind, payload_json, timestamp_us).await
+    }
+
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+
     pub fn reset_metrics(&self) {
         self.inner.reset_metrics();
     }
 }
 
-/// Operator-side Portal facade. Exposes publish-action/chunk, receive
+/// Operator-side Portal facade. Exposes publish-action, receive
 /// observations/state/video, and the shared control plane. Wrong-role methods
 /// (`send_state`, `send_video_frame`) are absent by construction. The
-/// action-subscription getters (`get_action` / `get_action_chunk`) are
+/// action-subscription getter (`get_action`) is
 /// present but only yield values when `OperatorConfig::set_action_subscription`
 /// was enabled.
 #[derive(uniffi::Object)]
@@ -1784,24 +1911,18 @@ impl Operator {
         self.inner.send_action(values, timestamp_us, in_reply_to_ts_us)
     }
 
-    pub fn send_action_chunk(
-        &self,
-        chunk_name: String,
-        data: HashMap<String, ChunkColumn>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<()> {
-        self.inner.send_action_chunk(chunk_name, data, timestamp_us, in_reply_to_ts_us)
-    }
-
     // -- receive (operator-side) ---------------------------------------------
 
     pub fn get_state(&self) -> Option<State> {
         self.inner.get_state()
     }
 
-    pub fn get_observation(&self) -> Option<Observation> {
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
         self.inner.get_observation()
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
     }
 
     pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {
@@ -1809,15 +1930,9 @@ impl Operator {
     }
 
     /// Latest executed action, or `None`. Requires
-    /// `OperatorConfig::set_action_subscription(true)` for any value to land.
+    /// an `OperatorConfig::set_action_subscription` other than `NONE` for any value to land.
     pub fn get_action(&self) -> Option<Action> {
         self.inner.get_action()
-    }
-
-    /// Latest executed chunk for `chunk_name`, or `None`. Requires
-    /// `OperatorConfig::set_action_subscription(true)`.
-    pub fn get_action_chunk(&self, chunk_name: String) -> Option<ActionChunk> {
-        self.inner.get_action_chunk(chunk_name)
     }
 
     // -- introspection (shared) ----------------------------------------------
@@ -1842,10 +1957,6 @@ impl Operator {
         self.inner.frame_video_tracks()
     }
 
-    pub fn action_chunks(&self) -> Vec<ChunkSpec> {
-        self.inner.action_chunks()
-    }
-
     // -- multi-controller + rpc + metrics (shared) ---------------------------
 
     pub fn local_identity(&self) -> Option<String> {
@@ -1862,6 +1973,10 @@ impl Operator {
 
     pub fn operators(&self) -> Vec<String> {
         self.inner.operators()
+    }
+
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
     }
 
     pub fn robot_identity(&self) -> Option<String> {
@@ -1890,6 +2005,360 @@ impl Operator {
         self.inner.metrics()
     }
 
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        self.inner.send_keypoint(kind, payload_json, timestamp_us).await
+    }
+
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+
+    pub fn reset_metrics(&self) {
+        self.inner.reset_metrics();
+    }
+}
+
+/// Observer-side session config. Same declarative surface as
+/// `OperatorConfig`; the role is pinned to `Role::Observer` internally, and
+/// it defaults to `ActionSubscription::Active` with observation sync off. Identity is set on the
+/// LiveKit access token at mint time and read back via
+/// `Observer::local_identity` after `connect()` — there is no config-level
+/// identity field.
+#[derive(uniffi::Object)]
+pub struct ObserverConfig {
+    inner: Arc<PortalConfig>,
+}
+
+#[uniffi::export]
+impl ObserverConfig {
+    #[uniffi::constructor]
+    pub fn new(session: String) -> Arc<Self> {
+        Arc::new(Self { inner: PortalConfig::new(session, Role::Observer) })
+    }
+
+    /// Build an `ObserverConfig` from a YAML string. See
+    /// `PortalConfig::from_yaml_str` for the schema and semantics.
+    #[uniffi::constructor]
+    pub fn from_yaml_str(yaml: String, session: String) -> Result<Arc<Self>, ConfigFileError> {
+        Ok(Arc::new(Self { inner: PortalConfig::from_yaml_str(yaml, session, Role::Observer)? }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_video(
+        &self,
+        name: String,
+        codec: VideoCodec,
+        quality: u8,
+        max_bitrate_kbps: Option<u32>,
+        simulcast: Option<bool>,
+        screencast: Option<bool>,
+        stall_behavior: Option<StallBehavior>,
+        max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) {
+        self.inner.add_video(
+            name,
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            stall_behavior,
+            max_lag_ms,
+            width,
+            height,
+        );
+    }
+
+    pub fn add_state_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_state_typed(schema);
+    }
+
+    pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
+        self.inner.add_action_typed(schema);
+    }
+
+    pub fn set_fps(&self, fps: u32) {
+        self.inner.set_fps(fps);
+    }
+
+    pub fn set_slack(&self, ticks: u32) {
+        self.inner.set_slack(ticks);
+    }
+
+    pub fn set_tolerance(&self, ticks: f32) {
+        self.inner.set_tolerance(ticks);
+    }
+
+    pub fn set_state_reliable(&self, reliable: bool) {
+        self.inner.set_state_reliable(reliable);
+    }
+
+    pub fn set_action_reliable(&self, reliable: bool) {
+        self.inner.set_action_reliable(reliable);
+    }
+
+    /// Test hook: shifts this peer's local clock.
+    pub fn set_clock_skew_us(&self, skew_us: i64) {
+        self.inner.set_clock_skew_us(skew_us);
+    }
+
+    pub fn set_time_sync_source(&self, source: TimeSyncSource) {
+        self.inner.set_time_sync_source(source);
+    }
+
+    pub fn time_sync_source(&self) -> TimeSyncSource {
+        self.inner.time_sync_source()
+    }
+
+    pub fn set_observation_sync(&self, enable: bool) {
+        self.inner.set_observation_sync(enable);
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
+    }
+
+    pub fn set_e2ee_key(&self, key: Vec<u8>) {
+        self.inner.set_e2ee_key(key);
+    }
+
+    #[allow(deprecated)]
+    pub fn set_reuse_stale_frames(&self, enable: bool) {
+        self.inner.set_reuse_stale_frames(enable);
+    }
+
+    /// How a moment is resolved when a video track goes silent past its
+    /// `max_lag`. Applies to tracks without a per-track override.
+    pub fn set_stall_behavior(&self, behavior: StallBehavior) {
+        self.inner.set_stall_behavior(behavior);
+    }
+
+    /// How far the fastest-advancing stream may run past a moment before it
+    /// resolves without a silent track, in milliseconds of sender-clock time
+    /// (not wall-clock). Defaults to `slack / fps`; `0` resolves immediately.
+    pub fn set_max_lag_ms(&self, ms: u32) {
+        self.inner.set_max_lag_ms(ms);
+    }
+
+    /// Per-track override for `set_stall_behavior`.
+    pub fn set_track_stall_behavior(&self, track: String, behavior: StallBehavior) {
+        self.inner.set_track_stall_behavior(track, behavior);
+    }
+
+    /// Per-track override for `set_max_lag_ms`.
+    pub fn set_track_max_lag_ms(&self, track: String, ms: u32) {
+        self.inner.set_track_max_lag_ms(track, ms);
+    }
+
+    /// Which received actions reach `on_action`. See
+    /// `PortalConfig::set_action_subscription`.
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.set_action_subscription(subscription);
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    pub fn state_schema(&self) -> Vec<FieldSpec> {
+        self.inner.state_schema()
+    }
+
+    pub fn action_schema(&self) -> Vec<FieldSpec> {
+        self.inner.action_schema()
+    }
+
+    pub fn session(&self) -> String {
+        self.inner.session()
+    }
+
+    pub fn role(&self) -> Role {
+        self.inner.role()
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.inner.fps()
+    }
+
+    pub fn slack(&self) -> u32 {
+        self.inner.slack()
+    }
+
+    pub fn tolerance(&self) -> f32 {
+        self.inner.tolerance()
+    }
+
+    pub fn state_reliable(&self) -> bool {
+        self.inner.state_reliable()
+    }
+
+    pub fn action_reliable(&self) -> bool {
+        self.inner.action_reliable()
+    }
+
+    #[allow(deprecated)]
+    pub fn reuse_stale_frames(&self) -> bool {
+        self.inner.reuse_stale_frames()
+    }
+
+    pub fn action_subscription(&self) -> ActionSubscription {
+        self.inner.action_subscription()
+    }
+
+    pub fn has_e2ee_key(&self) -> bool {
+        self.inner.has_e2ee_key()
+    }
+}
+
+/// Observer-side Portal facade: receives everything in the room and can
+/// hand control between operators, but has no send methods for state or
+/// actions.
+#[derive(uniffi::Object)]
+pub struct Observer {
+    inner: Arc<Portal>,
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl Observer {
+    #[uniffi::constructor]
+    pub fn new(config: Arc<ObserverConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
+        Arc::new(Self { inner: Portal::new(config.inner.clone(), callbacks) })
+    }
+
+    pub async fn connect(&self, url: String, token: String) -> PortalResult<()> {
+        self.inner.connect(url, token).await
+    }
+
+    pub async fn disconnect(&self) -> PortalResult<()> {
+        self.inner.disconnect().await
+    }
+
+    // -- receive ---------------------------------------------
+
+    pub fn get_state(&self) -> Option<State> {
+        self.inner.get_state()
+    }
+
+    pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
+        self.inner.get_observation()
+    }
+
+    pub fn observation_sync(&self) -> bool {
+        self.inner.observation_sync()
+    }
+
+    pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {
+        self.inner.get_video_frame(track_name)
+    }
+
+    /// Latest executed action, or `None`. Requires
+    /// an `ObserverConfig::set_action_subscription` other than `NONE` for any value to land.
+    pub fn get_action(&self) -> Option<Action> {
+        self.inner.get_action()
+    }
+
+    // -- introspection (shared) ----------------------------------------------
+
+    pub fn state_fields(&self) -> Vec<String> {
+        self.inner.state_fields()
+    }
+
+    pub fn action_fields(&self) -> Vec<String> {
+        self.inner.action_fields()
+    }
+
+    pub fn video_tracks(&self) -> Vec<String> {
+        self.inner.video_tracks()
+    }
+
+    pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
+        self.inner.video_track_specs()
+    }
+
+    pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
+        self.inner.frame_video_tracks()
+    }
+
+    // -- multi-controller + rpc + metrics (shared) ---------------------------
+
+    pub fn local_identity(&self) -> Option<String> {
+        self.inner.local_identity()
+    }
+
+    pub fn active_operator(&self) -> Option<String> {
+        self.inner.active_operator()
+    }
+
+    pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
+        self.inner.set_active_operator(identity).await
+    }
+
+    pub fn operators(&self) -> Vec<String> {
+        self.inner.operators()
+    }
+
+    pub fn observers(&self) -> Vec<String> {
+        self.inner.observers()
+    }
+
+    pub fn robot_identity(&self) -> Option<String> {
+        self.inner.robot_identity()
+    }
+
+    pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
+        self.inner.register_rpc_method(method, handler);
+    }
+
+    pub fn unregister_rpc_method(&self, method: String) {
+        self.inner.unregister_rpc_method(method);
+    }
+
+    pub async fn perform_rpc(
+        &self,
+        destination: Option<String>,
+        method: String,
+        payload: String,
+        response_timeout_ms: Option<u64>,
+    ) -> PortalResult<String> {
+        self.inner.perform_rpc(destination, method, payload, response_timeout_ms).await
+    }
+
+    pub fn metrics(&self) -> PortalMetrics {
+        self.inner.metrics()
+    }
+
+    /// Send a keypoint to the room. Returns the observers that were present.
+    pub async fn send_keypoint(
+        &self,
+        kind: String,
+        payload_json: String,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<Vec<String>> {
+        self.inner.send_keypoint(kind, payload_json, timestamp_us).await
+    }
+
+    /// Now on the robot's clock, in microseconds.
+    pub fn now_us(&self) -> u64 {
+        self.inner.now_us()
+    }
+
     pub fn reset_metrics(&self) {
         self.inner.reset_metrics();
     }
@@ -1904,32 +2373,9 @@ fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
     VideoFrame {
         width: f.width,
         height: f.height,
-        data: f.data.to_vec(),
+        data: FrameBytes(f.data.clone()),
         timestamp_us: f.timestamp_us,
         source: f.source.into(),
-    }
-}
-
-fn chunkspec_from_core(c: &core::ChunkSpec) -> ChunkSpec {
-    ChunkSpec {
-        name: c.name.clone(),
-        horizon: c.horizon,
-        fields: c
-            .fields
-            .iter()
-            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
-            .collect(),
-    }
-}
-
-fn actionchunk_from_core(c: &core::ActionChunk) -> ActionChunk {
-    ActionChunk {
-        name: c.name.clone(),
-        horizon: c.horizon,
-        data: c.data.clone(),
-        timestamp_us: c.timestamp_us,
-        in_reply_to_ts_us: c.in_reply_to_ts_us,
-        sender: c.sender.clone(),
     }
 }
 
@@ -1999,12 +2445,9 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             states_received: m.transport.states_received,
             actions_sent: m.transport.actions_sent,
             actions_received: m.transport.actions_received,
-            action_chunks_sent: m.transport.action_chunks_sent,
-            action_chunks_received: m.transport.action_chunks_received,
             frame_jitter_us: m.transport.frame_jitter_us,
             state_jitter_us: m.transport.state_jitter_us,
             action_jitter_us: m.transport.action_jitter_us,
-            action_chunk_jitter_us: m.transport.action_chunk_jitter_us,
         },
         buffers: BufferMetrics {
             video_fill: m.buffers.video_fill.into_iter().map(|(k, v)| (k, v as u64)).collect(),
@@ -2018,10 +2461,48 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             pings_sent: m.rtt.pings_sent,
             pongs_received: m.rtt.pongs_received,
         },
+        time_sync: TimeSyncMetrics {
+            source: m.time_sync.source.into(),
+            synced: m.time_sync.synced,
+            offset_us: m.time_sync.offset_us,
+            uncertainty_us: m.time_sync.uncertainty_us,
+            measured_offset_us: m.time_sync.measured_offset_us,
+            resyncs: m.time_sync.resyncs,
+            samples_rejected: m.time_sync.samples_rejected,
+        },
         policy: PolicyMetrics {
             e2e_us_p50: m.policy.e2e_us_p50,
             e2e_us_p95: m.policy.e2e_us_p95,
             correlated_received: m.policy.correlated_received,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uniffi::{Lift, Lower};
+
+    #[test]
+    fn frame_bytes_cross_exactly_like_vec_u8() {
+        let pixels: Vec<u8> = (0..=255).cycle().take(3 * 64 * 48).collect();
+        let mut ours = Vec::new();
+        <FrameBytes as Lower<UniFfiTag>>::write(FrameBytes(pixels.clone().into()), &mut ours);
+        let mut reference = Vec::new();
+        <Vec<u8> as Lower<UniFfiTag>>::write(pixels.clone(), &mut reference);
+        assert_eq!(ours, reference);
+
+        let mut rest = ours.as_slice();
+        let back = <FrameBytes as Lift<UniFfiTag>>::try_read(&mut rest).unwrap();
+        assert_eq!(back.0.as_ref(), pixels.as_slice());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn truncated_frame_bytes_are_rejected() {
+        let mut buf = Vec::new();
+        <Vec<u8> as Lower<UniFfiTag>>::write(vec![1, 2, 3, 4], &mut buf);
+        buf.pop();
+        assert!(<FrameBytes as Lift<UniFfiTag>>::try_read(&mut buf.as_slice()).is_err());
     }
 }

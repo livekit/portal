@@ -81,33 +81,6 @@ Each field declares a dtype that fixes its width on the wire.
 Values you pass to `send_state` and `send_action` stay ordinary Python values.
 Conversion happens at the wire boundary.
 
-### Declaring an action chunk
-
-A chunk is a named `[horizon, fields]` tensor for policies that emit several
-future timesteps per inference. Its fields are typed exactly like the state and
-action schemas, with the same `DType` values from the table above.
-
-```python
-JOINTS = [
-    ("joint1", DType.F32),
-    ("joint2", DType.F32),
-    ("gripper", DType.BOOL),
-]
-
-cfg.add_action_typed(JOINTS)
-cfg.add_action_chunk("act", horizon=16, fields=JOINTS)
-```
-
-Declaring the same field list for both is the common case and worth doing
-deliberately: a chunk timestep and a scalar action then describe the same
-robot, so you can fall back from chunked to per-tick control without a second
-schema.
-
-The chunk's name, horizon, **and** per-field dtypes all feed its fingerprint.
-Both peers must declare all three identically or the receiver drops the stream.
-Nothing about a chunk is untyped: see [Action chunks](#action-chunks) for the
-send and receive surface.
-
 > **Note.** Field order is part of the contract, not just the names. Reordering
 > two fields on one side changes the schema fingerprint and all traffic drops.
 > A [shared YAML file](reference/config-file.md) is the reliable way to keep
@@ -120,22 +93,22 @@ role-specific is a no-op on the wrong side.
 
 | Method | Default | What it does |
 |---|---|---|
-| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
-| `add_action_chunk(name, horizon, [(name, dtype), ...])` | none | Declare a fixed-horizon action batch. Fields are typed, same as the state and action schemas. |
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
 | `set_slack(int)` | 5 | Ticks of buffer headroom. |
 | `set_tolerance(float)` | 1.5 | Match window, in ticks. |
 | `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
 | `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
-| `set_ping_ms(int)` | 1000 | RTT probe cadence. `0` disables probing on this side. |
 | `set_stall_behavior(StallBehavior)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
 | `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
 | `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
+| `set_observation_sync(bool)` | `True` | Operator-only. Bundle state and frames into observations. Off skips the sync buffer entirely. |
+| `set_time_sync_source(TimeSyncSource)` | `PORTAL` | Where `now_us()` comes from: `PORTAL` syncs to the robot, `SYSTEM` trusts the host clock. |
 | `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_stall_behavior(FREEZE)` with `set_max_lag_ms(0)`. |
-| `set_action_subscription(bool)` | `False` | Operator-only. Receive executed actions. |
+| `set_action_subscription(str)` | `"none"` | Operator-only. Which received actions reach `on_action`: `"none"`, `"active"` or `"all"`. |
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
 
 `set_fps`, `set_slack`, and `set_tolerance` are covered in
@@ -152,14 +125,12 @@ config you loaded from YAML instead of building by hand:
 | `video_track_specs` | `list[VideoTrackSpec]` | Those same tracks with codec, quality, and encoder options. |
 | `frame_video_tracks` | `list[VideoTrackSpec]` | The byte-stream subset of `video_track_specs`. A filter, not a rival list. |
 | `state_schema` / `action_schema` | `list[FieldSpec]` | Declared schemas, in order. |
-| `action_chunks` | `list[ChunkSpec]` | Declared chunks. |
 | `fps` | `int` | `set_fps`. |
 | `slack` | `int` | `set_slack`. |
 | `tolerance` | `float` | `set_tolerance`. |
 | `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
-| `ping_ms` | `int` | `set_ping_ms`. |
 | `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. Deprecated. |
-| `action_subscription` | `bool` | `set_action_subscription`. |
+| `action_subscription` | `ActionSubscription` | `set_action_subscription`. |
 | `has_e2ee_key` | `bool` | Whether a key was set. The bytes are not readable back. |
 
 ```python
@@ -293,49 +264,12 @@ robot.send_state(values, timestamp_us=None)
 
 ```python
 op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
-op.send_action_chunk(name, data, timestamp_us=None, in_reply_to_ts_us=None)
 ```
 
-Chunks travel as byte streams rather than data packets, so a full horizon is
-not bounded by the 15 KB packet limit.
-
-### Action chunks
-
-`send_action_chunk` accepts two input shapes, and they differ in more than
-convenience.
-
-```python
-# Dict of per-field columns, each of length horizon. Dtype-checked per column.
-op.send_action_chunk("act", {
-    "joint1": np.array([...], dtype=np.float32),   # declared F32
-    "gripper": [True, False, ...],                 # declared BOOL
-})
-
-# One (horizon, n_fields) array in declared field order. Shape-checked only.
-op.send_action_chunk("act", policy_output)         # what most VLAs emit
-```
-
-**The dict form is dtype-checked**, by the same rules `send_action` applies to a
-scalar. A `BOOL` field wants `bool` or `numpy.bool_`, an integer field wants an
-integer type, a float field takes any real. A mismatch raises
-`DtypeMismatch` before the chunk is sent, so a float column against a `BOOL`
-gripper fails at your call site rather than arriving as a silently coerced
-`1.0`. numpy columns are checked once via the array's dtype, so the check does
-not scale with horizon.
-
-**The array form is not dtype-checked.** One uniform tensor spread across a
-mixed schema is exactly what that shape is for, and a `float32` array is a
-legitimate way to express a `BOOL` gripper column inside it. Values coerce to
-each field's declared dtype. Use the dict form when you want the check.
-
-Either way, out-of-range values saturate at the wire boundary and warn once per
-field, the same as a scalar action. `500` into an `I8` column arrives as `127`.
-
-Columns that aren't exactly `horizon` long are still accepted: short and
-missing columns zero-pad, long ones truncate, each warning once per field with
-[`chunk-length`](08-troubleshooting.md#chunk-length). Treat those zeros as real
-commands. A chunk is a whole unit, so an omitted column does **not** carry
-forward the way an omitted scalar action field does.
+`timestamp_us` defaults to `now_us()`, which is on the robot's clock (see
+[Time sync](#time-sync)). Pass your own to stamp a sample where it was taken,
+for example a camera's capture time. `in_reply_to_ts_us` is never touched:
+pass the robot's exact state or frame timestamp.
 
 ## Receiving data
 
@@ -357,11 +291,31 @@ latest-wins, so a slow reader sees the freshest value rather than a backlog.
 | Callback | Pull | Fires with |
 |---|---|---|
 | `robot.on_action(cb)` | `robot.get_action()` | `Action` |
-| `robot.on_action_chunk(name, cb)` | `robot.get_action_chunk(name)` | `ActionChunk` |
 
 `on_state` and `on_video_frame` are raw firehoses. They fire on arrival with no
 matching at all. Use them for a preview pane or a debug log. Use
 `on_observation` for anything that needs frames and state to agree.
+
+**Bundling is optional.** Only a peer that consumes bundles live needs it, in
+practice a policy. A teleoperator flies on the newest frame, and a recorder
+stores raw streams and aligns them offline. Turn it off on those:
+
+```python
+cfg.set_observation_sync(False)   # default: True
+```
+
+| Peer | Needs bundling? | Why |
+|---|---|---|
+| Policy | yes | It was trained on matched rows and has to be fed matched rows. |
+| Teleoperator | no | It flies on the newest frame and anchors actions with `in_reply_to_ts_us`. |
+| Recorder | no | It records raw streams, which are aligned offline. |
+
+Off means the sync buffer never runs. `on_observation` and `get_observation`
+raise `ObservationSyncDisabled`, `on_drop` never fires, and `metrics().sync`
+stays empty. `slack`, `tolerance`, `stall_behavior` and `max_lag_ms` only apply
+while it is on, and Portal warns once if they are set while it is off. It is a
+local preference, not part of the wire contract, so peers with and without it
+share a room.
 
 `on_drop` receives a **list** of state dicts, not a single state:
 
@@ -375,10 +329,9 @@ op.on_drop(on_drop)
 
 ### Typed values on receive
 
-`Action`, `State`, `Observation`, and `ActionChunk` are all typed by default.
-Each carries the declared-type view plus a lossless all-`f64` view, under names
-that match its shape: scalars use `.values` / `.raw_values`, and a chunk uses
-`.data` / `.raw_data` because its fields are columns rather than single values.
+`Action`, `State`, and `Observation` are all typed by default. Each carries the
+declared-type view in `.values` plus a lossless all-`f64` view in
+`.raw_values`.
 
 ```python
 def on_action(action):
@@ -390,41 +343,10 @@ def on_action(action):
 
 For `Observation`, the same pair is named `.state` / `.raw_state`.
 
-A chunk's `.data` gives one NumPy array per field, each of length `horizon` and
-already in the field's declared dtype, so a `float32` policy output does not
-come back widened:
-
-```python
-def on_chunk(chunk):
-    chunk.data["joint1"].dtype   # dtype('float32'), per the declaration
-    chunk.data["gripper"]        # array([True, False, ...]), a real bool array
-    chunk.data["joint1"][3]      # timestep 3 of that field
-    chunk.raw_data               # Dict[str, list[float]], every column widened
-```
-
-Reach for `.raw_data` when you want to skip the per-field NumPy reconstruction
-and write straight into your own buffer.
-
-The Rust core mirrors this for scalars: `Action`, `State`, and `Observation`
+The Rust core mirrors this: `Action`, `State`, and `Observation`
 carry `values: HashMap<String, TypedValue>` alongside `raw_values:
 HashMap<String, f64>`. Declare a dtype, send an ordinary value, receive the
 declared type.
-
-`ActionChunk` is the one deliberate exception. Its `data` is
-`HashMap<String, Vec<f64>>` with no `TypedValue` column equivalent, because an
-enum-of-vectors is friction for exactly the numeric code that consumes a chunk,
-and a Rust caller already holds the `ChunkSpec` it declared. The dtypes are not
-lost, they just live in the schema rather than in the payload. The Python
-binding re-casts against that schema on your behalf, which NumPy makes nearly
-free.
-
-On the send side that asymmetry reverses, and Rust gets the stronger guarantee.
-A Rust caller passes `ChunkColumn::typed(dtype, values)` to claim a column's
-dtype and have the core reject a disagreement with `DtypeMismatch`, or
-`ChunkColumn::untyped(values)` to waive the check and coerce. Python always
-sends unclaimed columns and runs the category check described under
-[Action chunks](#action-chunks), because a Python `int` is a legitimate `I8`
-*and* `I32` and an exact claim would be invented rather than observed.
 
 ## The active operator
 
@@ -455,6 +377,41 @@ portal.on_operator_left(lambda identity: ...)
 portal.on_active_operator_changed(lambda identity: ...)   # identity may be None
 ```
 
+## Time sync
+
+Every peer syncs to the robot's clock in the background, on the `portal_clock`
+topic. It is always on.
+
+```python
+portal.now_us()                      # now on the robot's clock; on the robot, its own
+portal.on_time_synced(lambda: ...)   # first sync, and after each resync
+
+m = portal.metrics().time_sync
+m.synced, m.offset_us, m.uncertainty_us
+```
+
+Before the first sync, `now_us()` is local time and `synced` is `False`.
+Anything you send in that window is stamped on your own clock, so a recorder or
+an orchestrator should wait for `on_time_synced` before it starts. At the first
+sync `now_us()` switches to the robot's clock in one step, which can go
+backwards once if this host's clock was ahead. From then on it never repeats and
+never goes backwards. It is the default
+timestamp for everything you send. Details are in
+[Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
+
+**Opting out.** A lab whose hosts are already synced, with PTP or
+GPS-disciplined clocks, can trust the system clock instead:
+
+```python
+cfg.set_time_sync_source(TimeSyncSource.SYSTEM)   # default: TimeSyncSource.PORTAL
+```
+
+`now_us()` is then the host's system time, still never repeating or going
+backwards, and `synced` is `True` from the start. Portal keeps running the
+exchange without applying it. A non-zero `measured_offset_us` shows a PTP
+setup that has drifted or failed, before it shows up as bad data. It is a
+per-peer choice, so `portal` and `system` peers share a room.
+
 ### Behavior worth knowing
 
 **It starts unset.** A robot with no active operator drops every action. Your
@@ -478,6 +435,38 @@ api.AccessToken(key, secret).with_attributes(
 fails without the grant. See
 [Troubleshooting](08-troubleshooting.md#connect-fails-with-a-metadata-error).
 
+## Keypoints
+
+Annotations as their own track. A keypoint is `{type, payload}`: `type` is any
+string and `payload` any JSON object. Portal delivers and records keypoints but
+never interprets them, so what they mean is up to whoever consumes them.
+
+```python
+present = await op.send_keypoint(
+    "recording", {"task_description": "pick the blue cube"},
+    timestamp_us=frame.timestamp_us,   # default: now_us()
+)
+if not present:
+    print("no observer recorded that")
+
+obs.on_keypoint(lambda kp: ...)   # kp.type, kp.payload, kp.timestamp_us, kp.sender
+```
+
+- **Any role can send, every role receives**, the sender included.
+- **`timestamp_us` is where the mark belongs.** A teleoperator passes the
+  timestamp of the frame on screen, so a boundary lands where the operator saw
+  it. Anything else gets `now_us()`, on the robot's clock.
+- **`send_keypoint` returns the observers that were present.** An empty list
+  tells the sender that no one recorded the mark.
+- `type` must be a `str` and `payload` a `dict`; anything else raises
+  `TypeError` before sending.
+- **A keypoint must fit in one data packet**: about 64 KB of JSON on a default
+  LiveKit server. Portal doesn't check the size itself, because the limit is
+  negotiated per connection. A larger keypoint raises `PortalError.Room` with
+  the server's message, for example `exceeds the negotiated maximum message
+  size (64000 bytes)`. Keep bulky data, such as images or long transcripts, out
+  of the payload and reference it instead.
+
 ## Multi-operator patterns
 
 Because operators are just room participants, several useful setups fall out
@@ -487,8 +476,8 @@ without any extra API.
 |---|---|---|
 | **Single operator** | robot, 1 operator | Operator claims control at startup. |
 | **Human in the loop** | robot, policy, human | Either side calls `set_active_operator`. Executed actions stay continuous across the cutover. |
-| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription(True)` and logs every executed action with `action.sender`. |
-| **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. Both streams get recorded for offline comparison. |
+| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription("active")` and logs every executed action with `action.sender`. |
+| **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. A recorder with `set_action_subscription("all")` gets both streams, with `action.active` telling them apart. |
 | **Supervisor** | robot, N operators, supervisor UI | Supervisor never claims control. It only calls `set_active_operator` to route. |
 
 Working versions of the last three live in the integration tests:
@@ -499,32 +488,44 @@ Working versions of the last three live in the integration tests:
 
 By default an operator only sends actions. It never sees what the robot
 actually executed. Recorders, shadow policies, and monitoring UIs need that
-view. One flag turns it on.
+view. `set_action_subscription` decides which actions reach `on_action`.
 
 ```python
 cfg = OperatorConfig("session-1")
 cfg.add_action_typed([("joint1", DType.F32)])   # needed to deserialize
-cfg.set_action_subscription(True)
+cfg.set_action_subscription("active")           # "none" | "active" | "all"
 
 op = Operator(cfg)
 op.on_action(lambda action: log.append(action))
 ```
 
-With it on, the operator runs the same gate the robot runs. `on_action` and
-`on_action_chunk` fire only for the active operator's output. `get_action()`
-and `get_action_chunk(name)` mirror the latest gate-passed value.
+| Value | What reaches `on_action` |
+|---|---|
+| `none` (default) | nothing |
+| `active` | only the active operator's actions, the same gate the robot runs |
+| `all` | every operator's actions, including the ones the gate dropped |
 
-It is off by default because most operators are pure controllers that want
-neither the bandwidth nor the callback traffic.
+Every action carries `sender` and `active`, both stamped at gate time.
+`active=False` marks a shadow action the robot ignored. With `all` you can
+record a candidate policy next to the one actually driving and compare them
+offline. It means the action passed the gate, not that the robot carried it
+out.
+
+Actions are broadcast to the whole room either way, so this is a local filter
+and `all` costs nothing extra on the wire. `none` is the default because most
+operators are pure controllers that don't want the callback traffic.
+`get_action()` mirrors the latest delivered action. v0.2's `True`/`False`
+raise a `TypeError`: they are now `"active"`/`"none"`.
 
 **Your own actions echo back.** LiveKit does not fan a publisher's own data
-packets back to it, so an active operator with subscription on would otherwise
-miss its own output. Portal fires the local callback after `send_action` when
-`local_identity == active_operator`. An **inactive** subscriber gets no echo,
-which matches what the robot does with those packets.
+packets back to it, so a subscribed operator would otherwise miss its own
+output. Portal fires the local callback after `send_action` whenever the
+subscription would have delivered that action from anyone else: with `active`
+only while you are the active operator, with `all` always, tagged with
+`active` accordingly.
 
 **Label rows with `action.sender`, not `active_operator()`.** Every `Action`
-and `ActionChunk` carries a `sender` stamped at gate time. Reading
+carries a `sender` stamped at gate time. Reading
 `active_operator()` inside the callback can race a handoff that already moved
 the pointer.
 
@@ -534,6 +535,7 @@ def on_action(action):
         "ts_us": action.timestamp_us,
         "in_reply_to": action.in_reply_to_ts_us,
         "sender": action.sender,
+        "active": action.active,
         "values": action.values,
     })
 ```
@@ -560,6 +562,37 @@ confirm before relying on either.
 
 `max_bitrate_kbps` is a ceiling, not a target. libwebrtc still picks a lower
 operating bitrate from the content. Omit it for the 10 Mbps default.
+
+#### Frame size
+
+Pass `width` and `height` when you send frames larger than 640x480 on a WebRTC
+track.
+
+```python
+cfg.add_video("front", width=1280, height=720)
+```
+
+libwebrtc sets up the encoder when the track is published, before the first
+frame exists, so Portal has to tell it the frame size up front. Without
+`width` and `height` it sets the encoder up for 640x480. Larger frames still
+go out, but with added latency: tens of milliseconds with H.264 at 720p and
+above.
+
+Give both or neither, and both must be even. They are keyword-only and apply
+to the WebRTC codecs only.
+
+#### Playout delay
+
+Portal receives WebRTC video with zero playout delay: libwebrtc hands each frame
+over as soon as it is decoded, instead of holding it back to smooth playback.
+That keeps VP8, VP9 and AV1 at 12 to 16 ms on a local server, where a room with
+default settings holds them at 45 to 146 ms at 1080p.
+
+The setting covers the whole process and has to be in place before its first
+LiveKit connection. Portal sets it on connect. If something else in the process
+connected to LiveKit first, Portal logs
+[`playout-delay`](08-troubleshooting.md#playout-delay) and receives with the
+default delay.
 
 #### Simulcast and screencast
 
@@ -634,6 +667,7 @@ m = portal.metrics()
 m.sync.observations_emitted
 m.sync.states_dropped
 m.rtt.rtt_us_p95
+m.time_sync.offset_us
 m.policy.e2e_us_p95
 
 portal.reset_metrics()
@@ -649,10 +683,7 @@ These are the behaviors that surprise people. Each one is deliberate.
 field, or a `bool` into an `F32` field, raises
 `PortalError.DtypeMismatch` before any packet is built. There is no silent
 cast. `int` is accepted for float dtypes. `bool` is rejected everywhere except
-`BOOL`. This applies to `send_action_chunk`'s dict form column by column, with
-one carve-out: its `(horizon, n_fields)` array form is shape-checked only, since
-a uniform tensor across a mixed schema is the reason that shape exists. See
-[Action chunks](#action-chunks).
+`BOOL`.
 
 **Schema mismatch is detected but never raises.** Every packet carries a `u32`
 fingerprint over the ordered field names and dtypes. A peer whose schema
@@ -686,11 +717,11 @@ sender's side. Check `op.active_operator()`.
 | `NoPeer` | `perform_rpc` with no peer discovered and no `destination`. |
 | `AmbiguousPeer` | Several remote participants and no peer identified. Pass `destination`. |
 | `UnknownVideoTrack` | Track name was never declared with `add_video`. |
-| `UnknownChunk` | Chunk name was never declared with `add_action_chunk`. |
 | `WrongFrameSize` | Buffer length is not `width * height * 3`. |
 | `InvalidFrameDimensions` | Width or height is odd. |
 | `WrongRole` | `send_action` on a robot, or `send_state` on an operator. |
-| `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. Also raised per column by `send_action_chunk`'s dict form. |
+| `ObservationSyncDisabled` | `on_observation` or `get_observation` on a peer with `set_observation_sync(False)`. |
+| `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
 | `Deserialization` | A received payload could not be parsed. |
 | `Codec` | Frame encode or decode failed. |
 | `Rpc` | The remote handler raised. Carries the `RpcError`. |
@@ -707,14 +738,17 @@ sender's side. Check `op.active_operator()`.
 robot.send_video_frame(track, frame, width=None, height=None, timestamp_us=None)
 robot.send_state(values, timestamp_us=None)
 robot.on_action(cb)                          # active operator only
-robot.on_action_chunk(name, cb)
-robot.get_action() / robot.get_action_chunk(name)
+robot.get_action()
 
 # control plane
 robot.active_operator() / await robot.set_active_operator(identity)
 robot.operators() / robot.local_identity()
 robot.on_operator_joined(cb) / robot.on_operator_left(cb)
 robot.on_active_operator_changed(cb)
+
+# time sync, keypoints
+robot.now_us() / robot.on_time_synced(cb)
+await robot.send_keypoint(type, payload=None, timestamp_us=None) / robot.on_keypoint(cb)
 
 # rpc, metrics, lifecycle
 robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
@@ -728,7 +762,6 @@ await robot.connect(url, token) / await robot.disconnect() / robot.close()
 ```text
 # data
 op.send_action(values, timestamp_us=None, in_reply_to_ts_us=None)
-op.send_action_chunk(name, data, timestamp_us=None, in_reply_to_ts_us=None)
 op.on_observation(cb) / op.on_state(cb) / op.on_drop(cb)
 op.on_video_frame(track, cb)
 op.get_observation() / op.get_state() / op.get_video_frame(track)
@@ -740,12 +773,125 @@ op.operators() / op.robot_identity() / op.local_identity()
 op.on_operator_joined(cb) / op.on_operator_left(cb)
 op.on_active_operator_changed(cb)
 
+# time sync, keypoints
+op.now_us() / op.on_time_synced(cb)
+await op.send_keypoint(type, payload=None, timestamp_us=None) / op.on_keypoint(cb)
+
 # rpc, metrics, lifecycle
 op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)
 await op.perform_rpc(method, payload, destination=None, response_timeout_ms=None)
 op.metrics() / op.reset_metrics()
 await op.connect(url, token) / await op.disconnect() / op.close()
 ```
+
+**Observer**
+
+```text
+# data: receive only, raw
+obs.on_state(cb) / obs.on_video_frame(track, cb)
+obs.on_action(cb) / obs.get_action()         # default subscription: "active"
+obs.get_state() / obs.get_video_frame(track)
+obs.on_observation(cb) / obs.get_observation()   # only with set_observation_sync(True)
+obs.send_action(...) / obs.send_state(...)   # always raise PortalError.WrongRole
+
+# control plane
+obs.active_operator() / await obs.set_active_operator(identity)   # None takes control from everyone
+obs.operators() / obs.observers() / obs.robot_identity() / obs.local_identity()
+obs.on_operator_joined(cb) / obs.on_operator_left(cb)
+obs.on_active_operator_changed(cb)
+
+# recording
+obs.record_to(sink, max_queued_frames=64, metrics_interval_s=1.0) / obs.stop_recording()
+obs.metrics().observer          # recording, frames_written, frames_dropped, queued
+
+# keypoints, time sync, rpc, metrics, lifecycle: as on the operator
+await obs.send_keypoint(type, payload=None, timestamp_us=None) / obs.on_keypoint(cb)
+```
+
+`ObserverConfig` has the same declarative surface as `OperatorConfig` but
+defaults to `set_action_subscription("active")` and observation sync off. The
+robot accepts `set_active_operator` from operators and observers, and every
+role has `observers()`, listed apart from `operators()` so the latter only
+holds peers that can drive.
+
+### Recording
+
+An observer writes what it hears to a **sink**:
+
+```python
+from livekit.portal.recording import Sink, SessionInfo
+
+class JsonlSink:
+    def open(self, session: SessionInfo) -> None: ...   # session, schemas, tracks, time sync source
+    def write_state(self, state) -> None: ...
+    def write_frame(self, track, frame) -> None: ...
+    def write_frame_dropped(self, track, timestamp_us) -> None: ...   # optional: the recorder fell behind
+    def write_action(self, action) -> None: ...
+    def write_keypoint(self, keypoint) -> None: ...
+    def write_metrics(self, metrics) -> None: ...
+    def close(self) -> None: ...
+
+obs.record_to(JsonlSink(), max_queued_frames=64, metrics_interval_s=1.0)
+...
+obs.stop_recording()   # or disconnect(): writes what is queued, then close()
+```
+
+- **Portal calls the sink from its own writer thread, behind a queue**, so a slow
+  disk never stalls the receive path. Calls arrive in the order the observer
+  heard them, with `open` first and `close` last.
+- **Only video frames are dropped when the sink falls behind.** Once
+  `max_queued_frames` frames are waiting, new ones are dropped and counted in
+  `metrics().observer.frames_dropped`. A sink that defines the optional
+  `write_frame_dropped` gets each one's timestamp, so a reader can tell a gap
+  in the recording from a stalled camera. State, actions and keypoints are
+  never dropped.
+- `record_to` calls `open` right away and raises what it raises. A write that
+  raises is logged once per kind and skipped, so one bad record doesn't end the
+  recording.
+- Actions follow the observer's action subscription: `"active"` by default,
+  `"all"` to also record shadow actions tagged `active=False`.
+
+#### `RrdSink`
+
+The built-in sink writes one Rerun `.rrd` archive per recording. It ships as an
+extra so the core package does not depend on Rerun:
+
+```bash
+pip install 'livekit-portal[rerun]'
+```
+
+```python
+from livekit.portal.recording import RrdSink
+
+obs.record_to(RrdSink("data/sessions", jpeg_quality=95))   # 0 stores frames uncompressed
+# writes data/sessions/<session>-<UTC start>.rrd
+```
+
+Two timelines, both on the robot's clock:
+
+| Entity | `robot_time` | `action_time` |
+|---|---|---|
+| `observation/<field>` | state timestamp | — |
+| `observation/<track>` | frame timestamp (JPEG) | — |
+| `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
+| `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | — |
+| `recorder/frames_dropped/<track>` | timestamp of a frame the recorder dropped | — |
+| `metrics/*` | observer's `now_us()` | — |
+| `portal/schema` | static: field order and dtypes, tracks, time sync source | — |
+
+- **`robot_time` lines up an action with the frame it answered.** Scrub to any
+  instant and the frame, the state and the action taken in response share a row.
+- **`action_time` keeps every action.** Rerun keeps one value per entity per
+  timestamp, so two actions answering the same frame would overwrite each other
+  on `robot_time` alone.
+- **`portal/schema` records field order.** Rerun entities are independent, so
+  without it anything reading the file would have to guess joint order.
+- **`action/<sender>/active`** is 1 for actions the robot executed and 0 for
+  shadow actions, recorded with `set_action_subscription("all")`.
+
+Turning archives into datasets (LeRobot or anything else) is up to your own
+tooling. For other formats, such as MCAP or your own storage, write your own
+sink.
 
 ## Using `Portal` directly
 

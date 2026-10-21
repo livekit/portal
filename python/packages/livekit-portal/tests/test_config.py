@@ -16,9 +16,11 @@
 import pytest
 
 from livekit.portal import (
+    ActionSubscription,
     DEFAULT_MJPEG_QUALITY,
     DType,
     FieldSpec,
+    ObserverConfig,
     OperatorConfig,
     Portal,
     PortalConfig,
@@ -118,6 +120,42 @@ def test_video_track_specs_read_back_webrtc_options():
     assert spec.screencast is False
 
 
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: PortalConfig("demo", Role.ROBOT),
+        lambda: RobotConfig("demo"),
+        lambda: OperatorConfig("demo"),
+        lambda: ObserverConfig("demo"),
+    ],
+)
+def test_video_track_specs_read_back_frame_size(make):
+    cfg = make()
+    cfg.add_video("hd", width=1280, height=720)
+    cfg.add_video("default")
+    hd, default = cfg.video_track_specs
+    assert (hd.width, hd.height) == (1280, 720)
+    assert (default.width, default.height) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "make", [lambda: PortalConfig("demo", Role.ROBOT), lambda: RobotConfig("demo")]
+)
+def test_width_and_height_must_be_given_together(make):
+    cfg = make()
+    with pytest.raises(ValueError):
+        cfg.add_video("cam", width=1280)
+    with pytest.raises(ValueError):
+        cfg.add_video("cam", height=720)
+    assert cfg.video_tracks == []
+
+
+def test_odd_frame_size_is_rejected():
+    cfg = PortalConfig("demo", Role.ROBOT)
+    with pytest.raises(Exception):
+        cfg.add_video("cam", width=1279, height=720)
+
+
 def test_mixed_dtype_schema_is_accepted():
     cfg = PortalConfig("demo", Role.ROBOT)
     cfg.add_action_typed(
@@ -152,31 +190,28 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.fps == 30
     assert cfg.slack == 5
     assert cfg.tolerance == pytest.approx(1.5)
-    assert cfg.ping_ms == 1000
     assert cfg.state_reliable is True
     assert cfg.action_reliable is True
     assert cfg.reuse_stale_frames is False
-    assert cfg.action_subscription is False
+    assert cfg.action_subscription == ActionSubscription.NONE
     assert cfg.has_e2ee_key is False
 
     cfg.set_fps(60)
     cfg.set_slack(8)
     cfg.set_tolerance(0.5)
-    cfg.set_ping_ms(0)
     cfg.set_state_reliable(False)
     cfg.set_action_reliable(False)
     cfg.set_reuse_stale_frames(True)
-    cfg.set_action_subscription(True)
+    cfg.set_action_subscription("all")
     cfg.set_e2ee_key(b"0" * 32)
 
     assert cfg.fps == 60
     assert cfg.slack == 8
     assert cfg.tolerance == pytest.approx(0.5)
-    assert cfg.ping_ms == 0
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
     assert cfg.reuse_stale_frames is True
-    assert cfg.action_subscription is True
+    assert cfg.action_subscription == ActionSubscription.ALL
     # Presence only — the key bytes are deliberately not readable back.
     assert cfg.has_e2ee_key is True
 
@@ -274,6 +309,7 @@ def test_action_wrapper_values_are_typed_by_default():
         timestamp_us=100,
         in_reply_to_ts_us=None,
         sender="",
+        active=True,
     )
     action = _wrap_action(ffi_action, portal._action_schema)
     assert action.timestamp_us == 100
@@ -340,6 +376,7 @@ def test_wrapper_drops_fields_missing_from_payload():
         timestamp_us=0,
         in_reply_to_ts_us=None,
         sender="",
+        active=True,
     )
     action = _wrap_action(ffi_action, portal._action_schema)
     # Partial payload → wrapper returns only the fields that were sent.
@@ -445,221 +482,6 @@ def test_send_rejects_numpy_bool_for_int_field():
         portal.send_action({"mode": np.bool_(True)})
 
 
-# --- Action chunk schema + wrappers ----------------------------------------
-
-
-def test_add_action_chunk_records_spec():
-    cfg = PortalConfig("vla", Role.OPERATOR)
-    cfg.add_action_chunk(
-        "act",
-        horizon=10,
-        fields=[("j1", DType.F32), ("j2", DType.F32)],
-    )
-    chunks = cfg.action_chunks
-    assert len(chunks) == 1
-    assert chunks[0].name == "act"
-    assert chunks[0].horizon == 10
-    assert [f.name for f in chunks[0].fields] == ["j1", "j2"]
-
-
-def test_action_chunk_wrapper_reconstructs_numpy_arrays():
-    np = pytest.importorskip("numpy")
-    from livekit.portal import _wrap_action_chunk
-    from livekit.portal import livekit_portal_ffi as _ffi
-
-    cfg = PortalConfig("vla", Role.OPERATOR)
-    cfg.add_action_chunk(
-        "act",
-        horizon=4,
-        fields=[("j1", DType.F32), ("gripper", DType.BOOL)],
-    )
-    portal = Portal(cfg)
-    ffi_chunk = _ffi.ActionChunk(
-        name="act",
-        horizon=4,
-        data={"j1": [0.0, 0.5, 1.0, 1.5], "gripper": [0.0, 1.0, 1.0, 0.0]},
-        timestamp_us=42,
-        in_reply_to_ts_us=10,
-        sender="",
-    )
-    chunk = _wrap_action_chunk(ffi_chunk, portal._chunk_schemas)
-    assert chunk.name == "act"
-    assert chunk.horizon == 4
-    assert chunk.timestamp_us == 42
-    assert chunk.in_reply_to_ts_us == 10
-    # Reconstructed columns are numpy arrays of declared dtype.
-    assert chunk.data["j1"].dtype == np.float32
-    assert chunk.data["gripper"].dtype == np.bool_
-    # Raw view stays as f64 lists.
-    assert chunk.raw_data["j1"] == [0.0, 0.5, 1.0, 1.5]
-
-
-def test_send_action_chunk_accepts_dict_columns():
-    np = pytest.importorskip("numpy")
-    cfg = PortalConfig("vla", Role.OPERATOR)
-    cfg.add_action_chunk(
-        "act",
-        horizon=3,
-        fields=[("j1", DType.F32)],
-    )
-    portal = Portal(cfg)
-    # Dict-of-arrays input — accepted, even though no peer is connected
-    # (PortalError on send is fine; we only care that the validator path
-    # didn't reject the shape).
-    try:
-        portal.send_action_chunk("act", {"j1": np.array([0.1, 0.2, 0.3])})
-    except PortalError.UnknownChunk:
-        pytest.fail("declared chunk name treated as unknown")
-    except PortalError:
-        # send may fail with a different PortalError because there's no
-        # connected peer — that's the expected path.
-        pass
-
-
-def test_send_action_chunk_accepts_2d_ndarray():
-    np = pytest.importorskip("numpy")
-    cfg = PortalConfig("vla", Role.OPERATOR)
-    cfg.add_action_chunk(
-        "act",
-        horizon=3,
-        fields=[("j1", DType.F32), ("j2", DType.F32)],
-    )
-    portal = Portal(cfg)
-    arr = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]], dtype=np.float32)
-    try:
-        portal.send_action_chunk("act", arr)
-    except PortalError.UnknownChunk:
-        pytest.fail("declared chunk name treated as unknown")
-    except PortalError:
-        pass
-
-
-# --- Chunk send-side dtype enforcement --------------------------------------
-#
-# Parity with the scalar checks above. The dict form is validated per column
-# with the same category rules `_validate_send_values` applies to a scalar.
-# The 2D ndarray form is deliberately exempt: one uniform policy tensor
-# fanned across a mixed schema is the case that shape exists for.
-
-
-def _chunk_portal():
-    cfg = PortalConfig("vla", Role.OPERATOR)
-    cfg.add_action_chunk(
-        "act",
-        horizon=2,
-        fields=[("j1", DType.F32), ("gripper", DType.BOOL), ("mode", DType.I8)],
-    )
-    return Portal(cfg)
-
-
-def test_send_chunk_rejects_float_column_for_bool_field():
-    portal = _chunk_portal()
-    with pytest.raises(PortalError.DtypeMismatch) as info:
-        portal.send_action_chunk("act", {"gripper": [0.0, 1.0]})
-    msg = str(info.value)
-    assert "gripper" in msg
-    assert "BOOL" in msg
-
-
-def test_send_chunk_rejects_float_column_for_int_field():
-    portal = _chunk_portal()
-    with pytest.raises(PortalError.DtypeMismatch):
-        portal.send_action_chunk("act", {"mode": [3.5, 1.0]})
-
-
-def test_send_chunk_rejects_bool_column_for_int_field():
-    portal = _chunk_portal()
-    with pytest.raises(PortalError.DtypeMismatch):
-        portal.send_action_chunk("act", {"mode": [True, False]})
-
-
-def test_send_chunk_rejects_float_ndarray_column_for_bool_field():
-    # The per-column ndarray check reads `column.dtype` once rather than
-    # walking `horizon` elements, so cover it separately from the list path.
-    np = pytest.importorskip("numpy")
-    portal = _chunk_portal()
-    with pytest.raises(PortalError.DtypeMismatch) as info:
-        portal.send_action_chunk(
-            "act", {"gripper": np.array([0.0, 1.0], dtype=np.float32)}
-        )
-    assert "gripper" in str(info.value)
-
-
-def test_send_chunk_accepts_correctly_typed_columns():
-    np = pytest.importorskip("numpy")
-    portal = _chunk_portal()
-    try:
-        portal.send_action_chunk(
-            "act",
-            {
-                "j1": np.array([0.5, 0.25], dtype=np.float32),
-                "gripper": np.array([True, False]),
-                "mode": [3, -1],
-            },
-        )
-    except PortalError.DtypeMismatch as e:
-        pytest.fail(f"correctly typed chunk columns rejected: {e}")
-    except PortalError:
-        # No connected peer — validation passed, which is what we test.
-        pass
-
-
-def test_send_chunk_accepts_int_column_for_float_field():
-    # Same numeric promotion the scalar path allows.
-    portal = _chunk_portal()
-    try:
-        portal.send_action_chunk("act", {"j1": [1, 2]})
-    except PortalError.DtypeMismatch:
-        pytest.fail("int column should coerce into a float-declared field")
-    except PortalError:
-        pass
-
-
-def test_send_chunk_unknown_column_is_not_blocked_by_validator():
-    portal = _chunk_portal()
-    try:
-        portal.send_action_chunk("act", {"j1": [0.5, 0.25], "nope": [1.0, 2.0]})
-    except PortalError.DtypeMismatch:
-        pytest.fail("unknown chunk columns must not trigger dtype validation")
-    except PortalError:
-        pass
-
-
-def test_send_chunk_ndarray_form_waives_the_dtype_check():
-    # A uniform f32 tensor against a schema with a BOOL and an I8 field.
-    # Per-field checking would reject this, and it is the documented shape
-    # for VLA output, so it has to pass.
-    np = pytest.importorskip("numpy")
-    portal = _chunk_portal()
-    arr = np.array([[0.5, 1.0, 3.0], [0.25, 0.0, -1.0]], dtype=np.float32)
-    try:
-        portal.send_action_chunk("act", arr)
-    except PortalError.DtypeMismatch as e:
-        pytest.fail(f"uniform ndarray form must not be dtype-checked: {e}")
-    except PortalError:
-        pass
-
-
-def test_send_chunk_short_column_still_accepted():
-    # Length is a warn-and-pad in the core, not a rejection. Only the dtype
-    # check raises.
-    portal = _chunk_portal()
-    try:
-        portal.send_action_chunk("act", {"j1": [0.5]})
-    except PortalError.DtypeMismatch:
-        pytest.fail("a short column must not raise DtypeMismatch")
-    except PortalError:
-        pass
-
-
-def test_send_action_chunk_unknown_name_raises():
-    cfg = PortalConfig("vla", Role.OPERATOR)
-    cfg.add_action_chunk("act", horizon=3, fields=[("j1", DType.F32)])
-    portal = Portal(cfg)
-    with pytest.raises(PortalError.UnknownChunk):
-        portal.send_action_chunk("never_declared", {"j1": [0.0, 0.1, 0.2]})
-
-
 def test_send_action_passes_in_reply_to_ts_us_through_validator():
     cfg = PortalConfig("act", Role.OPERATOR)
     cfg.add_action_typed([("j1", DType.F32)])
@@ -700,3 +522,20 @@ def test_reuse_stale_frames_still_works():
     cfg = RobotConfig("demo")
     cfg.set_reuse_stale_frames(True)
     assert cfg.reuse_stale_frames is True
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_action_subscription_rejects_bool(value):
+    cfg = OperatorConfig("demo")
+    with pytest.raises(TypeError, match="'none', 'active', 'all'"):
+        cfg.set_action_subscription(value)
+
+
+def test_action_subscription_accepts_enum_and_name():
+    cfg = OperatorConfig("demo")
+    cfg.set_action_subscription(ActionSubscription.ACTIVE)
+    assert cfg.action_subscription == ActionSubscription.ACTIVE
+    cfg.set_action_subscription("ALL")
+    assert cfg.action_subscription == ActionSubscription.ALL
+    with pytest.raises(ValueError):
+        cfg.set_action_subscription("sometimes")

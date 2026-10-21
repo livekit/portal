@@ -27,6 +27,7 @@ import textwrap
 import pytest
 
 from livekit.portal import (
+    ActionSubscription,
     ConfigFileError,
     DType,
     FieldSpec,
@@ -48,10 +49,9 @@ YAML_FULL = textwrap.dedent(
     state_reliable: false
     action_reliable: false
     reuse_stale_frames: true
-    ping_ms: 500
-    action_subscription: true
+    action_subscription: all
     videos:
-      - { name: front, codec: h264 }
+      - { name: front, codec: h264, width: 1280, height: 720 }
       - { name: wrist, codec: mjpeg, quality: 80 }
       - { name: depth, codec: png }
     state:
@@ -59,11 +59,6 @@ YAML_FULL = textwrap.dedent(
       - { name: gripper, dtype: bool }
     action:
       - { name: joint_pos, dtype: f32 }
-    action_chunks:
-      - name: vla
-        horizon: 16
-        fields:
-          - { name: joint_pos, dtype: f32 }
     """
 )
 
@@ -86,10 +81,6 @@ def test_from_yaml_str_mirrors_full_schema():
     ]
     assert cfg.action_schema == [FieldSpec(name="joint_pos", dtype=DType.F32)]
 
-    assert len(cfg.action_chunks) == 1
-    assert cfg.action_chunks[0].name == "vla"
-    assert cfg.action_chunks[0].horizon == 16
-
 
 def test_yaml_and_programmatic_builds_agree():
     # The two ways to declare the same tracks now produce identical specs.
@@ -100,7 +91,7 @@ def test_yaml_and_programmatic_builds_agree():
     from_yaml = PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT)
 
     built = PortalConfig("demo", Role.ROBOT)
-    built.add_video("front")
+    built.add_video("front", width=1280, height=720)
     built.add_video("wrist", VideoCodec.MJPEG, 80)
     built.add_video("depth", VideoCodec.PNG)
 
@@ -116,7 +107,6 @@ def test_from_yaml_str_works_with_minimal_doc():
     assert cfg.frame_video_tracks == []
     assert cfg.state_schema == []
     assert cfg.action_schema == []
-    assert cfg.action_chunks == []
 
 
 def test_from_yaml_str_role_is_supplied_at_load_time():
@@ -132,6 +122,12 @@ def test_from_yaml_str_role_is_supplied_at_load_time():
 def test_from_yaml_str_unknown_version_rejected():
     with pytest.raises(ConfigFileError):
         PortalConfig.from_yaml_str("version: 99\n", "demo", Role.ROBOT)
+
+
+def test_from_yaml_str_ping_ms_rejected():
+    # Time sync replaced the RTT ping in v0.3 and runs at fixed rates.
+    with pytest.raises(ConfigFileError):
+        PortalConfig.from_yaml_str("version: 1\nping_ms: 500\n", "demo", Role.ROBOT)
 
 
 def test_from_yaml_str_invalid_dtype_rejected():
@@ -156,6 +152,33 @@ def test_from_yaml_str_duplicate_video_rejected():
         PortalConfig.from_yaml_str(yaml, "demo", Role.ROBOT)
 
 
+@pytest.mark.parametrize(
+    "load",
+    [
+        lambda y: PortalConfig.from_yaml_str(y, "demo", Role.ROBOT),
+        lambda y: RobotConfig.from_yaml_str(y, "demo"),
+        lambda y: OperatorConfig.from_yaml_str(y, "demo"),
+    ],
+    ids=["portal", "robot", "operator"],
+)
+def test_from_yaml_str_removed_chunks_key_rejected(load):
+    yaml = textwrap.dedent(
+        """
+        version: 1
+        action:
+          - { name: joint_pos, dtype: f32 }
+        action_chunks:
+          - name: vla
+            horizon: 16
+            fields:
+              - { name: joint_pos, dtype: f32 }
+        """
+    )
+    with pytest.raises(ConfigFileError.ActionChunksRemoved) as e:
+        load(yaml)
+    assert "removed in v0.3" in str(e.value)
+
+
 def test_from_yaml_file_round_trip():
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False
@@ -166,7 +189,6 @@ def test_from_yaml_file_round_trip():
         cfg = PortalConfig.from_yaml_file(path, "demo", Role.ROBOT)
         assert cfg.video_tracks == ["front", "wrist", "depth"]
         assert len(cfg.frame_video_tracks) == 2
-        assert len(cfg.action_chunks) == 1
     finally:
         os.unlink(path)
 
@@ -174,14 +196,13 @@ def test_from_yaml_file_round_trip():
 def test_yaml_built_config_drives_portal():
     # The whole point: Portal construction works seamlessly with a
     # YAML-built PortalConfig. Verifies the Python-side mirror is
-    # populated correctly (Portal reads chunk specs and field names
-    # from the config).
+    # populated correctly (Portal reads schemas and field names from the
+    # config).
     cfg = PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT)
     portal = Portal(cfg)
     assert portal._state_fields == ["joint_pos", "gripper"]
     assert portal._action_fields == ["joint_pos"]
     assert portal._video_tracks == ["front", "wrist", "depth"]
-    assert "vla" in portal._chunk_schemas
 
 
 def test_robot_config_from_yaml_str():
@@ -193,7 +214,7 @@ def test_robot_config_from_yaml_str():
 def test_operator_config_from_yaml_str():
     cfg = OperatorConfig.from_yaml_str(YAML_FULL, "demo")
     assert cfg.role == Role.OPERATOR
-    assert len(cfg.action_chunks) == 1
+    assert [f.name for f in cfg.action_schema] == ["joint_pos"]
 
 
 @pytest.mark.parametrize(
@@ -214,8 +235,7 @@ def test_yaml_sync_knobs_are_readable(cfg):
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
     assert cfg.reuse_stale_frames is True
-    assert cfg.ping_ms == 500
-    assert cfg.action_subscription is True
+    assert cfg.action_subscription == ActionSubscription.ALL
     assert cfg.has_e2ee_key is False
 
 
@@ -269,3 +289,23 @@ def test_unknown_stall_policy_is_rejected():
             Role.ROBOT,
         )
     assert "nope" in str(e.value)
+
+
+@pytest.mark.parametrize("value, expected", [("portal", "PORTAL"), ("system", "SYSTEM")])
+def test_time_sync_source_from_yaml(value, expected):
+    from livekit.portal import TimeSyncSource
+
+    cfg = PortalConfig.from_yaml_str(
+        f"version: 1\ntime_sync_source: {value}\n", "demo", Role.OPERATOR
+    )
+    assert cfg.time_sync_source == getattr(TimeSyncSource, expected)
+
+
+def test_time_sync_source_rejects_unknown_value():
+    with pytest.raises(ConfigFileError):
+        PortalConfig.from_yaml_str("version: 1\ntime_sync_source: ntp\n", "demo", Role.OPERATOR)
+
+
+def test_action_subscription_bool_is_rejected():
+    with pytest.raises(ConfigFileError, match="none, active, all"):
+        PortalConfig.from_yaml_str("version: 1\naction_subscription: true\n", "demo", Role.OPERATOR)

@@ -13,10 +13,6 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"></a>
 </p>
 
-<p align="center">
-  <img src=".github/assets/portal-demo.gif" alt="Portal demo: synced camera and joint state between a remote robot and a local operator" width="720">
-</p>
-
 <!--BEGIN_DESCRIPTION-->
 <p align="center"><b>Teleoperate robots, run remote policies, and record demonstrations with LiveKit Portal.</b></p>
 <!--END_DESCRIPTION-->
@@ -32,50 +28,57 @@ camera frames and robot state to the operator, and control actions back to the
 robot. It works with any robotics stack, using LiveKit Cloud or a self-hosted
 LiveKit server.
 
-## Teleoperate a robot
+## What Portal adds
 
-Control a robot from another machine while watching its cameras. A `Robot`
-publishes frames and joint positions; an `Operator` receives them and sends
-commands from your teleoperation UI or controller.
+- **Control arbitration.** Keep policies and human operators in the same session.
+  The robot accepts actions from one active operator; transfer control with one
+  call or let a supervisor coordinate handoffs. [Control handoff](docs/04-arbitration.md).
+- **Synchronized observations.** Receive camera frames and joint state together,
+  matched by capture timestamp, so a remote policy can compute its next action.
+  [Observations](docs/02-concepts.md#the-observation-model).
+- **Shared robot time.** Participants synchronize to the robot's clock, giving
+  actions, recordings, and annotations a common timeline across machines.
+  [Time sync](docs/05-portal-api.md#time-sync).
+- **Data recording sinks.** Add an observer to record alongside any operator.
+  Write Rerun archives with `RrdSink`, or implement a sink for your own storage
+  format. [Data recording](docs/03-data-recording.md).
+- **Policy evaluation.** Record inactive policies' actions for comparison, mark
+  episodes with annotations, and measure observation-to-action latency.
+  [Action subscriptions](docs/05-portal-api.md#operator-side-action-subscription)
+  and [metrics](docs/09-metrics.md).
+- **Video for models and people.** Use WebRTC video for live viewing, PNG or RAW
+  for exact RGB pixels, or MJPEG for independent frame compression.
+  [Frame video](docs/07-frame-video.md).
 
-Both connect to the same LiveKit room, which carries video and data without a
-VPN or manual port forwarding. Your application reads sensors and applies
-incoming actions to the hardware.
+## Why LiveKit Portal
 
-Start with the [quickstart](docs/01-quickstart.md), which runs without hardware,
-or try the [SO-101 example](examples/python/so101) with a physical arm.
+Remote robotics needs video and control data to cross networks with changing
+bandwidth, packet loss, and NAT. LiveKit provides WebRTC transport and media
+routing without a VPN or manual port forwarding.
 
-## Run a policy remotely
+Its room model lets a robot, human operators, policies, and recorders share one
+session. Portal adds the robotics-specific coordination: matching observations,
+synchronizing clocks, selecting who controls the robot, and recording data.
+Your application supplies the sensors, policy, and hardware control.
 
-When a model needs more compute than the robot has onboard, run it on another
-machine or in the cloud. The policy joins as an operator, just like a human.
+Use the same Portal code with LiveKit Cloud or a self-hosted server. For clients
+built with other LiveKit SDKs, such as a browser teleoperation UI, follow the
+[wire protocol](docs/reference/wire-protocol.md).
 
-A policy needs camera frames and joint readings from the same moment. Portal
-matches them by capture timestamp and delivers them together as an
-`Observation`, ready for your policy to compute the next action.
+## What you can build
 
-See the [inference example](examples/python/inference) for a control loop, or
-[Concepts](docs/02-concepts.md#the-observation-model) for how observations work.
-If your model requires exact image pixels, see [Frame video](docs/07-frame-video.md).
+**Teleoperate a robot.** Connect cameras and hardware through `Robot`, then send
+commands from a remote `Operator`. Start with the
+[quickstart](docs/01-quickstart.md) or the [SO-101 example](examples/python/so101).
 
-## Let a human take over
+**Run a policy in the cloud.** The policy joins as an operator, receives
+synchronized observations, and sends actions back. See the
+[inference example](examples/python/inference).
 
-Keep a human operator connected alongside the policy to demonstrate corrections.
-The robot accepts actions from one **active operator** at a time. Transfer
-control to the human, then back to the policy, without reconnecting either one.
-
-The [control handoff guide](docs/04-arbitration.md) walks through this setup and
-shows how to add a supervisor that decides who controls the robot.
-
-## Record demonstrations
-
-Add an `Observer` to save frames, state, and actions while a human or policy
-drives. The observer records without sending control actions, so recording can
-continue across handoffs.
-
-Portal includes a Rerun archive writer for reviewing sessions and preparing
-training datasets. Follow [Data recording](docs/03-data-recording.md) to add a
-recorder or write your own storage integration.
+**Collect human corrections.** Keep a human connected alongside the policy,
+transfer control when needed, and let an observer record both throughout the
+session. Follow [control handoff](docs/04-arbitration.md) and
+[data recording](docs/03-data-recording.md).
 
 ## Get started
 

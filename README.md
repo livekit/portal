@@ -30,6 +30,10 @@ LiveKit server.
 
 ## What Portal adds
 
+- **Low-latency video.** LiveKit advertises [glass-to-glass latency as low as
+  30 ms](https://livekit.com/robotics). Actual latency depends on the network,
+  hardware, codec, and buffering. Use Portal's [metrics](docs/09-metrics.md)
+  to measure the full observation-to-action loop, including policy inference.
 - **Control arbitration.** Keep policies and human operators in the same session.
   The robot accepts actions from one active operator; transfer control with one
   call or let a supervisor coordinate handoffs. [Control handoff](docs/04-arbitration.md).
@@ -57,6 +61,18 @@ ready to take over. The policy misses a grasp. The human steps in, demonstrates
 a correction, then returns control. You want to record the entire session to
 improve the policy.
 
+Building this directly on [WebSockets](https://www.rfc-editor.org/rfc/rfc6455.html)
+or [Media over QUIC (MoQ)](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
+gives you transport primitives; the robot's control arbitration remains your
+application's job. You need to track participants, choose the active operator,
+propagate handoffs, and reject commands from inactive operators. That means
+maintaining shared session state in a coordination service or realtime database,
+and handling concurrent requests and reconnects.
+
+You also need clock synchronization and a buffering strategy for streams arriving
+at different times. As participants join from different networks, you must keep
+observations aligned without letting a slow stream add excessive control latency.
+
 A recorder that logs only the teleoperator's inputs misses the policy's actions.
 If it timestamps incoming data on arrival, network delays become part of the
 recording: a camera frame and a joint reading captured together appear to have
@@ -65,7 +81,9 @@ reconstruct the handoff across different clocks.
 
 Portal puts the robot, both operators, and an independent recorder in one
 LiveKit room. The robot accepts actions from the active operator, and a single
-call transfers control. Participants synchronize to the robot's clock, so
+call transfers control. LiveKit distributes the active-operator state through
+participant attributes, so you do not need a separate database for that handoff.
+Participants synchronize to the robot's clock, so
 frames, state, actions, and episode annotations share a timeline. The recorder
 can capture both operators' actions, including what the policy proposed while
 the human was in control, with each action labeled by sender and control status.

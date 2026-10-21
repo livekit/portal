@@ -104,6 +104,8 @@ application grows.
 ## Get started
 
 ```bash
+uv add livekit-portal
+# or
 pip install livekit-portal
 ```
 

@@ -806,11 +806,12 @@ class PortalConfig:
             encoder's peak rate (a ceiling, not a target); `None` uses the
             default 10 Mbps. AV1/H265 support is platform- and peer-dependent;
             confirm both ends negotiate the codec before relying on it.
-          * `VideoCodec.RAW` — byte-stream, uncompressed RGB24. Largest
-            payload, zero encode cost. `quality` is ignored.
-          * `VideoCodec.PNG` — byte-stream, lossless. ~2-3x compression on
-            natural images. `quality` is ignored.
-          * `VideoCodec.MJPEG` — byte-stream, lossy per-frame JPEG. ~10-20x
+          * `VideoCodec.RAW` — byte-stream RGB24, deflated on the wire
+            (~2x on camera frames, costing more sender CPU than PNG's
+            encode). `quality` is ignored.
+          * `VideoCodec.PNG` — byte-stream, lossless. ~1.6-3x compression on
+            camera frames. `quality` is ignored.
+          * `VideoCodec.MJPEG` — byte-stream, lossy per-frame JPEG. ~8-17x
             compression at quality 90, sub-millisecond decode. Use for
             inference where frame independence matters but bit-exactness
             doesn't.
@@ -851,14 +852,11 @@ class PortalConfig:
         at 720p and above. Give both or neither; both must be even. Ignored
         for the byte-stream codecs.
 
-        **Byte-stream latency** (non-H264 codecs): each frame's payload is
-        fragmented at the LiveKit chunk size (15 KB) and shipped over a
-        single SCTP data channel. Per-frame latency is roughly `1 ms + 2 ms
-        × ⌈encoded_size / 15 KB⌉` on localhost, set by the data-channel
-        drain rate (not Portal's encode cost). Pick a codec whose encoded
-        output fits in one chunk for low-latency closed-loop work — at
-        typical inference resolutions (224×224 to 480p) MJPEG q=80–95
-        usually does.
+        **Byte-stream latency** (RAW, PNG, MJPEG): every byte-stream track
+        shares one SCTP data channel, about 5 MB/s on localhost, so latency
+        and the fps ceiling follow from encoded size. A 640x480 MJPEG q90
+        camera frame (~60-85 KB) arrives in ~40 ms on localhost; PNG or RAW
+        at that size takes ~70-105 ms. See docs/07-frame-video.md.
         """
         if (width is None) != (height is None):
             raise ValueError("width and height must be given together")

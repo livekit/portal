@@ -81,7 +81,8 @@ These come from the LiveKit SDK, not from Portal.
 | `RpcError.data` | 15 KB |
 
 Portal peers advertise data-stream RPC, so calls between them carry payloads
-over a data stream with no 15 KB cap. The payload caps apply when the other side
+over a data stream with no 15 KB cap. Requests and responses of 1 MB both
+go through between two Portal peers. The payload caps apply when the other side
 is an older LiveKit SDK that only speaks the legacy packet transport. There, an
 over-limit request fails with transport error code 1402 and an over-limit
 response with 1504. Neither surfaces as a handler exception, so a handler that

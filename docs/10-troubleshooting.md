@@ -152,8 +152,8 @@ If `policy.e2e_us_p95` is `None`, you are not passing `in_reply_to_ts_us`. See
 
 If it is populated and large, decompose it. Subtract RTT to get everything that
 is not network. Compare the remainder against your inference time. Frame video
-adds a per-chunk floor on top, covered in
-[Frame video](07-frame-video.md#the-latency-floor).
+adds transfer time that grows with frame size, covered in
+[Frame video](07-frame-video.md#throughput-and-latency).
 
 On a WebRTC track sending frames larger than 640x480, pass the frame size to
 `add_video`. Without it the encoder is set up for 640x480, which adds tens of

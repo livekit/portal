@@ -48,21 +48,15 @@
 //!
 //! LiveKit byte streams fragment payloads at `BYTE_STREAM_CHUNK_SIZE`
 //! (15 KB) and ship each chunk through a single SCTP data-channel
-//! sender. Empirically, the per-chunk cost on localhost is ~2 ms,
-//! dominated by SCTP send + libwebrtc's `buffered_amount` drain rate
-//! rather than the SDK's writer-level loop. So:
+//! sender shared by every byte-stream track. On localhost that channel
+//! carries ~5 MB/s in total, bounded by SCTP send and libwebrtc's
+//! `buffered_amount` drain rather than the SDK's writer loop.
 //!
-//! ```text
-//! latency ≈ 1 ms + 2 ms × ⌈encoded_size / 15 KB⌉
-//! ```
-//!
-//! Implication for codec choice: the throughput floor is per-byte, not
-//! per-frame. A codec whose encoded output fits in one chunk pays the
-//! single-chunk floor (≈2 ms). A codec spilling into 60+ chunks pays
-//! ≈120 ms. MJPEG at typical inference resolutions (224×224 to 480p,
-//! q=80–95) lands in the 1–4-chunk regime; PNG and Raw at the same
-//! resolutions can run 16–60 chunks. Pick by chunk count, not by
-//! quality knob.
+//! Implication for codec choice: the cost is per byte, not per frame.
+//! Measured on 640×480 robot camera frames, MJPEG q90 (~60-85 KB) lands
+//! in ~40 ms; PNG (~300-450 KB) and deflated Raw (~400 KB) in ~70-105 ms.
+//! Pick by encoded size, not by quality knob. Numbers in
+//! docs/07-frame-video.md.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};

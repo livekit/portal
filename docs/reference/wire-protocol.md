@@ -201,7 +201,7 @@ The decoded payload is always packed RGB24: byte order `R, G, B`, row-major,
 Track names are capped at 256 bytes. Route each frame to the track named in its
 header.
 
-Codec tradeoffs, the chunking latency floor, and per-track fps ceilings are in
+Codec tradeoffs, measured latency, and per-track fps ceilings are in
 [Frame video](../07-frame-video.md).
 
 ## WebRTC video tracks
@@ -331,8 +331,9 @@ Beyond that one reserved method, RPC is plain LiveKit RPC. Either side registers
 methods, either side invokes. Payloads are UTF-8 strings, opaque to Portal, JSON by
 convention.
 
-The LiveKit SDK limits apply: 15 KB request, 15 KB response, 256-byte error
-message, 15 KB error data. Codes 1001 to 1999 are reserved for transport errors.
+The LiveKit SDK limits apply: a 256-byte error message and 15 KB of error data.
+Request and response payloads travel as data streams between current SDKs, with
+no 15 KB cap. A peer on the legacy RPC transport caps both at 15 KB. Codes 1001 to 1999 are reserved for transport errors.
 
 No Portal-specific framing is involved, so any LiveKit RPC client interoperates as
 is. See [RPC](../08-rpc.md) for the SDK-level surface.

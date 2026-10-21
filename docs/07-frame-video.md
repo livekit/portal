@@ -66,79 +66,80 @@ Track names must be unique across all `add_video` calls, whatever the codec.
 
 ## Picking a codec
 
-| Codec | Lossless | Compression | Encode and decode cost | Fits one chunk up to |
-|---|---|---|---|---|
-| `RAW` | yes | deflate on the wire, content-dependent | none | about 70x70 uncompressed |
-| `PNG` | yes | 2 to 3x on natural images | 3 to 10 ms at 480p | about 150x150 |
-| `MJPEG` | no | 10 to 20x at q=90 | under 1 ms at 480p | about 480p |
+Measured on real robot camera frames (an xlerobot head camera and wrist
+cameras) on an Apple M4 Pro:
 
-That last column matters because of the latency floor below. A frame that fits
-in one 15 KB chunk pays the floor once. A frame spread over N chunks pays it N
-times.
+| Codec | Lossless | Size vs raw RGB | CPU per frame at 640x480 |
+|---|---|---|---|
+| `RAW` | yes | 1.6 to 2.5x smaller, from byte-stream deflate | 12 to 16 ms to deflate on send |
+| `PNG` | yes | 1.6 to 3x smaller | about 1.3 ms encode, 2 ms decode |
+| `MJPEG` q90 | no | 8 to 17x smaller | under 1 ms each way |
 
 For inference that can accept lossy images, start by evaluating MJPEG at
 quality 90. Measure image quality and latency with your camera data and policy;
-encoded size depends on the scene and resolution.
+encoded size depends on the scene. A busy head camera encodes about 50% larger
+than a wrist camera looking at a gripper.
 
-Use PNG when you need exact pixels with compression. RAW avoids encoding but
-requires more bandwidth, so it is most useful at small resolutions.
+Use PNG when you need exact pixels. It is about as small as deflated RAW and far
+cheaper to produce, so RAW only makes sense at small resolutions or when the
+sender has CPU to spare.
 
-## The latency floor
+## Throughput and latency
 
-LiveKit byte streams fragment payloads at 15 KB and ship each chunk through a
-single SCTP data channel. The drain rate is bounded by flow control inside
-libwebrtc, not by Portal's encode cost. Measured on localhost:
+LiveKit byte streams cut each frame into 15 KB chunks and send them over one
+SCTP data channel. Throughput is bounded by that channel, not by encoding. On
+localhost it carries about **5 MB/s in total**, shared by every byte-stream
+track, so per-frame latency and the frame-rate ceiling both follow from the
+encoded size.
 
-```
-latency ≈ 1 ms + 2 ms × ceil(encoded_size / 15 KB)
-```
+Measured end to end through the Python API, on localhost against
+`livekit-server --dev`, with the real camera frames above. Latency is the median
+from `send_video_frame` to the operator's callback, sent at 5 fps so nothing
+queues. Max fps is one track pushed flat out.
 
-Per-frame send time is roughly that same number, so the ceiling per track is:
-
-```
-max fps ≈ 1000 / (1 + 2 × chunks)
-```
-
-| Resolution | Codec | Encoded | Chunks | Max fps per track |
+| Resolution | Codec | Encoded | Latency | Max fps per track |
 |---|---|---|---|---|
-| 224x224 | RAW | 150 KB | 11 | 43 |
-| 224x224 | MJPEG q90 | 10 KB | 1 | 330 |
-| 320x240 | RAW | 230 KB | 16 | 30 |
-| 320x240 | MJPEG q90 | 15 KB | 1 to 2 | 200 to 330 |
-| 480x360 | RAW | 518 KB | 35 | 14 |
-| 480x360 | MJPEG q90 | 30 KB | 2 to 3 | 140 to 200 |
-| 640x480 | RAW | 922 KB | 62 | 8 |
-| 640x480 | MJPEG q90 | 60 KB | 4 to 5 | 90 to 110 |
-| 720p | RAW | 2.7 MB | 185 | 2.7 |
-| 720p | MJPEG q90 | 180 KB | 12 to 15 | 30 to 40 |
-| 1080p | RAW | 6.1 MB | 415 | 1.2 |
-| 1080p | MJPEG q90 | 410 KB | 28 to 35 | 14 to 17 |
+| 224x224 | MJPEG q90 | 15 to 19 KB | 8 to 17 ms | 260 to 310 |
+| 224x224 | PNG | 68 to 92 KB | 23 to 35 ms | 60 to 80 |
+| 224x224 | RAW | 150 KB, about 85 KB deflated | 27 to 39 ms | 63 to 68 |
+| 320x240 | MJPEG q90 | 21 to 27 KB | 10 to 22 ms | 200 to 250 |
+| 320x240 | PNG | 97 to 135 KB | 34 to 56 ms | 41 to 56 |
+| 320x240 | RAW | 230 KB, about 125 KB deflated | 35 to 46 ms | 40 to 48 |
+| 480x360 | MJPEG q90 | 37 to 51 KB | 16 to 18 ms | 140 to 150 |
+| 480x360 | PNG | 181 to 265 KB | 52 to 67 ms | 20 to 30 |
+| 480x360 | RAW | 518 KB, about 250 KB deflated | 62 to 68 ms | 25 to 27 |
+| 640x480 | MJPEG q90 | 57 to 84 KB | 38 to 39 ms | 74 to 96 |
+| 640x480 | PNG | 293 to 456 KB | 71 to 100 ms | 11 to 18 |
+| 640x480 | RAW | 922 KB, about 400 KB deflated | 93 to 106 ms | 14 to 16 |
+| 720p | MJPEG q90 | about 210 KB | 61 ms | 26 |
+| 1080p | MJPEG q90 | about 380 KB | 95 ms | 14 |
 
-RAW sizes are uncompressed. Portal sends RAW with LiveKit's byte-stream
-deflate on, so the bytes on the wire, and the chunk count, depend on the image:
-a flat synthetic frame shrinks far more than a real camera's.
+The 720p and 1080p rows use a downscaled photo, since the robot cameras were
+640x480. Expect a real network to be slower than localhost, never faster.
 
 Reading that table:
 
-- MJPEG sustains real time at every resolution up to 720p.
-- RAW is real time only at small resolutions, 320x240 and below.
-- In these measurements, neither RAW nor MJPEG reaches 30 fps at 1080p.
-  Reduce resolution or frame rate, or evaluate the WebRTC path.
-- At 224x224, the standard VLA inference size, even RAW clears 30 fps. Bit-exact
-  RGB is genuinely on the table.
+- MJPEG sustains 30 fps up to 640x480, and 720p only at about 25 fps.
+- PNG and RAW sustain 30 fps up to about 320x240. At 224x224, the standard VLA
+  inference size, both clear 60 fps, so bit-exact RGB is genuinely on the table.
+- Nothing here reaches 30 fps at 1080p. Reduce resolution or frame rate, or use
+  the WebRTC path.
+- Latency grows with size even when there is headroom: a 640x480 MJPEG frame
+  takes about 40 ms, a 224x224 one under 20 ms.
 
 ### Budget across tracks
 
-Those are per-track ceilings. Every byte-stream track shares one SCTP data
-channel, so you have to budget the total:
+Those are per-track ceilings with nothing else sending. Every byte-stream track
+shares the same data channel, and the total stays at about 5 MB/s whether it is
+split across one, two or three tracks:
 
 ```
-chunks_per_frame × fps × n_tracks  ≤  about 500 chunk-sends/sec
+encoded_bytes_per_frame × fps × n_tracks  ≤  about 5 MB/s on localhost
 ```
 
-Three cameras at 30 fps and 12 chunks per frame is 1080 chunk-sends per second,
-which is double the budget. Something has to give: a smaller resolution, a
-lossier codec, a lower frame rate, or fewer tracks.
+Three 640x480 MJPEG cameras at 30 fps is about 6.5 MB/s, over the budget. Two
+fit. Something has to give: a smaller resolution, a lower frame rate, or fewer
+tracks.
 
 ## Configuration
 
@@ -188,20 +189,19 @@ t.bytes_received["front"]                    # same, operator side
 t.frames_dropped_publisher_full["front"]     # replaced by a newer frame before sending
 ```
 
-Derive your actual chunk count to confirm a deployed track is in the regime you
-designed for:
+Check the real encoded size of a deployed track against the budget:
 
 ```python
 avg_bytes = t.bytes_sent["front"] / t.frames_sent["front"]
-chunks_per_frame = avg_bytes / 15_000
+mb_per_s = avg_bytes * fps / 1e6
 ```
 
-For RAW, `bytes_sent` counts the payload before deflate, so this overstates its
-chunks.
+For RAW, `bytes_sent` counts the payload before deflate, so this overstates it
+by about 2x on camera images.
 
-A track you sized for one chunk showing up as four in production means your real
-camera has more entropy than your test fixture did. Re-check the table above
-with the real number.
+A track that measured 20 KB per frame on a test fixture and 60 KB in production
+means your real camera has more entropy than the fixture did. Re-check the
+tables above with the real number.
 
 `frames_dropped_publisher_full` climbing means the publisher is offering frames
 faster than the link ships them. Each track sends one frame at a time and holds

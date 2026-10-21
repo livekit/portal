@@ -93,7 +93,7 @@ role-specific is a no-op on the wrong side.
 
 | Method | Default | What it does |
 |---|---|---|
-| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
@@ -391,7 +391,11 @@ m.synced, m.offset_us, m.uncertainty_us
 ```
 
 Before the first sync, `now_us()` is local time and `synced` is `False`.
-`now_us()` never repeats and never goes backwards. It is the default
+Anything you send in that window is stamped on your own clock, so a recorder or
+an orchestrator should wait for `on_time_synced` before it starts. At the first
+sync `now_us()` switches to the robot's clock in one step, which can go
+backwards once if this host's clock was ahead. From then on it never repeats and
+never goes backwards. It is the default
 timestamp for everything you send. Details are in
 [Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
 
@@ -455,7 +459,13 @@ obs.on_keypoint(lambda kp: ...)   # kp.type, kp.payload, kp.timestamp_us, kp.sen
 - **`send_keypoint` returns the observers that were present.** An empty list
   tells the sender that no one recorded the mark.
 - `type` must be a `str` and `payload` a `dict`; anything else raises
-  `TypeError` before sending. A keypoint must fit in one data packet.
+  `TypeError` before sending.
+- **A keypoint must fit in one data packet**: about 64 KB of JSON on a default
+  LiveKit server. Portal doesn't check the size itself, because the limit is
+  negotiated per connection. A larger keypoint raises `PortalError.Room` with
+  the server's message, for example `exceeds the negotiated maximum message
+  size (64000 bytes)`. Keep bulky data, such as images or long transcripts, out
+  of the payload and reference it instead.
 
 ## Multi-operator patterns
 
@@ -552,6 +562,37 @@ confirm before relying on either.
 
 `max_bitrate_kbps` is a ceiling, not a target. libwebrtc still picks a lower
 operating bitrate from the content. Omit it for the 10 Mbps default.
+
+#### Frame size
+
+Pass `width` and `height` when you send frames larger than 640x480 on a WebRTC
+track.
+
+```python
+cfg.add_video("front", width=1280, height=720)
+```
+
+libwebrtc sets up the encoder when the track is published, before the first
+frame exists, so Portal has to tell it the frame size up front. Without
+`width` and `height` it sets the encoder up for 640x480. Larger frames still
+go out, but with added latency: tens of milliseconds with H.264 at 720p and
+above.
+
+Give both or neither, and both must be even. They are keyword-only and apply
+to the WebRTC codecs only.
+
+#### Playout delay
+
+Portal receives WebRTC video with zero playout delay: libwebrtc hands each frame
+over as soon as it is decoded, instead of holding it back to smooth playback.
+That keeps VP8, VP9 and AV1 at 12 to 16 ms on a local server, where a room with
+default settings holds them at 45 to 146 ms at 1080p.
+
+The setting covers the whole process and has to be in place before its first
+LiveKit connection. Portal sets it on connect. If something else in the process
+connected to LiveKit first, Portal logs
+[`playout-delay`](08-troubleshooting.md#playout-delay) and receives with the
+default delay.
 
 #### Simulcast and screencast
 
@@ -784,6 +825,7 @@ class JsonlSink:
     def open(self, session: SessionInfo) -> None: ...   # session, schemas, tracks, time sync source
     def write_state(self, state) -> None: ...
     def write_frame(self, track, frame) -> None: ...
+    def write_frame_dropped(self, track, timestamp_us) -> None: ...   # optional: the recorder fell behind
     def write_action(self, action) -> None: ...
     def write_keypoint(self, keypoint) -> None: ...
     def write_metrics(self, metrics) -> None: ...
@@ -799,8 +841,10 @@ obs.stop_recording()   # or disconnect(): writes what is queued, then close()
   heard them, with `open` first and `close` last.
 - **Only video frames are dropped when the sink falls behind.** Once
   `max_queued_frames` frames are waiting, new ones are dropped and counted in
-  `metrics().observer.frames_dropped`. State, actions and keypoints are never
-  dropped.
+  `metrics().observer.frames_dropped`. A sink that defines the optional
+  `write_frame_dropped` gets each one's timestamp, so a reader can tell a gap
+  in the recording from a stalled camera. State, actions and keypoints are
+  never dropped.
 - `record_to` calls `open` right away and raises what it raises. A write that
   raises is logged once per kind and skipped, so one bad record doesn't end the
   recording.
@@ -831,6 +875,7 @@ Two timelines, both on the robot's clock:
 | `observation/<track>` | frame timestamp (JPEG) | — |
 | `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
 | `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | — |
+| `recorder/frames_dropped/<track>` | timestamp of a frame the recorder dropped | — |
 | `metrics/*` | observer's `now_us()` | — |
 | `portal/schema` | static: field order and dtypes, tracks, time sync source | — |
 

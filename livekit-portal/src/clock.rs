@@ -14,7 +14,8 @@
 
 //! Time sync: every non-robot peer estimates the robot's clock from an
 //! NTP-style ping/pong on `portal_clock`, and `Portal::now_us()` reads that
-//! estimate through a clock that never repeats and never goes backwards.
+//! estimate through a clock that never repeats and, after the first sync,
+//! never goes backwards.
 //!
 //! The pieces are split so the math is testable without a room:
 //!   * `ClockPacket` — wire codec
@@ -57,6 +58,10 @@ const JUMP_AGREEMENT_US: u64 = 100_000;
 /// A backward correction removes at most `elapsed / SLEW_DIVISOR` per step,
 /// so the clock keeps running at no less than 95% of real speed.
 const SLEW_DIVISOR: u64 = 20;
+/// Further behind than this (a resync, or a restarted robot), the clock runs
+/// at half speed instead, so a 10 s step back takes ~22 s to absorb, not ~200 s.
+const FAST_SLEW_ABOVE_US: u64 = 100_000;
+const FAST_SLEW_DIVISOR: u64 = 2;
 const CLOCK_QUEUE_CAP: usize = 64;
 
 // --- Wire ---
@@ -260,37 +265,61 @@ impl OffsetEstimator {
 // --- Monotonic clock ---
 
 /// Turns a raw local time plus the current offset estimate into timestamps
-/// that strictly increase. Forward corrections apply at once; backward ones
-/// are absorbed gradually so time never runs backwards or stands still.
+/// that strictly increase once synced. Forward corrections apply at once;
+/// backward ones are absorbed gradually so time never runs backwards or
+/// stands still.
 #[derive(Debug, Default)]
 pub(crate) struct MonotonicClock {
     applied_offset_us: i64,
     target_offset_us: i64,
     last_raw_us: Option<u64>,
-    last_out_us: u64,
+    /// Last value `now` handed out, `None` until the first one.
+    last_out_us: Option<u64>,
+    /// Whether a target has been set, i.e. the first sync has happened.
+    synced: bool,
 }
 
 impl MonotonicClock {
+    /// Applies a forward correction at once and slews a backward one. The
+    /// first target applies at once either way: until then the clock is local
+    /// time, a different timeline, so it switches over in one step rather
+    /// than stamping ahead of the robot while it slews.
     pub fn set_target(&mut self, offset_us: i64) {
         self.target_offset_us = offset_us;
-        if offset_us > self.applied_offset_us {
+        if !self.synced {
+            self.synced = true;
+            self.applied_offset_us = offset_us;
+            self.last_out_us = None;
+        } else if offset_us > self.applied_offset_us {
             self.applied_offset_us = offset_us;
         }
     }
 
+    /// A timestamp to hand out: never repeats, and never goes backwards
+    /// except once, at the first sync.
     pub fn now(&mut self, raw_us: u64) -> u64 {
+        let candidate = self.estimate(raw_us);
+        let out = self.last_out_us.map_or(candidate, |last| candidate.max(last + 1));
+        self.last_out_us = Some(out);
+        out
+    }
+
+    /// Current best reading of the robot's clock, for local measurements
+    /// such as receive times. Unlike `now`, it isn't bumped to stay unique.
+    pub fn estimate(&mut self, raw_us: u64) -> u64 {
         let elapsed = self.last_raw_us.map_or(0, |last| raw_us.saturating_sub(last));
         self.last_raw_us = Some(raw_us);
 
         let behind = self.applied_offset_us - self.target_offset_us;
         if behind > 0 {
-            let step = (elapsed / SLEW_DIVISOR).min(behind as u64) as i64;
+            let divisor = match behind as u64 > FAST_SLEW_ABOVE_US {
+                true => FAST_SLEW_DIVISOR,
+                false => SLEW_DIVISOR,
+            };
+            let step = (elapsed / divisor).min(behind as u64) as i64;
             self.applied_offset_us -= step;
         }
-
-        let candidate = raw_us.saturating_add_signed(self.applied_offset_us);
-        self.last_out_us = candidate.max(self.last_out_us + 1);
-        self.last_out_us
+        raw_us.saturating_add_signed(self.applied_offset_us)
     }
 
     /// Offset currently in effect, which lags the target while slewing back.
@@ -301,8 +330,9 @@ impl MonotonicClock {
 
 /// Local time for the clock in `portal` mode: wall time at first use,
 /// advanced by a monotonic `Instant` so host clock steps (NTP) never reach
-/// Portal timestamps.
-fn anchored_now_us() -> u64 {
+/// Portal timestamps. Also the arrival clock for jitter, which must not
+/// step when a sync correction does.
+pub(crate) fn anchored_now_us() -> u64 {
     static ANCHOR: OnceLock<(Instant, u64)> = OnceLock::new();
     let (instant, wall_us) = ANCHOR.get_or_init(|| (Instant::now(), system_now_us()));
     wall_us + instant.elapsed().as_micros() as u64
@@ -362,6 +392,12 @@ impl SyncedClock {
     pub fn now_us(&self) -> u64 {
         let raw = self.raw_us();
         self.state.lock().clock.now(raw)
+    }
+
+    /// See `MonotonicClock::estimate`.
+    pub fn estimate_us(&self) -> u64 {
+        let raw = self.raw_us();
+        self.state.lock().clock.estimate(raw)
     }
 
     /// Raw local time, the clock the ping/pong timestamps are taken on.
@@ -759,10 +795,37 @@ mod tests {
     }
 
     #[test]
-    fn backward_correction_is_absorbed_gradually() {
+    fn first_backward_correction_applies_immediately() {
         let mut clock = MonotonicClock::default();
-        clock.set_target(S as i64);
-        let mut raw = 10 * S;
+        clock.set_target(-5 * S as i64);
+        assert_eq!(clock.now(10 * S), 5 * S);
+    }
+
+    #[test]
+    fn first_correction_applies_immediately_after_timestamps_were_handed_out() {
+        let mut clock = MonotonicClock::default();
+        clock.estimate(10 * S);
+        clock.now(10 * S);
+        clock.set_target(-5 * S as i64);
+        assert_eq!(clock.now(10 * S + 1), 5 * S + 1);
+    }
+
+    #[test]
+    fn later_backward_correction_is_slewed() {
+        let mut clock = MonotonicClock::default();
+        clock.set_target(0);
+        let before = clock.now(10 * S);
+        clock.set_target(-5 * S as i64);
+        assert!(clock.now(10 * S + 1) > before);
+        assert_eq!(clock.applied_offset_us(), 0);
+    }
+
+    /// Slews from `behind` to zero in 10 ms steps, checking the clock never
+    /// runs slower than `min_speed_pct`. Returns the time it took.
+    fn absorb(behind: u64, min_speed_pct: u64) -> u64 {
+        let mut clock = MonotonicClock::default();
+        clock.set_target(behind as i64);
+        let mut raw = 100 * S;
         let mut last = clock.now(raw);
         clock.set_target(0);
 
@@ -772,13 +835,26 @@ mod tests {
             raw += step;
             elapsed += step;
             let out = clock.now(raw);
-            assert!(out - last >= step * 19 / 20, "clock ran slower than 95%");
+            assert!(out - last >= step * min_speed_pct / 100, "clock ran too slow");
             last = out;
-            assert!(elapsed <= 21 * S, "took too long to absorb");
+            assert!(elapsed <= 60 * S, "never caught up");
         }
-        assert!(elapsed >= 19 * S, "absorbed faster than the slew rate allows");
         raw += step;
         assert_eq!(clock.now(raw), raw);
+        elapsed
+    }
+
+    #[test]
+    fn small_backward_correction_is_absorbed_gradually() {
+        let elapsed = absorb(50 * MS, 95);
+        assert!((950 * MS..=1_050 * MS).contains(&elapsed), "{elapsed}");
+    }
+
+    #[test]
+    fn large_backward_correction_is_absorbed_at_half_speed() {
+        // ~19.8 s at half speed down to 100 ms, then ~2 s at 95%.
+        let elapsed = absorb(10 * S, 50);
+        assert!((21 * S..=23 * S).contains(&elapsed), "{elapsed}");
     }
 
     #[test]

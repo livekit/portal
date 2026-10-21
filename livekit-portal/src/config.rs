@@ -62,6 +62,37 @@ impl From<FieldSpec> for (String, DType) {
     }
 }
 
+/// Frame size, in pixels, that a WebRTC track's encoder is set up for before
+/// the first frame arrives. Both dimensions must be even, as I420 requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Per-track options for `PortalConfig::add_video`. Each is read by one
+/// transport and ignored by the other; `add_video` documents which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoOptions {
+    pub quality: u8,
+    pub max_bitrate_kbps: Option<u32>,
+    pub simulcast: Option<bool>,
+    pub screencast: Option<bool>,
+    pub resolution: Option<Resolution>,
+}
+
+impl Default for VideoOptions {
+    fn default() -> Self {
+        Self {
+            quality: DEFAULT_MJPEG_QUALITY,
+            max_bitrate_kbps: None,
+            simulcast: None,
+            screencast: None,
+            resolution: None,
+        }
+    }
+}
+
 /// One declared video track: name, codec, and the per-codec options.
 ///
 /// One type for every track regardless of transport, because `add_video` is
@@ -82,6 +113,8 @@ impl From<FieldSpec> for (String, DType) {
 ///     `DEFAULT_H264_MAX_BITRATE_KBPS`.
 ///   * `simulcast` / `screencast` — WebRTC only, both `false` by default.
 ///     See `PortalConfig::add_video` for what each one does.
+///   * `resolution` — WebRTC only. The frame size the encoder is set up for.
+///     `None` means 640x480.
 ///
 /// An option set against the wrong transport is rejected by the YAML loader
 /// and ignored by `add_video`, so a spec may carry a value its own codec
@@ -104,6 +137,8 @@ pub struct VideoTrackSpec {
     /// congestion and CPU pressure drop framerate instead of rescaling the
     /// frame.
     pub screencast: bool,
+    /// Frame size the encoder is set up for. `None` means 640x480.
+    pub resolution: Option<Resolution>,
 }
 
 impl VideoTrackSpec {
@@ -114,8 +149,17 @@ impl VideoTrackSpec {
         max_bitrate_kbps: Option<u32>,
         simulcast: bool,
         screencast: bool,
+        resolution: Option<Resolution>,
     ) -> Self {
-        Self { name: name.into(), codec, quality, max_bitrate_kbps, simulcast, screencast }
+        Self {
+            name: name.into(),
+            codec,
+            quality,
+            max_bitrate_kbps,
+            simulcast,
+            screencast,
+            resolution,
+        }
     }
 
     /// Whether this track rides the WebRTC media path. The one question the
@@ -292,6 +336,13 @@ impl PortalConfig {
     ///   unchanging resolution matters more than smooth motion. A policy
     ///   consuming fixed-shape frames is the usual case.
     ///
+    /// `resolution` is the frame size `send_video_frame` will send on a WebRTC
+    /// track. libwebrtc sets up the encoder for it when the track is published,
+    /// before any frame exists, and `None` sets it up for 640x480. Frames of
+    /// another size still go out, but an encoder set up for the wrong size
+    /// adds latency, tens of milliseconds with H.264 at 720p and above. Both
+    /// dimensions must be even. Ignored for the byte-stream codecs.
+    ///
     /// Track names must be unique across all `add_video` calls regardless
     /// of codec; a duplicate panics.
     ///
@@ -301,15 +352,8 @@ impl PortalConfig {
     /// codec whose encoded size fits in one chunk for low-latency
     /// closed-loop work. MJPEG at 224×224 to 480p typically does. Raw at
     /// anything above ~70×70 spills into multiple chunks.
-    pub fn add_video(
-        &mut self,
-        name: impl Into<String>,
-        codec: Codec,
-        quality: u8,
-        max_bitrate_kbps: Option<u32>,
-        simulcast: Option<bool>,
-        screencast: Option<bool>,
-    ) {
+    pub fn add_video(&mut self, name: impl Into<String>, codec: Codec, options: VideoOptions) {
+        let VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution } = options;
         let name = name.into();
         assert!(
             !self.has_track(&name),
@@ -325,6 +369,12 @@ impl PortalConfig {
         if let Some(kbps) = max_bitrate_kbps {
             assert!(kbps > 0, "max_bitrate_kbps must be > 0, got {kbps}");
         }
+        if let Some(Resolution { width, height }) = resolution {
+            assert!(
+                width > 0 && height > 0 && width.is_multiple_of(2) && height.is_multiple_of(2),
+                "resolution must be even and non-zero, got {width}x{height}"
+            );
+        }
         // Only the MJPEG encoder reads `quality`. Canonicalize it to 0
         // everywhere else so a spec never reports a JPEG quality nothing will
         // use, and so a YAML-built config compares equal to the same config
@@ -337,6 +387,7 @@ impl PortalConfig {
             max_bitrate_kbps,
             simulcast.unwrap_or(false),
             screencast.unwrap_or(false),
+            resolution,
         ));
     }
 
@@ -683,6 +734,27 @@ mod tests {
 
     fn cfg() -> PortalConfig {
         PortalConfig::new("demo", Role::Robot)
+    }
+
+    #[test]
+    fn add_video_keeps_resolution() {
+        let mut c = cfg();
+        let hd = Resolution { width: 1280, height: 720 };
+        c.add_video("a", Codec::H264, VideoOptions { resolution: Some(hd), ..Default::default() });
+        c.add_video("b", Codec::Vp8, VideoOptions::default());
+        assert_eq!(c.video_tracks()[0].resolution, Some(hd));
+        assert_eq!(c.video_tracks()[1].resolution, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "resolution must be even")]
+    fn add_video_rejects_odd_resolution() {
+        let odd = Resolution { width: 1279, height: 720 };
+        cfg().add_video(
+            "a",
+            Codec::H264,
+            VideoOptions { resolution: Some(odd), ..Default::default() },
+        );
     }
 
     /// The default budget is the point state-buffer capacity would have

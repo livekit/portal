@@ -20,6 +20,7 @@ mod data;
 pub mod dtype;
 pub mod error;
 mod frame_video;
+mod jpeg;
 mod keypoint;
 pub mod metrics;
 mod placeholder;
@@ -31,7 +32,10 @@ pub mod types;
 mod video;
 
 pub use codec::Codec;
-pub use config::{DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, VideoTrackSpec};
+pub use config::{
+    DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, Resolution, VideoOptions,
+    VideoTrackSpec,
+};
 pub use config_file::ConfigFileError;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};

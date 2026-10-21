@@ -20,6 +20,7 @@ from livekit.portal import (
     DEFAULT_MJPEG_QUALITY,
     DType,
     FieldSpec,
+    ObserverConfig,
     OperatorConfig,
     Portal,
     PortalConfig,
@@ -117,6 +118,42 @@ def test_video_track_specs_read_back_webrtc_options():
     assert spec.max_bitrate_kbps == 4000
     assert spec.simulcast is True
     assert spec.screencast is False
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: PortalConfig("demo", Role.ROBOT),
+        lambda: RobotConfig("demo"),
+        lambda: OperatorConfig("demo"),
+        lambda: ObserverConfig("demo"),
+    ],
+)
+def test_video_track_specs_read_back_frame_size(make):
+    cfg = make()
+    cfg.add_video("hd", width=1280, height=720)
+    cfg.add_video("default")
+    hd, default = cfg.video_track_specs
+    assert (hd.width, hd.height) == (1280, 720)
+    assert (default.width, default.height) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "make", [lambda: PortalConfig("demo", Role.ROBOT), lambda: RobotConfig("demo")]
+)
+def test_width_and_height_must_be_given_together(make):
+    cfg = make()
+    with pytest.raises(ValueError):
+        cfg.add_video("cam", width=1280)
+    with pytest.raises(ValueError):
+        cfg.add_video("cam", height=720)
+    assert cfg.video_tracks == []
+
+
+def test_odd_frame_size_is_rejected():
+    cfg = PortalConfig("demo", Role.ROBOT)
+    with pytest.raises(Exception):
+        cfg.add_video("cam", width=1279, height=720)
 
 
 def test_mixed_dtype_schema_is_accepted():

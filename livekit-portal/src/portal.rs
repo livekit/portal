@@ -38,7 +38,7 @@ use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
 use crate::serialization::{action_fingerprint, schema_fingerprint};
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
 use crate::types::*;
-use crate::video::{VideoPublisher, VideoReceiver, VideoTrackSlots};
+use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver, VideoTrackSlots};
 
 /// Participant attribute keys used by Portal for role discovery and the
 /// multi-controller pointer. Namespaced to avoid colliding with any
@@ -472,6 +472,13 @@ impl Portal {
         }
 
         log::info!("[{}] connecting as {:?} to {}", self.config.session, self.config.role, url);
+
+        // Hand decoded frames over as soon as they are ready instead of
+        // holding them for smooth playback. Process-wide, and only possible
+        // before the first WebRTC runtime starts.
+        if let Err(e) = livekit::webrtc::enable_zero_playout_delay() {
+            log::warn!("[playout-delay] zero playout delay not enabled: {e}");
+        }
 
         let (room, events) = Room::connect(url, token, options)
             .await
@@ -1183,15 +1190,11 @@ impl Portal {
             let track_name = &spec.name;
             let track_metrics =
                 self.metrics.track(track_name).expect("track metrics registered at construction");
-            let publisher = VideoPublisher::new(
-                track_name,
-                track_metrics,
-                self.config.fps,
-                spec.codec,
-                spec.max_bitrate_kbps,
-                spec.simulcast,
-                spec.screencast,
-            );
+            let publisher = VideoPublisher::new(VideoPublisherOptions {
+                spec,
+                metrics: track_metrics,
+                fps: self.config.fps,
+            });
             if let Err(e) = publisher.publish(&lp).await {
                 // Roll back any earlier publishers so their send tasks stop
                 // and connect() leaves Portal in a clean state.
@@ -1298,8 +1301,9 @@ impl Portal {
     }
 
     /// Now, in microseconds on the robot's clock. On the robot this is its
-    /// own clock. Before the first sync it is local time. Never repeats and
-    /// never goes backwards.
+    /// own clock. Before the first sync it is local time, and at the first
+    /// sync it switches to the robot's clock in one step, possibly backwards.
+    /// After that it never repeats and never goes backwards.
     pub fn now_us(&self) -> u64 {
         self.clock.now_us()
     }
@@ -1310,7 +1314,8 @@ impl Portal {
     ///
     /// Portal doesn't interpret `kind` or `payload`. Returns the observers
     /// that were present, so an empty list tells the sender no one recorded
-    /// the mark.
+    /// the mark. The encoded keypoint must fit in one data packet (about
+    /// 64 KB on a default server); a larger one fails with the transport's error.
     pub async fn send_keypoint(
         &self,
         kind: &str,
@@ -1610,7 +1615,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 ctx.sync_buffer.as_ref(),
                 &ctx.metrics,
                 origin,
-                ctx.time.now_us(),
+                ctx.time.estimate_us(),
             );
             if !output.is_empty() {
                 ctx.obs_sink.dispatch(output);
@@ -1810,5 +1815,36 @@ mod tests {
         assert!(caller_may_steer(&controller, "teleop").await);
         assert!(caller_may_steer(&controller, "recorder").await);
         assert!(!caller_may_steer(&controller, "stranger").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_strangers_do_not_hold_up_other_callers() {
+        let controller = Arc::new(ControllerState::new());
+        controller.operators.lock().insert("teleop".to_string());
+        let start = tokio::time::Instant::now();
+        let strangers: Vec<_> = (0..50)
+            .map(|i| {
+                let controller = controller.clone();
+                tokio::spawn(async move { caller_may_steer(&controller, &format!("s{i}")).await })
+            })
+            .collect();
+        let late = {
+            let controller = controller.clone();
+            tokio::spawn(async move { caller_may_steer(&controller, "late").await })
+        };
+
+        assert!(caller_may_steer(&controller, "teleop").await);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        // A caller whose role shows up during the wait is let in.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        controller.observers.lock().insert("late".to_string());
+        assert!(late.await.expect("task"));
+        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT);
+
+        for s in strangers {
+            assert!(!s.await.expect("task"));
+        }
+        // Refused together after one wait, not one wait each.
+        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT + Duration::from_millis(100));
     }
 }

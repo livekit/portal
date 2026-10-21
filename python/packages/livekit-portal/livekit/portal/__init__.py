@@ -786,6 +786,8 @@ class PortalConfig:
         screencast: Optional[bool] = None,
         stall_behavior: Optional["StallBehavior"] = None,
         max_lag_ms: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> None:
         """Declare a video track.
 
@@ -841,6 +843,14 @@ class PortalConfig:
             and drops frames under the same pressure. Turn this on when a
             policy needs a fixed frame shape more than it needs smooth motion.
 
+        `width` and `height` are keyword-only and give the frame size you will
+        pass to `send_video_frame` on a WebRTC track. libwebrtc sets up the
+        encoder for this size when the track is published, before any frame
+        exists. Leave both out and it is set up for 640x480: larger frames
+        still go out, but with added latency, tens of milliseconds with H264
+        at 720p and above. Give both or neither; both must be even. Ignored
+        for the byte-stream codecs.
+
         **Byte-stream latency** (non-H264 codecs): each frame's payload is
         fragmented at the LiveKit chunk size (15 KB) and shipped over a
         single SCTP data channel. Per-frame latency is roughly `1 ms + 2 ms
@@ -850,6 +860,8 @@ class PortalConfig:
         typical inference resolutions (224×224 to 480p) MJPEG q=80–95
         usually does.
         """
+        if (width is None) != (height is None):
+            raise ValueError("width and height must be given together")
         self._inner.add_video(
             name,
             codec,
@@ -859,6 +871,8 @@ class PortalConfig:
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         )
         self._video_track_specs = list(self._inner.video_track_specs())
 
@@ -1278,8 +1292,9 @@ class Portal:
 
     def now_us(self) -> int:
         """Now, in microseconds on the robot's clock. On the robot this is its
-        own clock; before the first sync it is local time. Never repeats and
-        never goes backwards.
+        own clock; before the first sync it is local time. At the first sync it
+        switches to the robot's clock in one step, possibly backwards; after
+        that it never repeats and never goes backwards.
         """
         return self._inner.now_us()
 
@@ -1306,6 +1321,10 @@ class Portal:
 
         Returns the observers that were present. An empty list means no one
         recorded the mark.
+
+        The encoded keypoint must fit in one data packet, about 64 KB on a
+        default LiveKit server. A larger one raises `PortalError.Room` with the
+        server's limit; put bulky data elsewhere and reference it.
         """
         if not isinstance(type, str):
             raise TypeError(f"keypoint type must be a str, got {type.__class__.__name__}")
@@ -1509,7 +1528,12 @@ class _RoleConfigBase:
         screencast: Optional[bool] = None,
         stall_behavior: Optional["StallBehavior"] = None,
         max_lag_ms: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> None:
+        """Declare a video track. See `PortalConfig.add_video`."""
+        if (width is None) != (height is None):
+            raise ValueError("width and height must be given together")
         self._inner.add_video(
             name,
             codec,
@@ -1519,6 +1543,8 @@ class _RoleConfigBase:
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         )
 
     def add_state_typed(self, schema: Iterable[SchemaEntry]) -> None:

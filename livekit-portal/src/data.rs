@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use crate::config::FieldSpec;
 use crate::error::{PortalError, PortalResult};
 
+use crate::clock::anchored_now_us;
 #[cfg(test)]
 use crate::dtype::DType;
 use crate::metrics::{DataStream, MetricsRegistry};
@@ -362,6 +363,8 @@ fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State
 ///
 /// `received_at_us` is on the same clock as `Portal::now_us()`, so the robot's
 /// end-to-end latency compares its own frame timestamps against its own clock.
+/// Jitter uses the local arrival clock instead, which never steps with a sync
+/// correction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_data_received(
     payload: &[u8],
@@ -381,9 +384,8 @@ pub(crate) fn handle_data_received(
     match (config_role, topic) {
         (_, ACTION_TOPIC) => match deserialize_action(payload, action_fp, action_schema) {
             Ok((send_ts, in_reply_to_ts_us, values)) => {
-                let now = received_at_us;
-                metrics.record_received(DataStream::Action, send_ts, now);
-                metrics.record_e2e(in_reply_to_ts_us, now);
+                metrics.record_received(DataStream::Action, send_ts, anchored_now_us());
+                metrics.record_e2e(in_reply_to_ts_us, received_at_us);
                 action.deliver(build_action(
                     send_ts,
                     in_reply_to_ts_us,
@@ -402,7 +404,7 @@ pub(crate) fn handle_data_received(
         (Role::Operator | Role::Observer, STATE_TOPIC) => {
             match deserialize_values(payload, state_fp, state_schema) {
                 Ok((timestamp_us, values)) => {
-                    metrics.record_received(DataStream::State, timestamp_us, received_at_us);
+                    metrics.record_received(DataStream::State, timestamp_us, anchored_now_us());
                     state.deliver(build_state(timestamp_us, state_schema, &values));
                     if let Some(sb) = sync_buffer {
                         return sb.lock().push_state(timestamp_us, values);

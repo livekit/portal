@@ -158,6 +158,16 @@ is not network. Compare the remainder against your inference time. Frame video
 adds a per-chunk floor on top, covered in
 [Frame video](05-frame-video.md#the-latency-floor).
 
+On a WebRTC track sending frames larger than 640x480, pass the frame size to
+`add_video`. Without it the encoder is set up for 640x480, which adds tens of
+milliseconds at 720p and above with H.264:
+
+```python
+cfg.add_video("front", width=1280, height=720)
+```
+
+See [Frame size](03-portal-api.md#frame-size).
+
 ### Time sync never completes
 
 `metrics().time_sync.synced` stays `False` and `on_time_synced` never fires.
@@ -245,12 +255,12 @@ See [Choosing `tolerance`](04-tuning.md#choosing-tolerance).
 ### state-overflow
 
 ```
-[state-overflow] state buffer full (5), dropped 2 oldest. Further drops in this burst won't be re-logged.
+[state-overflow] state buffer full (5), dropped 2 oldest (40 more overflows since the last warning)
 ```
 
 The state buffer hit its cap and shed its oldest entries. States piled up with no
-frame to match against, which usually means a video track stalled completely.
-Logs once per burst.
+frame to match against, which usually means a video track stalled completely, or
+state is published faster than the video frame rate. Logs at most once every 5 s.
 
 **Fix.** Raise `slack` to tolerate longer stalls, or lower `max_lag` so stuck
 moments resolve before they pile up. Set `stall_behavior` to `FREEZE` or `OMIT` if a
@@ -260,12 +270,12 @@ robot, not in the buffer.
 ### video-overflow
 
 ```
-[video-overflow] 'front' buffer full, evicted 3 frame(s)
+[video-overflow] 'front' buffer full, evicted 1 frame(s) (148 more evictions since the last warning)
 ```
 
 A video track's buffer hit its cap and dropped its oldest frames. This is normal
 when video arrives faster than state. The newest frames are kept, so matching
-still works.
+still works. Logs at most once every 5 s per track.
 
 **Fix.** Usually nothing. If it pairs with [`sync-drop`](#sync-drop), the buffer
 is too shallow to bridge the two rates, so raise `slack`. The cumulative count is
@@ -295,17 +305,32 @@ in a one-off burst.
 
 ```
 [publish-full] topic 'state' queue full (cap=1024), dropping packet
-[publish-full] frame_video 'front' queue full (cap=1024), dropping frame
 ```
 
-The outbound queue for a topic or frame-video track filled and a packet
-was dropped before leaving the machine. The link cannot ship data as fast as you
-produce it.
+The outbound queue for a topic filled and a packet was dropped before leaving
+the machine. The link cannot ship data as fast as you produce it.
+
+Frame-video tracks don't log this. They keep only the newest unsent frame, and
+each replaced frame counts in `metrics.transport.frames_dropped_publisher_full`.
 
 **Fix.** Lower the publish rate, the resolution, or the frame rate. Check the
 network. A persistent warning is sustained backpressure, not a spike. Track it
 with `metrics.transport.frames_dropped_publisher_full`. If you would rather shed
 load than queue it, use a WebRTC video track instead of frame video.
+
+### playout-delay
+
+```
+[playout-delay] zero playout delay not enabled: the WebRTC runtime is already initialized without zero playout delay
+```
+
+Something in this process connected to LiveKit before Portal did, so libwebrtc's
+runtime started with its default playout delay and Portal cannot change it.
+Video still arrives, but libwebrtc holds frames back to smooth playback, which
+adds tens of milliseconds on VP8, VP9 and AV1.
+
+**Fix.** Connect Portal before any other LiveKit room in the same process, or run
+it in its own process.
 
 ### publish-failed
 

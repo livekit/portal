@@ -208,8 +208,8 @@ pub struct FieldSpec {
 /// One record for every track regardless of transport, mirroring the core
 /// `VideoTrackSpec` — `codec` says which transport it rides and therefore
 /// which options apply. `quality` is meaningful for `VideoCodec.Mjpeg`
-/// (1..=100); `max_bitrate_kbps`, `simulcast` and `screencast` are
-/// meaningful for the WebRTC codecs. Each is ignored by the other transport
+/// (1..=100); `max_bitrate_kbps`, `simulcast`, `screencast`, `width` and
+/// `height` are meaningful for the WebRTC codecs. Each is ignored by the other transport
 /// — the YAML loader rejects a mismatched option outright, while `add_video`
 /// accepts and ignores it, so a spec may carry a value its codec never
 /// reads. `quality` is the exception: it reads back as `0` on every codec
@@ -222,6 +222,12 @@ pub struct VideoTrackSpec {
     pub max_bitrate_kbps: Option<u32>,
     pub simulcast: bool,
     pub screencast: bool,
+    /// Frame size the encoder is set up for. Both are set or neither is;
+    /// neither means 640x480.
+    #[uniffi(default = None)]
+    pub width: Option<u32>,
+    #[uniffi(default = None)]
+    pub height: Option<u32>,
 }
 
 fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
@@ -232,6 +238,8 @@ fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
         max_bitrate_kbps: s.max_bitrate_kbps,
         simulcast: s.simulcast,
         screencast: s.screencast,
+        width: s.resolution.map(|r| r.width),
+        height: s.resolution.map(|r| r.height),
     }
 }
 
@@ -365,12 +373,48 @@ impl From<core::TimeSyncSource> for TimeSyncSource {
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
+    pub data: FrameBytes,
     pub timestamp_us: u64,
     /// Whether these pixels are a live match, a reused earlier frame, or a
     /// synthesized placeholder. Always `Live` outside of `Observation`.
     pub source: FrameSource,
 }
+
+/// Frame pixels. Crosses the FFI exactly like `Vec<u8>` (foreign bindings see
+/// `bytes`), but uniffi writes a `Vec<u8>` one element at a time: about 3 ms
+/// per 1080p frame. This writes it with one copy, straight from the core's
+/// shared buffer.
+#[derive(Debug, Clone)]
+pub struct FrameBytes(bytes::Bytes);
+
+// SAFETY: the FFI type, the serialized layout (a big-endian `i32` length,
+// then the bytes) and the type metadata are all `Vec<u8>`'s, so foreign code
+// reads and writes it as `bytes`.
+unsafe impl uniffi::FfiConverter<crate::UniFfiTag> for FrameBytes {
+    uniffi::ffi_converter_rust_buffer_lift_and_lower!(crate::UniFfiTag);
+
+    fn write(obj: Self, buf: &mut Vec<u8>) {
+        let len = i32::try_from(obj.0.len()).expect("frame larger than 2 GiB");
+        buf.reserve(4 + obj.0.len());
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&obj.0);
+    }
+
+    fn try_read(buf: &mut &[u8]) -> uniffi::Result<Self> {
+        uniffi::check_remaining(buf, 4)?;
+        let (len, rest) = buf.split_at(4);
+        let len = usize::try_from(i32::from_be_bytes(len.try_into()?))?;
+        uniffi::check_remaining(rest, len)?;
+        let (data, rest) = rest.split_at(len);
+        *buf = rest;
+        Ok(Self(bytes::Bytes::copy_from_slice(data)))
+    }
+
+    const TYPE_ID_META: uniffi::MetadataBuffer =
+        <Vec<u8> as uniffi::TypeId<crate::UniFfiTag>>::TYPE_ID_META;
+}
+
+uniffi::derive_ffi_traits!(local FrameBytes);
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Observation {
@@ -764,6 +808,9 @@ impl PortalConfig {
     /// source as screen content, which pins the resolution and drops frames
     /// under CPU or bandwidth pressure instead of rescaling the frame. Both
     /// apply to the WebRTC codecs only and default to `false`.
+    /// `width` and `height` are the frame size the WebRTC encoder is set up
+    /// for, given together; both `None` means 640x480. See
+    /// `core::PortalConfig::add_video`.
     /// `stall_behavior` and `max_lag_ms` are per-track overrides of
     /// [`set_stall_behavior`] / [`set_max_lag_ms`], applied at the declaration
     /// site so a track's whole configuration reads in one place. `None` on
@@ -780,9 +827,18 @@ impl PortalConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
+        let resolution = match (width, height) {
+            (Some(width), Some(height)) => Some(core::Resolution { width, height }),
+            (None, None) => None,
+            _ => panic!("width and height must be given together"),
+        };
+        let options =
+            core::VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution };
         let mut cfg = self.inner.lock();
-        cfg.add_video(name.clone(), codec.into(), quality, max_bitrate_kbps, simulcast, screencast);
+        cfg.add_video(name.clone(), codec.into(), options);
         if let Some(b) = stall_behavior {
             cfg.set_track_stall_behavior(name.clone(), b.into());
         }
@@ -1321,6 +1377,8 @@ impl RobotConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -1331,6 +1389,8 @@ impl RobotConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 
@@ -1512,6 +1572,8 @@ impl OperatorConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -1522,6 +1584,8 @@ impl OperatorConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 
@@ -1997,6 +2061,8 @@ impl ObserverConfig {
         screencast: Option<bool>,
         stall_behavior: Option<StallBehavior>,
         max_lag_ms: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) {
         self.inner.add_video(
             name,
@@ -2007,6 +2073,8 @@ impl ObserverConfig {
             screencast,
             stall_behavior,
             max_lag_ms,
+            width,
+            height,
         );
     }
 
@@ -2305,7 +2373,7 @@ fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
     VideoFrame {
         width: f.width,
         height: f.height,
-        data: f.data.to_vec(),
+        data: FrameBytes(f.data.clone()),
         timestamp_us: f.timestamp_us,
         source: f.source.into(),
     }
@@ -2407,5 +2475,34 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             e2e_us_p95: m.policy.e2e_us_p95,
             correlated_received: m.policy.correlated_received,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uniffi::{Lift, Lower};
+
+    #[test]
+    fn frame_bytes_cross_exactly_like_vec_u8() {
+        let pixels: Vec<u8> = (0..=255).cycle().take(3 * 64 * 48).collect();
+        let mut ours = Vec::new();
+        <FrameBytes as Lower<UniFfiTag>>::write(FrameBytes(pixels.clone().into()), &mut ours);
+        let mut reference = Vec::new();
+        <Vec<u8> as Lower<UniFfiTag>>::write(pixels.clone(), &mut reference);
+        assert_eq!(ours, reference);
+
+        let mut rest = ours.as_slice();
+        let back = <FrameBytes as Lift<UniFfiTag>>::try_read(&mut rest).unwrap();
+        assert_eq!(back.0.as_ref(), pixels.as_slice());
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn truncated_frame_bytes_are_rejected() {
+        let mut buf = Vec::new();
+        <Vec<u8> as Lower<UniFfiTag>>::write(vec![1, 2, 3, 4], &mut buf);
+        buf.pop();
+        assert!(<FrameBytes as Lift<UniFfiTag>>::try_read(&mut buf.as_slice()).is_err());
     }
 }

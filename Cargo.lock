@@ -1672,6 +1672,7 @@ name = "livekit-portal"
 version = "0.2.8"
 dependencies = [
  "bytes",
+ "cc",
  "futures-util",
  "image",
  "livekit",
@@ -1682,6 +1683,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "webrtc-sys-build",
  "yuv-sys",
 ]
 
@@ -1690,6 +1692,7 @@ name = "livekit-portal-ffi"
 version = "0.2.8"
 dependencies = [
  "async-trait",
+ "bytes",
  "ctor",
  "env_logger",
  "livekit-portal",

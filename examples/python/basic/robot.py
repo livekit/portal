@@ -141,7 +141,8 @@ async def main() -> None:
         for i in range(n_frames):
             phase = i / fps  # seconds
             frame = _make_frame(width, height, phase)
-            ts_us = int(time.time() * 1_000_000)
+            # One stamp for the frame and the state, so they match exactly.
+            ts_us = robot_portal.now_us()
             robot_portal.send_video_frame(TRACK_NAME, frame, timestamp_us=ts_us)
             # Send Python-native values; the publisher casts to the declared
             # dtype at the wire boundary. `gripper=True` becomes one byte,

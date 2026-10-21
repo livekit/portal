@@ -26,7 +26,7 @@
 //!     from UniFFI instead of hand-reimplementing it per host language.
 //!   * Records (`VideoFrame`, `Observation`, `Action`, `State`, metrics)
 //!     cross the boundary by value. Callbacks always own their payload.
-//!   * `PortalCallbacks` is a foreign trait (`with_foreign`). The foreign
+//!   * `PortalCallbacks` is a foreign trait (`rust, foreign`). The foreign
 //!     side implements it once; the five closures registered into
 //!     `core::Portal` fan out into its methods.
 //!   * `connect`/`disconnect` are native `async` — no more request/async_id
@@ -730,7 +730,7 @@ impl From<RpcError> for core::RpcError {
 }
 
 /// Foreign-implemented handler for a single RPC method.
-#[uniffi::export(with_foreign)]
+#[uniffi::export(rust, foreign)]
 #[async_trait::async_trait]
 pub trait RpcHandler: Send + Sync {
     async fn handle(&self, data: RpcInvocationData) -> Result<String, RpcError>;
@@ -741,7 +741,7 @@ pub trait RpcHandler: Send + Sync {
 // The foreign side implements this once per `Portal`.
 // ---------------------------------------------------------------------------
 
-#[uniffi::export(with_foreign)]
+#[uniffi::export(rust, foreign)]
 pub trait PortalCallbacks: Send + Sync {
     fn on_action(&self, action: Action);
     fn on_state(&self, state: State);
@@ -1147,13 +1147,13 @@ impl Portal {
     pub fn send_video_frame(
         &self,
         track_name: String,
-        rgb_data: Vec<u8>,
+        rgb_data: &[u8],
         width: u32,
         height: u32,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
         self.inner
-            .send_video_frame(&track_name, &rgb_data, width, height, timestamp_us)
+            .send_video_frame(&track_name, rgb_data, width, height, timestamp_us)
             .map_err(Into::into)
     }
 
@@ -1766,7 +1766,7 @@ impl Robot {
     pub fn send_video_frame(
         &self,
         track_name: String,
-        rgb_data: Vec<u8>,
+        rgb_data: &[u8],
         width: u32,
         height: u32,
         timestamp_us: Option<u64>,

@@ -52,33 +52,36 @@ LiveKit server.
 
 ## Why LiveKit Portal
 
-Remote robotics needs video and control data to cross networks with changing
-bandwidth, packet loss, and NAT. LiveKit provides WebRTC transport and media
-routing without a VPN or manual port forwarding.
+Imagine your robot has two operators: a policy running in the cloud and a human
+ready to take over. The policy misses a grasp. The human steps in, demonstrates
+a correction, then returns control. You want to record the entire session to
+improve the policy.
 
-Its room model lets a robot, human operators, policies, and recorders share one
-session. Portal adds the robotics-specific coordination: matching observations,
-synchronizing clocks, selecting who controls the robot, and recording data.
-Your application supplies the sensors, policy, and hardware control.
+A recorder that logs only the teleoperator's inputs misses the policy's actions.
+If it timestamps incoming data on arrival, network delays become part of the
+recording: a camera frame and a joint reading captured together appear to have
+happened at different times. Separate logs from each machine leave you to
+reconstruct the handoff across different clocks.
 
-Use the same Portal code with LiveKit Cloud or a self-hosted server. For clients
-built with other LiveKit SDKs, such as a browser teleoperation UI, follow the
-[wire protocol](docs/reference/wire-protocol.md).
+Portal puts the robot, both operators, and an independent recorder in one
+LiveKit room. The robot accepts actions from the active operator, and a single
+call transfers control. Participants synchronize to the robot's clock, so
+frames, state, actions, and episode annotations share a timeline. The recorder
+can capture both operators' actions, including what the policy proposed while
+the human was in control, with each action labeled by sender and control status.
 
-## What you can build
+That gives you the policy attempt, the human correction, and the context needed
+to compare them in one recording. Write it to a Rerun archive or your own sink,
+then choose how to align and select samples for training.
 
-**Teleoperate a robot.** Connect cameras and hardware through `Robot`, then send
-commands from a remote `Operator`. Start with the
-[quickstart](docs/01-quickstart.md) or the [SO-101 example](examples/python/so101).
+LiveKit provides the foundation: multi-participant rooms and WebRTC transport
+across NAT and changing network conditions, without a VPN or manual port
+forwarding. Portal adds observation matching, clock synchronization, control
+arbitration, and recording. The same code runs on LiveKit Cloud or a self-hosted
+server.
 
-**Run a policy in the cloud.** The policy joins as an operator, receives
-synchronized observations, and sends actions back. See the
-[inference example](examples/python/inference).
-
-**Collect human corrections.** Keep a human connected alongside the policy,
-transfer control when needed, and let an observer record both throughout the
-session. Follow [control handoff](docs/04-arbitration.md) and
-[data recording](docs/03-data-recording.md).
+Start with one robot and one operator, then add a human or recorder as your
+application grows.
 
 ## Get started
 
@@ -86,8 +89,9 @@ session. Follow [control handoff](docs/04-arbitration.md) and
 pip install livekit-portal
 ```
 
-Follow the [quickstart](docs/01-quickstart.md) to connect your first robot and
-operator. It includes platform requirements, credentials, and runnable scripts.
+Follow the [quickstart](docs/01-quickstart.md) to run your first control loop
+without physical hardware. Then add [control handoff](docs/04-arbitration.md)
+and [data recording](docs/03-data-recording.md).
 For an existing LeRobot application, use the [LeRobot plugins](docs/reference/lerobot.md).
 
 ## Examples

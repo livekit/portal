@@ -77,3 +77,39 @@ async def test_observer_records_a_session(pair):
     assert len(by_kind("metrics")) >= 2
     m = obs.metrics().observer
     assert m.recording is False and m.frames_dropped == 0
+
+
+async def test_observer_records_a_session_to_rrd(pair, tmp_path):
+    pytest.importorskip("rerun")
+    from livekit.portal.recording import RrdSink
+    from test_rrd_sink import _read
+
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        _declare(cfg)
+    await pair.start()
+    cfg = ObserverConfig(pair.room)
+    cfg.add_state_typed([("j", DType.F32)])
+    _declare(cfg)
+    obs = Observer(cfg)
+    sink = RrdSink(tmp_path)
+    await obs.connect(URL, _make_token("recorder", pair.room))
+    assert await wait_for(lambda: obs.active_operator() == "operator")
+    obs.record_to(sink, metrics_interval_s=0.2)
+
+    frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    await pair.operator.send_keypoint("recording", {"task_description": "stack"})
+    for i in range(30):
+        pair.robot.send_state({"j": float(i)})
+        pair.robot.send_video_frame("cam", frame)
+        pair.operator.send_action({"a": float(i)})
+        await asyncio.sleep(1 / 60)
+    await pair.operator.send_keypoint("idle")
+    await asyncio.sleep(0.5)
+    await obs.disconnect()
+
+    rows = _read(sink.path)
+    assert len(rows["/observation/j"]) == 30
+    assert len(rows["/observation/cam"]) >= 25
+    assert len(rows["/action/operator/a"]) >= 28
+    assert set(rows) >= {"/keypoints/recording", "/keypoints/idle", "/portal/schema"}
+    assert any(e.startswith("/metrics/") for e in rows)

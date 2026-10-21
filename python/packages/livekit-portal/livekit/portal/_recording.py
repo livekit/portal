@@ -51,6 +51,9 @@ class SessionInfo:
     """Which clock the timestamps come from, so an archive can say so."""
     started_at_us: int
     """`now_us()` when the recording opened, on the robot's clock."""
+    now_us: Callable[[], int]
+    """The observer's `now_us()`, for sinks that stamp rows of their own
+    (metrics, for example)."""
 
 
 class Sink(Protocol):

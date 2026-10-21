@@ -296,6 +296,37 @@ impl From<StallBehavior> for core::StallBehavior {
     }
 }
 
+/// Which received actions reach `on_action` / `get_action` on an operator:
+/// `NONE` (default), `ACTIVE` (the active operator's), or `ALL` (every
+/// operator's, with `Action.active` marking the ones the gate dropped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum ActionSubscription {
+    #[default]
+    None,
+    Active,
+    All,
+}
+
+impl From<ActionSubscription> for core::ActionSubscription {
+    fn from(s: ActionSubscription) -> Self {
+        match s {
+            ActionSubscription::None => core::ActionSubscription::None,
+            ActionSubscription::Active => core::ActionSubscription::Active,
+            ActionSubscription::All => core::ActionSubscription::All,
+        }
+    }
+}
+
+impl From<core::ActionSubscription> for ActionSubscription {
+    fn from(s: core::ActionSubscription) -> Self {
+        match s {
+            core::ActionSubscription::None => ActionSubscription::None,
+            core::ActionSubscription::Active => ActionSubscription::Active,
+            core::ActionSubscription::All => ActionSubscription::All,
+        }
+    }
+}
+
 /// Where `now_us()` comes from. `PORTAL` syncs to the robot's clock;
 /// `SYSTEM` trusts the host clock, for hosts kept in step by PTP or GPS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
@@ -356,6 +387,9 @@ pub struct Action {
     /// the active-operator gate (or, for the local echo path, the
     /// publisher's own identity).
     pub sender: String,
+    /// Whether `sender` was the active operator at gate time. `false` marks
+    /// a shadow action, seen only with `ActionSubscription.ALL`.
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -789,13 +823,10 @@ impl PortalConfig {
         self.inner.lock().set_e2ee_key(key);
     }
 
-    /// Operator-side opt-in to receiving executed actions ("HITL
-    /// recording"). Off by default. When on, `on_action` / `get_action`
-    /// fire on the operator for actions
-    /// the active operator sends, plus a local echo when self == active.
-    /// No-op on the Robot side — the robot always processes actions.
-    pub fn set_action_subscription(&self, enable: bool) {
-        self.inner.lock().set_action_subscription(enable);
+    /// Operator-side: which received actions reach `on_action` /
+    /// `get_action`. No-op on the Robot side.
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.lock().set_action_subscription(subscription.into());
     }
 
     /// Names of every declared video track, in declaration order, whatever
@@ -878,8 +909,8 @@ impl PortalConfig {
     }
 
     /// Whether action subscription is enabled (operator-side opt-in).
-    pub fn action_subscription(&self) -> bool {
-        self.inner.lock().action_subscription()
+    pub fn action_subscription(&self) -> ActionSubscription {
+        self.inner.lock().action_subscription().into()
     }
 
     /// Whether a shared E2EE key has been set. The key bytes are not
@@ -931,6 +962,7 @@ impl Portal {
                 timestamp_us: action.timestamp_us,
                 in_reply_to_ts_us: action.in_reply_to_ts_us,
                 sender: action.sender.clone(),
+                active: action.active,
             });
         });
         let cb = callbacks.clone();
@@ -1044,6 +1076,7 @@ impl Portal {
             timestamp_us: a.timestamp_us,
             in_reply_to_ts_us: a.in_reply_to_ts_us,
             sender: a.sender,
+            active: a.active,
         })
     }
 
@@ -1300,8 +1333,8 @@ impl RobotConfig {
 
     /// No-op on the Robot side — the robot always processes actions. Kept on
     /// the surface so `RobotConfig` and `OperatorConfig` stay symmetrical.
-    pub fn set_action_subscription(&self, enable: bool) {
-        self.inner.set_action_subscription(enable);
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.set_action_subscription(subscription);
     }
 
     pub fn video_tracks(&self) -> Vec<String> {
@@ -1359,7 +1392,7 @@ impl RobotConfig {
 
     /// Always reports what was set, but the robot ignores the flag — it
     /// always processes actions. Kept for surface symmetry.
-    pub fn action_subscription(&self) -> bool {
+    pub fn action_subscription(&self) -> ActionSubscription {
         self.inner.action_subscription()
     }
 
@@ -1489,11 +1522,10 @@ impl OperatorConfig {
         self.inner.set_track_max_lag_ms(track, ms);
     }
 
-    /// Operator-side opt-in to receiving executed actions ("HITL recording").
-    /// Off by default. See `PortalConfig::set_action_subscription` for full
-    /// semantics.
-    pub fn set_action_subscription(&self, enable: bool) {
-        self.inner.set_action_subscription(enable);
+    /// Which received actions reach `on_action`. See
+    /// `PortalConfig::set_action_subscription`.
+    pub fn set_action_subscription(&self, subscription: ActionSubscription) {
+        self.inner.set_action_subscription(subscription);
     }
 
     pub fn video_tracks(&self) -> Vec<String> {
@@ -1549,7 +1581,7 @@ impl OperatorConfig {
         self.inner.reuse_stale_frames()
     }
 
-    pub fn action_subscription(&self) -> bool {
+    pub fn action_subscription(&self) -> ActionSubscription {
         self.inner.action_subscription()
     }
 
@@ -1732,7 +1764,7 @@ impl Operator {
     }
 
     /// Latest executed action, or `None`. Requires
-    /// `OperatorConfig::set_action_subscription(true)` for any value to land.
+    /// an `OperatorConfig::set_action_subscription` other than `NONE` for any value to land.
     pub fn get_action(&self) -> Option<Action> {
         self.inner.get_action()
     }

@@ -328,15 +328,23 @@ pub(crate) type StateSlot = DataSlot<State>;
 /// path. `sender` is the identity of the operator that produced this
 /// action (set at gate time, or to the publisher's identity on the
 /// local echo path).
+/// Who sent an action and whether the gate counted it as active, both
+/// decided when the packet passed the gate.
+pub(crate) struct ActionOrigin {
+    pub sender: String,
+    pub active: bool,
+}
+
 pub(crate) fn build_action(
     timestamp_us: u64,
     in_reply_to_ts_us: Option<u64>,
     schema: &[FieldSpec],
     values: &[f64],
-    sender: String,
+    origin: ActionOrigin,
 ) -> Action {
     let (typed, raw) = to_value_maps(schema, values);
-    Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us, sender }
+    let ActionOrigin { sender, active } = origin;
+    Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us, sender, active }
 }
 
 fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State {
@@ -348,10 +356,9 @@ fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State
 /// returns any observations/drops that resulted, for the caller to dispatch
 /// outside any locks.
 ///
-/// `sender` is the identity of the participant who published the packet,
-/// stamped into `Action::sender` so recorders can label rows by producer
-/// without consulting any room state. Empty on the state path, which doesn't
-/// carry a sender field.
+/// `origin` is the publisher's identity and its active flag at gate time,
+/// stamped into the `Action` so recorders can label rows without consulting
+/// room state that may have moved on. Unused on the state path.
 ///
 /// `received_at_us` is on the same clock as `Portal::now_us()`, so the robot's
 /// end-to-end latency compares its own frame timestamps against its own clock.
@@ -368,7 +375,7 @@ pub(crate) fn handle_data_received(
     state: &StateSlot,
     sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
     metrics: &MetricsRegistry,
-    sender: String,
+    origin: ActionOrigin,
     received_at_us: u64,
 ) -> SyncOutput {
     match (config_role, topic) {
@@ -383,7 +390,7 @@ pub(crate) fn handle_data_received(
                         in_reply_to_ts_us,
                         action_schema,
                         &values,
-                        sender,
+                        origin,
                     ));
                 }
                 Err(DecodeError::SchemaMismatch { expected, got }) => {

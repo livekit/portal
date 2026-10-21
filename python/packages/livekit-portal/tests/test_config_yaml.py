@@ -27,6 +27,7 @@ import textwrap
 import pytest
 
 from livekit.portal import (
+    ActionSubscription,
     ConfigFileError,
     DType,
     FieldSpec,
@@ -48,7 +49,7 @@ YAML_FULL = textwrap.dedent(
     state_reliable: false
     action_reliable: false
     reuse_stale_frames: true
-    action_subscription: true
+    action_subscription: all
     videos:
       - { name: front, codec: h264 }
       - { name: wrist, codec: mjpeg, quality: 80 }
@@ -234,7 +235,7 @@ def test_yaml_sync_knobs_are_readable(cfg):
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
     assert cfg.reuse_stale_frames is True
-    assert cfg.action_subscription is True
+    assert cfg.action_subscription == ActionSubscription.ALL
     assert cfg.has_e2ee_key is False
 
 
@@ -303,3 +304,8 @@ def test_time_sync_source_from_yaml(value, expected):
 def test_time_sync_source_rejects_unknown_value():
     with pytest.raises(ConfigFileError):
         PortalConfig.from_yaml_str("version: 1\ntime_sync_source: ntp\n", "demo", Role.OPERATOR)
+
+
+def test_action_subscription_bool_is_rejected():
+    with pytest.raises(ConfigFileError, match="none, active, all"):
+        PortalConfig.from_yaml_str("version: 1\naction_subscription: true\n", "demo", Role.OPERATOR)

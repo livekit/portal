@@ -60,6 +60,7 @@ DType = _ffi.DType
 VideoCodec = _ffi.VideoCodec
 FrameSource = _ffi.FrameSource
 StallBehavior = _ffi.StallBehavior
+ActionSubscription = _ffi.ActionSubscription
 TimeSyncSource = _ffi.TimeSyncSource
 FieldSpec = _ffi.FieldSpec
 VideoTrackSpec = _ffi.VideoTrackSpec
@@ -94,6 +95,21 @@ SchemaEntry = Union[Tuple[str, DType], FieldSpec]
 # reason about the shape of `action.values` / `state.values` /
 # `observation.state`.
 TypedScalar = Union[bool, int, float]
+
+
+def _to_action_subscription(value: Any) -> "ActionSubscription":
+    """Accept `ActionSubscription` or its name; reject v0.2's bool loudly."""
+    if isinstance(value, bool):
+        raise TypeError(
+            "set_action_subscription no longer takes a bool; pass one of "
+            f"'none', 'active', 'all' (v0.2's {value} is now "
+            f"'{'active' if value else 'none'}')"
+        )
+    if isinstance(value, ActionSubscription):
+        return value
+    if isinstance(value, str) and value.upper() in ActionSubscription.__members__:
+        return ActionSubscription[value.upper()]
+    raise ValueError(f"action subscription must be one of 'none', 'active', 'all', got {value!r}")
 
 
 def _to_field_specs(schema: Iterable[SchemaEntry]) -> List[FieldSpec]:
@@ -236,6 +252,11 @@ class Action:
     own identity). Use this rather than `Operator.active_operator()` to
     label rows in a recording dataset — it is set at gate time and
     cannot race with a handoff."""
+    active: bool
+    """Whether `sender` was the active operator at gate time. `False` marks
+    a shadow action the robot ignored, only seen with
+    `ActionSubscription.ALL`. It means the action passed the gate, not that
+    the robot carried it out."""
     in_reply_to_ts_us: Optional[int] = None
 
 
@@ -281,6 +302,7 @@ def _wrap_action(
         timestamp_us=action.timestamp_us,
         in_reply_to_ts_us=action.in_reply_to_ts_us,
         sender=action.sender,
+        active=action.active,
     )
 
 
@@ -687,9 +709,9 @@ class PortalConfig:
         return self._inner.reuse_stale_frames()
 
     @property
-    def action_subscription(self) -> bool:
-        """Whether action subscription is enabled. Operator-side only —
-        the robot always processes actions.
+    def action_subscription(self) -> "ActionSubscription":
+        """Which received actions reach `on_action`. Operator-side only —
+        the robot always processes the active operator's actions.
         """
         return self._inner.action_subscription()
 
@@ -918,18 +940,20 @@ class PortalConfig:
         """Per-track override for `set_max_lag_ms`."""
         self._inner.set_track_max_lag_ms(track, ms)
 
-    def set_action_subscription(self, enable: bool) -> None:
-        """Operator-side opt-in to receiving executed actions.
+    def set_action_subscription(self, subscription: "ActionSubscription | str") -> None:
+        """Operator-side: which received actions reach `on_action` /
+        `get_action`. Pass an `ActionSubscription` or its name:
 
-        Off by default. When on, the operator subscribes to actions from
-        the active operator and gets a local echo of its own sends when
-        active. Used by recorders, shadow eval policies, and
-        live monitoring. No-op on the Robot side — the robot always
-        processes actions.
+        - `"none"` (default): nothing.
+        - `"active"`: the active operator's actions, what the robot executes.
+        - `"all"`: every operator's actions. `Action.active` is `False` for
+          the ones the gate dropped, e.g. to record a shadow policy.
 
-        The `Operator` class re-exposes this directly on `OperatorConfig`.
+        A local filter: actions are broadcast either way. The operator also
+        sees its own sends, echoed locally, whenever the subscription would
+        have delivered them. No-op on the Robot side.
         """
-        self._inner.set_action_subscription(enable)
+        self._inner.set_action_subscription(_to_action_subscription(subscription))
 
     def close(self) -> None:
         """No-op: UniFFI releases the Rust-side handle when Python GC drops
@@ -1349,10 +1373,9 @@ class _RoleConfigBase:
         return self._inner.reuse_stale_frames()
 
     @property
-    def action_subscription(self) -> bool:
-        """Whether action subscription is enabled. Reports what was set;
-        on `RobotConfig` the flag has no effect — the robot always
-        processes actions.
+    def action_subscription(self) -> "ActionSubscription":
+        """Which received actions reach `on_action`. Reports what was set;
+        on `RobotConfig` it has no effect.
         """
         return self._inner.action_subscription()
 
@@ -1440,12 +1463,12 @@ class _RoleConfigBase:
     def set_track_max_lag_ms(self, track: str, ms: int) -> None:
         self._inner.set_track_max_lag_ms(track, ms)
 
-    def set_action_subscription(self, enable: bool) -> None:
-        """Operator-side opt-in to receiving executed actions ("HITL
-        recording"). Off by default. See `PortalConfig.set_action_subscription`
-        for full semantics. No-op on `RobotConfig`.
+    def set_action_subscription(self, subscription: "ActionSubscription | str") -> None:
+        """Which received actions reach `on_action`: `"none"` (default),
+        `"active"` or `"all"`. See `PortalConfig.set_action_subscription`.
+        No-op on `RobotConfig`.
         """
-        self._inner.set_action_subscription(enable)
+        self._inner.set_action_subscription(_to_action_subscription(subscription))
 
 
 class RobotConfig(_RoleConfigBase):
@@ -1713,19 +1736,18 @@ class Operator:
     # -- action subscription (HITL recording, shadow eval) -------------------
 
     def on_action(self, callback: Callable[[Action], Any]) -> None:
-        """Fire on every executed action when `set_action_subscription(True)`
-        is enabled on the `OperatorConfig`. `action.sender` labels the
-        operator that produced the action; use it for dataset row labels
-        rather than `active_operator()` to avoid handoff races.
+        """Fire on each action the `OperatorConfig`'s action subscription
+        lets through (`"active"` or `"all"`). `action.sender` and
+        `action.active` are stamped at gate time; use them for dataset row
+        labels rather than `active_operator()` to avoid handoff races.
 
-        No-op without `set_action_subscription(True)` — the receive side
-        does not subscribe to actions, so the callback is never invoked.
+        Never fires with the default `"none"` subscription.
         """
         self._portal.on_action(callback)
 
     def get_action(self) -> Optional[Action]:
-        """Latest executed action, or `None` if none received. Requires
-        `set_action_subscription(True)` for any value to land here.
+        """Latest delivered action, or `None` if none received. Requires an
+        action subscription other than `"none"` for any value to land here.
         """
         return self._portal.get_action()
 
@@ -1806,6 +1828,7 @@ __all__ = [
     "VideoCodec",
     "FrameSource",
     "StallBehavior",
+    "ActionSubscription",
     "FieldSpec",
     "VideoTrackSpec",
     "FrameVideoSpec",

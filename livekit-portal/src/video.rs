@@ -277,7 +277,7 @@ impl VideoReceiver {
     pub fn spawn(
         name: String,
         stream: NativeVideoStream,
-        sync_buffer: Arc<Mutex<SyncBuffer>>,
+        sync_buffer: Option<Arc<Mutex<SyncBuffer>>>,
         slots: Arc<VideoTrackSlots>,
         obs_sink: Arc<ObservationSink>,
         metrics: Arc<TrackMetrics>,
@@ -378,6 +378,9 @@ impl VideoReceiver {
                         );
                     }
                 }
+                let Some(sync_buffer) = &sync_buffer else {
+                    continue;
+                };
                 let output = sync_buffer.lock().push_frame(&name, frame_arc);
                 if !output.is_empty() {
                     obs_sink.dispatch(output);

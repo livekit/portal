@@ -288,3 +288,18 @@ def test_unknown_stall_policy_is_rejected():
             Role.ROBOT,
         )
     assert "nope" in str(e.value)
+
+
+@pytest.mark.parametrize("value, expected", [("portal", "PORTAL"), ("system", "SYSTEM")])
+def test_time_sync_source_from_yaml(value, expected):
+    from livekit.portal import TimeSyncSource
+
+    cfg = PortalConfig.from_yaml_str(
+        f"version: 1\ntime_sync_source: {value}\n", "demo", Role.OPERATOR
+    )
+    assert cfg.time_sync_source == getattr(TimeSyncSource, expected)
+
+
+def test_time_sync_source_rejects_unknown_value():
+    with pytest.raises(ConfigFileError):
+        PortalConfig.from_yaml_str("version: 1\ntime_sync_source: ntp\n", "demo", Role.OPERATOR)

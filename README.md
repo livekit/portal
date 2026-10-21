@@ -70,30 +70,15 @@ propagate handoffs, and reject commands from inactive operators. That means
 maintaining shared session state in a coordination service or realtime database,
 and handling concurrent requests and reconnects.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/why-arbitration-dark.svg">
-  <img alt="A policy and a human send actions through a WebSocket or MoQ relay; session state and the gate that picks the active operator are yours to build." src="docs/images/why-arbitration-light.svg" width="100%">
-</picture>
-
 You also need clock synchronization and a buffering strategy for streams arriving
 at different times. As participants join from different networks, you must keep
 observations aligned without letting a slow stream add excessive control latency.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/why-timing-dark.svg">
-  <img alt="A frame and a joint reading captured together arrive 12 ms and 85 ms later, so stamping on arrival puts them 73 ms apart." src="docs/images/why-timing-light.svg" width="100%">
-</picture>
 
 A recorder that logs only the teleoperator's inputs misses the policy's actions.
 If it timestamps incoming data on arrival, network delays become part of the
 recording: a camera frame and a joint reading captured together appear to have
 happened at different times. Separate logs from each machine leave you to
 reconstruct the handoff across different clocks.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/why-recording-dark.svg">
-  <img alt="A teleop-only recorder loses the policy's attempt, and per-machine logs disagree on when the handoff happened." src="docs/images/why-recording-light.svg" width="100%">
-</picture>
 
 Portal puts the robot, both operators, and an independent recorder in one
 LiveKit room. The robot accepts actions from the active operator, and a single
@@ -103,11 +88,6 @@ Participants synchronize to the robot's clock, so
 frames, state, actions, and episode annotations share a timeline. The recorder
 can capture both operators' actions, including what the policy proposed while
 the human was in control, with each action labeled by sender and control status.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-room-dark.svg">
-  <img alt="The robot, a policy, a human and a recorder in one LiveKit room, sharing video and data tracks, the active_operator attribute and the robot's clock; the recorder writes an .rrd archive." src="docs/images/portal-room-light.svg" width="100%">
-</picture>
 
 That gives you the policy attempt, the human correction, and the context needed
 to compare them in one recording. Write it to a Rerun archive or your own sink,

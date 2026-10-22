@@ -22,7 +22,7 @@ log = { workspace = true }
 # need PNG and JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
-serde-saphyr = "1"
+serde-saphyr = "2"
 serde_json = "1"
 
 [build-dependencies]

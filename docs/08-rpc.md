@@ -1,12 +1,11 @@
 # RPC
 
-> One-shot commands that do not belong in a control loop.
+Use RPC for commands that need a response, such as homing the robot or starting
+calibration. Unlike a stream of joint targets, each call requests one operation
+and returns a result.
 
-`home`, `calibrate`, `start_recording`, a configuration change. These happen
-once, they need an answer, and modelling them as state or actions would be
-awkward. Portal exposes LiveKit's RPC surface directly for them.
-
-Either side can register methods. Either side can invoke them.
+Portal exposes LiveKit RPC through `register_rpc_method` and `perform_rpc`.
+A robot, operator, or observer can register and call methods.
 
 ## Register and call
 
@@ -26,8 +25,6 @@ On the side that asks:
 reply = await op.perform_rpc("home")
 print(reply)   # "ok"
 ```
-
-That is the whole happy path.
 
 Handlers may be `def` or `async def`. They **must return a string**. Returning
 anything else is an error.
@@ -66,7 +63,7 @@ The handler receives an `RpcInvocationData` with four fields:
 | `payload` | The caller's string. Opaque to Portal. |
 | `caller_identity` | Who called. Use it to authorize or to label. |
 | `request_id` | Matches on both sides. Useful in logs. |
-| `response_timeout` | How long the caller will wait. Give up before this. |
+| `response_timeout_ms` | How long the caller will wait, in milliseconds. Give up before this. |
 
 If you need to send binary, base64-encode it yourself. If you find yourself
 pushing near the size limit on every call, that data belongs on a stream rather
@@ -78,19 +75,23 @@ These come from the LiveKit SDK, not from Portal.
 
 | Field | Limit |
 |---|---|
-| Request payload | 15 KB |
-| Response payload | 15 KB |
+| Request payload | 15 KB, only to a peer on the legacy RPC transport |
+| Response payload | 15 KB, only to a peer on the legacy RPC transport |
 | `RpcError.message` | 256 bytes |
 | `RpcError.data` | 15 KB |
 
-An over-limit request fails with transport error code 1402. An over-limit
-response fails with 1504. Neither surfaces as a handler exception, so a handler
-that returns a large string fails in a way its own `try` block cannot catch.
+Portal peers advertise data-stream RPC, so calls between them carry payloads
+over a data stream with no 15 KB cap. Requests and responses of 1 MB both
+go through between two Portal peers. The payload caps apply when the other side
+is an older LiveKit SDK that only speaks the legacy packet transport. There, an
+over-limit request fails with transport error code 1402 and an over-limit
+response with 1504. Neither surfaces as a handler exception, so a handler that
+returns a large string fails in a way its own `try` block cannot catch.
 
 ## Errors
 
 To signal an application error, raise `RpcError.Error(code, message, data)` from
-the handler. It is serialized, sent back, and re-raised on the caller as
+the handler. All three arguments are required; pass `None` for no `data`. It is serialized, sent back, and re-raised on the caller as
 `PortalError.Rpc`.
 
 ```python
@@ -98,7 +99,7 @@ from livekit.portal import RpcError
 
 def home(data):
     if hardware.calibrating:
-        raise RpcError.Error(4001, "cannot home while calibrating")
+        raise RpcError.Error(4001, "cannot home while calibrating", None)
     hardware.home()
     return "ok"
 ```
@@ -121,12 +122,16 @@ Pick your application codes outside that range.
 
 ## Routing
 
-`perform_rpc` routes to the peer Portal has already identified, which is
-whichever participant sent Portal traffic first. If no peer is known yet and the
-room has exactly one remote participant, that one is used.
+Without a `destination`, `perform_rpc` picks a default target:
 
-With several operators in the room, the robot is unambiguous because it is a
-singleton. Addressing a specific operator is not, so pass `destination`:
+- **An operator or observer calls the robot**, found by its `lk.portal.role`
+  attribute.
+- **The robot calls the active operator.**
+- **Otherwise**, if the room has exactly one remote participant, that one. With
+  none it raises `PortalError.NoPeer`, with several `PortalError.AmbiguousPeer`.
+
+The robot is a singleton, so an operator rarely needs `destination`. The robot
+needs it only to reach an operator other than the active one:
 
 ```python
 # Operator to robot. Explicit, though usually unnecessary.
@@ -155,7 +160,7 @@ Do not register your own method under that name.
 
 ## Next steps
 
-- [Portal API](03-portal-api.md). The full surface.
+- [Portal API](05-portal-api.md). The full surface.
 - [Concepts: control handoff](02-concepts.md#control-handoff). What the reserved
   method is for.
 - [Wire protocol](reference/wire-protocol.md#application-rpc). The contract, if

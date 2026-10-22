@@ -243,7 +243,7 @@ impl SyncBuffer {
         let range_ms = self.config.search_range_us as f64 / 1_000.0;
         let ahead_ms = self.drop_warn.worst_ahead_us as f64 / 1_000.0;
         match elapsed {
-            // First drop in a burst. Cause and fix live at docs/logging.md#sync-drop.
+            // First drop in a burst. Cause and fix live at docs/10-troubleshooting.md#sync-drop.
             None => log::warn!(
                 "[sync-drop] dropping states: no frame within ±{range_ms:.0}ms of \
                  the state timestamp (video {ahead_ms:.0}ms ahead). Throttling \

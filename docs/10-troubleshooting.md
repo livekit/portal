@@ -1,12 +1,11 @@
 # Troubleshooting
 
-> Start from the symptom. Or, if you have a tagged warning, jump to its tag.
+If data is missing or the robot does not respond, start with
+[common symptoms](#common-symptoms). If you have a warning such as `[sync-drop]`,
+look it up in the [tag reference](#tag-reference) for checks and possible fixes.
 
-Every warning and error Portal logs carries a short tag in square brackets, like
-`[sync-drop]`. The tag names the root cause, not the call site. Find it in the
-[tag reference](#tag-reference) below for the cause and the fix.
-
-If you do not have a tag yet, start with [common symptoms](#common-symptoms).
+Enable debug logging when the normal connection and warning messages do not
+explain the problem.
 
 ## Turning on logs
 
@@ -28,7 +27,7 @@ crates alone.
 
 | Level | What you get |
 |---|---|
-| `error` | A callback panicked, or a send failed outright. The loop keeps running. |
+| `error` | A callback panicked. The loop keeps running. |
 | `warn` | Something was dropped or ignored. The session continues with reduced quality. |
 | `info` | Connection lifecycle. Connect, disconnect, track published, publisher ready. |
 | `debug` | Per-event detail. Off by default. |
@@ -42,16 +41,7 @@ A healthy session at `info` goes quiet after the startup lines. A steady run of
 
 The operator connects and `on_observation` never fires. Work down this list.
 
-**1. Did anyone claim control?** The robot starts with **no active operator** and
-drops every action. This is the most common first-run problem, and it produces no
-error at all.
-
-```python
-await op.set_active_operator(op.local_identity())
-print(op.active_operator())   # should print your identity
-```
-
-**2. Are both sides in the same room?** The `session` string you pass to
+**1. Are both sides in the same room?** The `session` string you pass to
 `RobotConfig` is a **log label only**. The actual room comes from your token. Two
 peers with the same `session` and different token rooms never meet.
 
@@ -59,16 +49,16 @@ peers with the same `session` and different token rooms never meet.
 print(op.robot_identity())   # None means the robot was never discovered
 ```
 
-**3. Do the schemas match exactly?** Same field names, same order, same dtypes.
+**2. Do the schemas match exactly?** Same field names, same order, same dtypes.
 Look for [`schema-mismatch`](#schema-mismatch) in the logs. A
-[shared YAML file](reference/config-file.md) removes the possibility.
+[shared YAML file](reference/config-file.md) helps keep declarations consistent.
 
-**4. Do the camera names match?** An observation needs **every** declared track
+**3. Do the camera names match?** An observation needs **every** declared track
 to have a frame. A camera declared on the operator and never published by the
 robot means observations never fire. Check `metrics.sync.last_blocker_track` to
 see which one is holding things up.
 
-**5. Is state arriving at all?** Register `on_state` temporarily. It fires on
+**4. Is state arriving at all?** Register `on_state` temporarily. It fires on
 every state packet with no matching involved.
 
 ```python
@@ -77,6 +67,10 @@ op.on_state(lambda s: print("state", s.values))
 
 If `on_state` fires and `on_observation` does not, the problem is matching. If
 neither fires, the problem is transport or the room.
+
+If observations arrive but actions do not, check
+[the active operator](#the-robot-receives-no-actions-and-reports-no-errors).
+Control selection affects actions, not observation delivery.
 
 ### Observations fire, but frames or fields are missing
 
@@ -93,9 +87,9 @@ robot sends it and you never declared it, the robot logs
 failed to publish role attribute (token may be missing canUpdateOwnMetadata)
 ```
 
-Your token omitted `can_update_own_metadata`. Both `Robot` and `Operator`
-self-set an `lk.portal.role` attribute on connect so peers can discover them, and
-that write needs the grant.
+Your token omitted `can_update_own_metadata`. Every role (`Robot`, `Operator`
+and `Observer`) self-sets `lk.portal.role` and `lk.portal.version` attributes on
+connect so peers can discover it, and that write needs the grant.
 
 ```python
 grants = api.VideoGrants(
@@ -121,7 +115,9 @@ await op.set_active_operator(op.local_identity())
 If you are on the lerobot plugins with `auto_claim_control=False`, something else
 has to claim on your behalf.
 
-If the pointer is right, the robot may not count the sender as an operator. It
+If the identity is correct, verify that both sides declare the same action
+schema and that the robot registered `on_action`. The robot also checks the
+sender's role and version. It
 only takes actions from a participant whose `lk.portal.role` is `"operator"` and
 whose `lk.portal.version` matches its own. Check the robot's roster:
 
@@ -132,15 +128,16 @@ print(robot.operators())        # the sender must be listed
 If it is missing, look for a [`version-mismatch`](#version-mismatch) line and
 upgrade every peer to the same release.
 
-### `ImportError` or `ffi not initialized`
+### `ImportError` or `OSError` on import
 
-The native library did not load. Rebuild it:
+The native library did not load. Portal loads it from the package directory,
+next to `livekit_portal_ffi.py`. Rebuild it there:
 
 ```bash
 bash scripts/build_ffi_python.sh release
 ```
 
-Or point `LIVEKIT_PORTAL_FFI_LIB` at a prebuilt binary. If you installed from
+If you installed from
 PyPI on an unsupported platform there is no wheel, and you need a
 [source build](01-quickstart.md#build-from-source).
 
@@ -151,12 +148,12 @@ number you want is `policy.e2e_us_p95`, which includes the match wait and your
 inference time.
 
 If `policy.e2e_us_p95` is `None`, you are not passing `in_reply_to_ts_us`. See
-[Metrics: policy](07-metrics.md#policy).
+[Metrics: policy](09-metrics.md#policy).
 
 If it is populated and large, decompose it. Subtract RTT to get everything that
 is not network. Compare the remainder against your inference time. Frame video
-adds a per-chunk floor on top, covered in
-[Frame video](05-frame-video.md#the-latency-floor).
+adds transfer time that grows with frame size, covered in
+[Frame video](07-frame-video.md#throughput-and-latency).
 
 On a WebRTC track sending frames larger than 640x480, pass the frame size to
 `add_video`. Without it the encoder is set up for 640x480, which adds tens of
@@ -166,7 +163,7 @@ milliseconds at 720p and above with H.264:
 cfg.add_video("front", width=1280, height=720)
 ```
 
-See [Frame size](03-portal-api.md#frame-size).
+See [Frame size](05-portal-api.md#frame-size).
 
 ### Time sync never completes
 
@@ -185,7 +182,7 @@ The other `time_sync` fields tell you how good the estimate is:
   `measured_offset_us` instead. A value far from zero means the hosts' PTP or
   NTP has drifted.
 
-See [Time sync](03-portal-api.md#time-sync).
+See [Time sync](05-portal-api.md#time-sync).
 
 ### Frames arrive at a resolution that changes mid-session
 
@@ -207,7 +204,7 @@ cfg.add_video("front", screencast=True)
 That switches libwebrtc to `MAINTAIN_RESOLUTION`, which drops frames under
 pressure rather than rescaling. You trade smooth motion for a constant frame
 shape. See
-[Simulcast and screencast](03-portal-api.md#simulcast-and-screencast).
+[Simulcast and screencast](05-portal-api.md#simulcast-and-screencast).
 
 Worth checking alongside it: sustained encoder pressure usually means the CPU
 is saturated or `max_bitrate_kbps` is set too low for the resolution and rate
@@ -250,7 +247,7 @@ match window. State kept flowing while video did not.
   cameras stay on screen. Both can be set per track.
 - Check `metrics.sync.last_blocker_track` to see which camera is behind.
 
-See [Choosing `tolerance`](04-tuning.md#choosing-tolerance).
+See [Choosing `tolerance`](06-tuning.md#choosing-tolerance).
 
 ### state-overflow
 
@@ -337,6 +334,7 @@ it in its own process.
 ```
 [publish-failed] data publish failed: <error>
 [publish-failed] clock publish failed: <error>
+[publish-failed] frame_video '<track>' byte stream failed: <error>
 ```
 
 A publish call returned a transport error. The room is disconnected, or the peer
@@ -426,6 +424,8 @@ or encoder problem on the sender.
 ```
 [bad-payload] frame_video: bad header (<error>)
 [bad-payload] state deserialize failed: <error>
+[bad-payload] action deserialize failed: <error>
+[bad-payload] keypoint from '<sender>' is not valid: <error>
 [bad-payload] failed to read frame_video byte stream: <error>
 ```
 
@@ -447,7 +447,22 @@ rosters, so its actions, keypoints and `set_active_operator` calls are ignored.
 Logged once per identity.
 
 **Fix.** Run the same Portal release on every peer. See
-[Migrating to v0.3](09-migrating-to-v0.3.md).
+[Migrating to v0.3](11-migrating-to-v0.3.md).
+
+### missing-timestamp
+
+```
+[missing-timestamp] '<track>' skipped N frame(s) with no user_timestamp; the sender must enable FrameMetadataFeatures.user_timestamp
+```
+
+A WebRTC frame arrived without a capture timestamp, so it can't be matched and is
+dropped before sync. The first skipped frame after subscribing is normal and only
+logged at `debug`. Repeats are logged at most once every 5 seconds.
+
+**Fix.** The sender isn't stamping frames. Portal's own robot always does, so this
+points at a publisher built on another SDK. Enable
+`FrameMetadataFeatures.user_timestamp` on its video track. See
+[Wire protocol](reference/wire-protocol.md).
 
 ### callback-panic
 
@@ -457,8 +472,8 @@ Logged once per identity.
 
 One of your callbacks raised. Portal catches it so it cannot take down the event
 loop, logs it, and keeps running. This covers `on_observation`, `on_drop`,
-`on_state`, `on_action`, the video-frame callbacks, and the operator-roster
-callbacks.
+`on_state`, `on_action`, `on_keypoint`, `on_time_synced`, the video-frame
+callbacks, and the operator-roster callbacks.
 
 **Fix.** Fix the exception. Portal cannot report the line number, so wrap the
 callback body while debugging:
@@ -490,6 +505,16 @@ they are not tagged. `SESSION` below is your session label, not a tag.
 | `[SESSION] reconnected, clearing sync buffers and latest slots` | The session recovered. Buffers were flushed. |
 | `disconnecting` | Disconnect started. |
 
+One untagged `warn` line belongs here too:
+
+```
+[SESSION] observation sync is off, so these options do nothing: <options>
+```
+
+You set `slack`, `tolerance`, a stall behavior or a max lag on a peer with
+observation sync off, usually an `Observer`. They only affect the sync buffer.
+Remove them, or turn sync on with `set_observation_sync(True)`.
+
 If you connect and then see no `subscribed` or `ready` lines, the two peers are
 not seeing each other. Check the room name in the token, then the schemas.
 
@@ -499,11 +524,11 @@ Warnings are throttled, so a log is never a count. Counters never throttle, so
 `portal.metrics()` is the source of truth for totals.
 
 Reach for the tag when you want the cause and the fix. Reach for the counter when
-you want the number. Every field is in [Metrics](07-metrics.md).
+you want the number. Every field is in [Metrics](09-metrics.md).
 
 ## Next steps
 
-- [Metrics](07-metrics.md). The counters behind these warnings.
-- [Tuning](04-tuning.md). The knobs most of these fixes point at.
+- [Metrics](09-metrics.md). The counters behind these warnings.
+- [Tuning](06-tuning.md). The knobs most of these fixes point at.
 - [Config from YAML](reference/config-file.md). Removes schema mismatch as a
   class of bug.

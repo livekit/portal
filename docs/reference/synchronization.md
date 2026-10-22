@@ -1,18 +1,15 @@
 # Synchronization
 
-> How Portal fuses independently-streamed video frames and state packets into
-> coherent observations.
+Use this reference to understand why an observation matched, waited, or dropped.
+For example, a delayed wrist camera can prevent a policy from receiving an
+observation even when state and front-camera frames keep arriving.
 
-This is background reading. You do not need it to use Portal. It is here for
-people who need to reason about the algorithm, tune it against a hard latency
-budget, or extend it.
+For configuration changes, start with [Tuning](../06-tuning.md). This page
+explains the matching algorithm and its assumptions.
 
-For the knobs, see [Tuning](../04-tuning.md). For the short version, see
-[Concepts](../02-concepts.md#the-observation-model).
-
-All of this runs only on peers with observation sync on, which is the default
-for operators. With `set_observation_sync(False)` the sync buffer is never
-built, and state and frames reach `on_state` and `on_video_frame` unmatched.
+Matching runs on participants with observation sync enabled, including operators
+by default. With `set_observation_sync(False)`, frames and state reach
+`on_video_frame` and `on_state` separately.
 
 ## The problem
 
@@ -67,8 +64,9 @@ Each operator session holds one `SyncBuffer` containing:
   `state_buffer_size`.
 - Per-track `cursors: Vec<usize>`. See [two-pointer cursors](#1-two-pointer-cursors).
 - A `blocker: Option<usize>` hint. See [blocker-gated sync](#2-blocker-gated-sync).
-- Per-track `last_emitted_frames`, used only by
-  [stale-frame reuse](#optional-stale-frame-reuse).
+- Per-track `last_emitted_frames`, used by `freeze` as the
+  [stale-frame](#optional-stale-frame-reuse) fallback and by `omit` as the
+  geometry and timestamp source for its placeholder.
 
 You do not set the buffer sizes directly. Both come from `slack`, which defaults
 to 5. `search_range_us` comes from `tolerance / fps`, which is 50 ms at the
@@ -89,7 +87,8 @@ candidate. If any track does not, one of three things happens.
 | Track state, relative to head state `S` and range `R` | Decision |
 |---|---|
 | Newest frame has `ts >= S + R` | **Drop** the state. Frame timestamps are monotonic, so every future frame is at least as late. No match is ever possible. |
-| No in-range frame yet, and the newest is still below `S + R`, or the buffer is empty | **Wait.** Newer frames may still land in range. |
+| No in-range frame yet, the newest is still below `S + R` or the buffer is empty, and the stream clock is less than `max_lag` past `S` | **Wait.** Newer frames may still land in range. |
+| No in-range frame, and the stream clock has run `max_lag` past `S` | **Resolve** the track by its stall behavior: drop the state, freeze, or omit. |
 | At least one in-range frame exists | **Match** that track, then check the others. |
 
 The drop rule looks at the **newest** frame, not the oldest. Checking the front
@@ -167,8 +166,9 @@ whole sync attempt can be skipped.
 |---|---|---|
 | `push_state` | any | **Yes.** A new head may be ready. |
 | `push_frame` to the blocker track | `Some(self)` | **Yes.** |
-| `push_frame` to a non-blocker, no eviction | `Some(other)` | **No.** Skip. |
+| `push_frame` to a non-blocker, no eviction, no lag budget | `Some(other)` | **No.** Skip. |
 | `push_frame` to a non-blocker, eviction happened | any | **Yes.** See below. |
+| `push_frame` to a non-blocker, any track has a `max_lag` | any | **Yes.** The push advances the stream clock, which can carry the head past its lag budget. |
 | Any push | `None` | **Yes.** No hint available. |
 
 `blocker` updates at the end of every `try_sync`. It clears on success or when
@@ -181,8 +181,12 @@ head state, the track just went from matching to unmatchable. Skipping sync woul
 stall the state silently. Running it on eviction catches the transition and
 either rematches or drops.
 
-At 30 fps across 3 cameras plus 100 Hz state, roughly 80% of frame pushes become
-no-ops under this rule once steady state is reached.
+Without a lag budget, at 30 fps across 3 cameras plus 100 Hz state, roughly 80%
+of frame pushes would become no-ops under this rule. Portal always configures a
+budget, though: `max_lag_ms` defaults to `slack / fps`, and even `max_lag_ms=0`
+(or `set_reuse_stale_frames`) counts. So in a Portal session every frame push
+runs `try_sync`. The cost is an `O(tracks)` early return per frame, small next to
+decoding the frame.
 
 ### 3. O(1) drop detection
 
@@ -274,8 +278,9 @@ bounded if video never arrives at all. Once the first observation fires, reuse
 takes over and drops stop.
 
 Observations that used any stale frame increment
-`metrics.sync.stale_observations_emitted`. That counter is the only way to tell a
-frozen track from a healthy one, because everything else looks identical.
+`metrics.sync.stale_observations_emitted`. Per frame, `frame.source` says the
+same thing: `Stale` for a reused frame (see [Stalled tracks](#stalled-tracks)).
+Omitted placeholders are marked `Omitted` and don't count toward that metric.
 
 ## Annotated `try_sync`
 
@@ -334,10 +339,8 @@ loop:
             iter_blocker ??= track_i
             continue
 
-        if buf.back().ts >= S + range:         # no future frame can match
-            should_drop = true
-            break                              # drop beats wait
-        iter_blocker ??= track_i
+        should_drop = true                     # unmatchable, or lagged under drop
+        break                                  # drop beats wait
 
     if should_drop:
         emit drop(state); pop state; continue loop
@@ -393,9 +396,10 @@ is total states received.
 rewind depth is bounded in practice by how far out of order the sender's clock can
 go, typically at most one state.
 
-**Emit latency.** Bounded by `search_range_us` plus the slowest track's frame
-inter-arrival time. A state at `S` is either emitted once every track has a frame
-in `[S - R, S + R]`, or dropped once any track's newest frame passes `S + R`.
+**Emit latency.** Bounded by `max_lag` on the stream clock. A state at `S` is
+emitted once every track has a frame in `[S - R, S + R]`, dropped once any
+track's newest frame passes `S + R`, or resolved by stall behavior once the
+stream clock passes `S + max_lag`, whichever comes first.
 
 **Memory.** Bounded by `video_buffer_size × tracks + state_buffer_size`, plus one
 latest-wins observation slot and one last-emitted frame per track.
@@ -501,7 +505,7 @@ user-facing knobs.
 Keep `tolerance` at 1 or above so the window covers at least one inter-frame
 interval. Tighter than that and ordinary jitter starts producing drops.
 
-Full setters and the asymmetric-rate math are in [Tuning](../04-tuning.md).
+Full setters and the asymmetric-rate math are in [Tuning](../06-tuning.md).
 
 ## Where the code lives
 
@@ -519,6 +523,6 @@ Tests for every edge case above are in the `tests` module at the bottom of
 
 ## Reference
 
-- [Tuning](../04-tuning.md). The knobs.
-- [Metrics](../07-metrics.md). What the algorithm reports about itself.
+- [Tuning](../06-tuning.md). The knobs.
+- [Metrics](../09-metrics.md). What the algorithm reports about itself.
 - [Concepts](../02-concepts.md#the-observation-model). The short version.

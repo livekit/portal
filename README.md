@@ -13,249 +13,139 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+"></a>
 </p>
 
-<p align="center">
-  <img src=".github/assets/portal-demo.gif" alt="Portal demo: synced camera and joint state between a remote robot and a local operator" width="720">
-</p>
-
 <!--BEGIN_DESCRIPTION-->
-<p align="center"><b>Teleoperate, run policies, and record demonstrations against the same robot, from anywhere on the internet, with multiple operators in the room at once.</b> Portal carries cameras, joint state, and actions over LiveKit's room model. A policy and a human teleoperator can join the same session and hand off control mid-session with one call. Synchronized <code>(frames, state, timestamp)</code> observations arrive on the control side. Works with any robotics stack, with an optional <a href="https://github.com/huggingface/lerobot">LeRobot</a> plugin.</p>
+<p align="center"><b>Teleoperate robots, run remote policies, and record demonstrations with LiveKit Portal.</b></p>
 <!--END_DESCRIPTION-->
 
 <p align="center">
   <a href="docs/01-quickstart.md">Quickstart</a> ·
-  <a href="docs/02-concepts.md">Concepts</a> ·
-  <a href="docs/03-portal-api.md">Portal API</a> ·
-  <a href="docs/">All docs</a> ·
+  <a href="docs/">Documentation</a> ·
   <a href="#examples">Examples</a>
 </p>
 
----
+LiveKit Portal connects robots to remote operators over the internet. It carries
+camera frames and robot state to the operator, and control actions back to the
+robot. It works with any robotics stack, using LiveKit Cloud or a self-hosted
+LiveKit server.
 
-## What it does
+## What Portal adds
 
-Your robot is on one machine. Your policy or teleop UI is on another, possibly on
-another continent. Portal closes the control loop across that gap. Cameras and
-joint state stream out of the robot, actions come back, and both directions
-traverse NAT over WebRTC with no VPN and no forwarded port. What the control side
-gets is not two streams to reconcile but one callback per tick.
+- **Low-latency video.** LiveKit advertises [glass-to-glass latency as low as
+  30 ms](https://livekit.com/robotics). Actual latency depends on the network,
+  hardware, codec, and buffering. Use Portal's [metrics](docs/09-metrics.md)
+  to measure the full observation-to-action loop, including policy inference.
+- **Control arbitration.** Keep policies and human operators in the same session.
+  The robot accepts actions from one active operator; transfer control with one
+  call or let a supervisor coordinate handoffs. [Control handoff](docs/04-arbitration.md).
+- **Synchronized observations.** Receive camera frames and joint state together,
+  matched by capture timestamp, so a remote policy can compute its next action.
+  [Observations](docs/02-concepts.md#the-observation-model).
+- **Shared robot time.** Participants synchronize to the robot's clock, giving
+  actions, recordings, and annotations a common timeline across machines.
+  [Time sync](docs/05-portal-api.md#time-sync).
+- **Data recording sinks.** Add an observer to record alongside any operator.
+  Write Rerun archives with `RrdSink`, or implement a sink for your own storage
+  format. [Data recording](docs/03-data-recording.md).
+- **Policy evaluation.** Record inactive policies' actions for comparison, mark
+  episodes with annotations, and measure observation-to-action latency.
+  [Action subscriptions](docs/05-portal-api.md#operator-side-action-subscription)
+  and [metrics](docs/09-metrics.md).
+- **Video for models and people.** Use WebRTC video for live viewing, PNG or RAW
+  for exact RGB pixels, or MJPEG for independent frame compression.
+  [Frame video](docs/07-frame-video.md).
 
-```python
-# Operator side. Cameras and joint state arrive already fused.
-def on_observation(obs):
-    # obs.frames["cam1"].data is packed RGB24, obs.state is typed per your schema
-    action = policy(obs.frames["cam1"], obs.state)
-    op.send_action(action, in_reply_to_ts_us=obs.timestamp_us)
+## Why LiveKit Portal
 
-op.on_observation(on_observation)
-await op.connect(url, token)
-await op.set_active_operator(op.local_identity())
-```
+Imagine your robot has two operators: a policy running in the cloud and a human
+ready to take over. The policy misses a grasp. The human steps in, demonstrates
+a correction, then returns control. You want to record the entire session to
+improve the policy.
 
-That fusion is the point. A policy wants one bundle per tick, and no transport
-delivers data that way. Video rides an encoder, a congestion-controlled channel,
-and a decoder. State rides a reliable data packet with none of that. The two
-surface on the receiver as separate event streams, typically 30 to 80 ms out of
-phase.
+Building this directly on vanilla WebRTC,
+[WebSockets](https://www.rfc-editor.org/rfc/rfc6455.html), or
+[Media over QUIC (MoQ)](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
+gives you transport primitives; the robot's control arbitration remains your
+application's job. You need to track participants, choose the active operator,
+propagate handoffs, and reject commands from inactive operators. That means
+maintaining shared session state in a coordination service or realtime database,
+and handling concurrent requests and reconnects.
 
-Portal stamps every frame and every state packet with the sender's monotonic
-clock at capture time, then reassembles them on the operator side. For a state
-at `S`, a frame at `F` on track `k` is a candidate when `|S - F| <
-search_range`, where `search_range = tolerance / fps`. That is 50 ms at the
-defaults of 30 fps and 1.5 ticks. Portal takes the nearest candidate per track.
-When every declared track has one, it emits:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/why-arbitration-dark.svg">
+  <img alt="A policy and a human send actions over vanilla WebRTC, WebSockets or MoQ; session state and the gate that picks the active operator are yours to build." src="docs/images/why-arbitration-light.svg" width="100%">
+</picture>
 
-```python
-Observation(
-    frames={"cam1": VideoFrameData, ...},  # packed RGB24, whatever the transport
-    state={"j1": 0.1, "gripper": True},    # typed per the declared dtypes
-    raw_state={"j1": 0.1, "gripper": 1.0}, # same payload widened to f64
-    timestamp_us=1717171717000000,         # the state's send-side stamp
-)
-```
+You also need clock synchronization and a buffering strategy for streams arriving
+at different times. As participants join from different networks, you must keep
+observations aligned without letting a slow stream add excessive control latency.
 
-A state whose window closes before some track produces a frame is unmatchable,
-because timestamps only move forward. It surfaces on `on_drop` instead of
-disappearing. Both sides also declare a schema, and a field-order or dtype
-mismatch is caught by a fingerprint in the packet header rather than decoded
-into garbage.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/why-timing-dark.svg">
+  <img alt="A frame and a joint reading captured together arrive 12 ms and 85 ms later, so stamping on arrival puts them 73 ms apart." src="docs/images/why-timing-light.svg" width="100%">
+</picture>
 
-Full walkthrough in [Quickstart](docs/01-quickstart.md).
+A recorder that logs only the teleoperator's inputs misses the policy's actions.
+If it timestamps incoming data on arrival, network delays become part of the
+recording: a camera frame and a joint reading captured together appear to have
+happened at different times. Separate logs from each machine leave you to
+reconstruct the handoff across different clocks.
 
-## Features
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/why-recording-dark.svg">
+  <img alt="A teleop-only recorder loses the policy's attempt, and per-machine logs disagree on when the handoff happened." src="docs/images/why-recording-light.svg" width="100%">
+</picture>
 
-**Multi-operator sessions.** A robot, policies and humans join one room as
-operators, and recorders and supervisors as observers. The robot listens to
-whichever operator holds control, and everyone else's actions are dropped at the
-gate. Handoff is `await op.set_active_operator("human-binh")` from any operator
-or observer. Built on LiveKit participant attributes plus one RPC method.
+Portal puts the robot, both operators, and an independent recorder in one
+LiveKit room. The robot accepts actions from the active operator, and a single
+call transfers control. LiveKit distributes the active-operator state through
+participant attributes, so you do not need a separate database for that handoff.
+Participants synchronize to the robot's clock, so
+frames, state, actions, and episode annotations share a timeline. The recorder
+can capture both operators' actions, including what the policy proposed while
+the human was in control, with each action labeled by sender and control status.
 
-**Human in the loop.** Policy drives, human takes over to demonstrate a
-correction, policy resumes. The robot's stream of executed actions stays
-continuous across the cutover.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-room-dark.svg">
+  <img alt="The robot, a policy, a human and a recorder in one LiveKit room, sharing video and data tracks, the active_operator attribute and the robot's clock; the recorder writes an .rrd archive." src="docs/images/portal-room-light.svg" width="100%">
+</picture>
 
-**HITL data recording.** An observer records state, video, every executed action
-(labeled with `action.sender`) and keypoints marking each take to a Rerun
-archive with `obs.record_to(RrdSink("data"))`. Every peer syncs to the robot's
-clock, so streams from several participants line up in the file.
+That gives you the policy attempt, the human correction, and the context needed
+to compare them in one recording. Write it to a Rerun archive or your own sink,
+then choose how to align and select samples for training.
 
-**Built for VLA inference.** Stamp actions with `in_reply_to_ts_us` and
-`metrics.policy.e2e_us_p95` gives you true observation-to-action latency rather
-than ping.
+LiveKit provides the foundation: multi-participant rooms and WebRTC transport
+across NAT and changing network conditions, without a VPN or manual port
+forwarding. Portal adds observation matching, clock synchronization, control
+arbitration, and recording. The same code runs on LiveKit Cloud or a self-hosted
+server.
 
-**Pixel-exact video when you need it.** WebRTC video is lossy and resamples
-colorspace. For inference where pixels matter, pass `RAW`, `PNG`, or `MJPEG` to
-[`add_video`](docs/05-frame-video.md) and each frame ships whole over a reliable
-byte stream. Same API, RGB on both ends. MJPEG q=90 sustains 30 fps at 720p.
+Start with one robot and one operator, then add a human or recorder as your
+application grows.
 
-**Works with any stack.** Role-specific `Robot` and `Operator` classes in Python
-over a unified `Portal` core in Rust. The optional
-[lerobot](https://github.com/huggingface/lerobot) plugins are a convenience layer
-on top, not the way in.
-
-**Low-latency transport.** WebRTC video with SIMD RGB to I420 conversion. SCTP
-data channels, reliable or unreliable per stream. Byte streams for arbitrary
-payloads. RPC for one-shots. Rust core, Python bindings via UniFFI.
-
-## Install
-
-```bash
-pip install livekit-portal      # or: uv add livekit-portal
-```
-
-Prebuilt wheels cover CPython 3.12 on Linux x86_64 and aarch64 (glibc 2.35 and
-newer) and macOS Apple Silicon. On anything else, build
-from source. The library itself supports Python 3.10 and up.
-
-Already on lerobot? `pip install lerobot-robot-livekit` and
-`pip install lerobot-teleoperator-livekit`. See
-[lerobot plugins](docs/reference/lerobot.md).
-
-<details>
-<summary>Build from source</summary>
-
-You need a [Rust toolchain](https://rustup.rs/) and
-[`uv`](https://docs.astral.sh/uv/). On Linux you also need clang 21 or newer
-as `CC`/`CXX`: the bundled libwebrtc's libc++ does not build with older
-compilers. `.github/scripts/install-clang.sh` fetches an official LLVM
-release into `/opt` if your distro has nothing recent enough.
+## Get started
 
 ```bash
-git clone https://github.com/livekit/portal.git
-cd portal
-
-bash scripts/build_ffi_python.sh release
-cd python && uv sync
+uv add livekit-portal
+# or
+pip install livekit-portal
 ```
 
-`build_ffi_python.sh` compiles the `livekit-portal-ffi` cdylib and generates the
-UniFFI Python bindings. The first build takes a few minutes. Rerun it whenever the
-Rust code changes.
-
-</details>
+Follow the [quickstart](docs/01-quickstart.md) to run your first control loop
+without physical hardware. Then add [control handoff](docs/04-arbitration.md)
+and [data recording](docs/03-data-recording.md).
+For an existing LeRobot application, use the [LeRobot plugins](docs/reference/lerobot.md).
 
 ## Examples
 
-Running an example is the fastest way to a known-good setup. All of them live
-under [`examples/python/`](examples/python).
+| Example | What it demonstrates |
+|---|---|
+| [Basic](examples/python/basic) | Synthetic video, actions, recording, and control handoff. No hardware required. |
+| [Inference](examples/python/inference) | A policy that plans actions and sends one per control tick. |
+| [Cloud inference](examples/python/modal-mock-inference) | A policy running on Modal, with latency measurements. |
+| [SO-101](examples/python/so101) | A remote leader arm controlling a physical follower. |
 
-| Example | Hardware | What it shows |
-|---|---|---|
-| [`basic/`](examples/python/basic) | none | The whole API end to end, with synthetic video. Also ships a YAML-config variant, and observers that record the session to a Rerun archive and hand control between operators. Start here. |
-| [`inference/`](examples/python/inference) | none | A VLA-shaped loop that plans a horizon and streams one action per tick, with true end-to-end latency metrics. |
-| [`modal-mock-inference/`](examples/python/modal-mock-inference) | none | Runs the policy on [Modal](https://modal.com) and measures real glass-to-glass latency with a QR clock. |
-| [`so101/`](examples/python/so101) | 2x SO-101 | A physical SO-101 follower driven by a remote SO-101 leader, rendered in [rerun](https://rerun.io). |
-
-```bash
-cd examples/python/basic
-cp .env.example .env            # fill in LIVEKIT_URL / API_KEY / API_SECRET
-uv sync
-uv run robot.py                 # terminal 1
-uv run teleoperator.py          # terminal 2
-```
-
-## How the sync works
-
-Every outgoing frame and state packet carries the sender's monotonic clock. On the
-control side, a per-session `SyncBuffer` matches them by that timestamp.
-
-```mermaid
-flowchart TD
-    S["head state S"] --> L{"for each video track k"}
-    L --> N["F = nearest pending frame on k"]
-    N --> C{"|S - F| < search_range?"}
-
-    C -- yes --> FS{"does the next state<br/>have a closer claim?"}
-    FS -- no --> M["track k matches"]
-    FS -- yes --> W
-
-    C -- no --> H{"newest frame on k<br/>past S + range?"}
-    H -- yes --> D["drop the state<br/><i>no future frame can match</i>"]
-    H -- no --> W["wait for a newer frame"]
-
-    M --> A{"all tracks matched?"}
-    A -- yes --> E["emit Observation"]
-    A -- no --> L
-
-    style E stroke-width:2px
-    style D stroke-dasharray: 4 4
-```
-
-The real implementation is amortized `O(N + M)` via two-pointer cursors and
-blocker-gated short-circuiting, with `O(1)` unmatchability detection. Full
-walkthrough in [Synchronization](docs/reference/synchronization.md).
-
-## Multi-operator and HITL
-
-A Portal session is a room. The robot listens to one operator at a time, named by
-an attribute it publishes. Everyone else's actions are dropped at the gate.
-Handoff is one call from any participant.
-
-```python
-# Policy is driving. A human takes over to demonstrate a correction.
-await human.set_active_operator(human.local_identity())
-# ... teleoperate for a while ...
-await human.set_active_operator("policy-v1")
-```
-
-Five patterns fall out of that, from a single operator through shadow evaluation
-and supervisor arbitration. They are tabulated in
-[Portal API](docs/03-portal-api.md#multi-operator-patterns), with working versions
-in the [integration tests](python/packages/livekit-portal/tests/integration).
-
-## Why LiveKit
-
-Teleoperation over a WAN is a networking problem before it is a robotics problem.
-Low-latency video and control data have to cross NAT, asymmetric bandwidth,
-jitter, and loss. WebRTC was built for exactly that, and
-[LiveKit](https://livekit.io/) wraps it in a production SFU with clean SDKs.
-
-Concretely, Portal gets rooms with N participants for free, so a robot plus two
-operators plus a recorder is the same code path as 1:1. It gets server-managed
-participant attributes, which is where the active-operator pointer lives. It gets
-cross-participant RPC, cross-language SDKs so a browser teleop UI speaks the same
-protocol as the robot host, and the choice between
-[LiveKit Cloud](https://livekit.io/cloud) and self-hosting.
-
-Running on one machine or a LAN-only robot? You do not need any of this. A direct
-socket is enough.
-
-## Documentation
-
-Start with the [docs index](docs/) for a guided path.
-
-**Start here:** [Quickstart](docs/01-quickstart.md) ·
-[Concepts](docs/02-concepts.md) · [Portal API](docs/03-portal-api.md)
-
-**Then as needed:** [Tuning](docs/04-tuning.md) ·
-[Frame video](docs/05-frame-video.md) · [RPC](docs/06-rpc.md) ·
-[Metrics](docs/07-metrics.md) · [Troubleshooting](docs/08-troubleshooting.md) ·
-[Migrating to v0.3](docs/09-migrating-to-v0.3.md)
-
-**Reference:** [Config from YAML](docs/reference/config-file.md) ·
-[E2EE](docs/reference/e2ee.md) ·
-[Synchronization](docs/reference/synchronization.md) ·
-[Wire protocol](docs/reference/wire-protocol.md) ·
-[lerobot plugins](docs/reference/lerobot.md)
+For configuration, tuning, and troubleshooting, see the [documentation](docs/).
+For methods and callbacks, see the [API reference](docs/05-portal-api.md).
 
 ## License
 

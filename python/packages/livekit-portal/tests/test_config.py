@@ -186,7 +186,7 @@ def test_mixed_dtype_schema_is_accepted():
 )
 def test_config_knobs_default_and_round_trip(make_cfg):
     cfg = make_cfg()
-    # Defaults, as documented in docs/03-portal-api.md.
+    # Defaults, as documented in docs/05-portal-api.md.
     assert cfg.fps == 30
     assert cfg.slack == 5
     assert cfg.tolerance == pytest.approx(1.5)

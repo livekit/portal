@@ -106,13 +106,13 @@ pub enum VideoCodec {
     /// WebRTC H.265 / HEVC. Same media path as `H264`. Support is platform-
     /// and build-dependent in libwebrtc.
     H265,
-    /// Uncompressed RGB24. Largest payload, zero encode cost. Byte-stream
-    /// transport.
+    /// RGB24, deflated by the byte stream (~2x on camera frames, at a
+    /// sender CPU cost above PNG's encode). Byte-stream transport.
     Raw,
-    /// PNG, lossless. ~2-3x compression on natural images. Byte-stream
+    /// PNG, lossless. ~1.6-3x compression on camera frames. Byte-stream
     /// transport.
     Png,
-    /// Motion JPEG, lossy. ~10-20x compression at quality 90. Each frame is
+    /// Motion JPEG, lossy. ~8-17x compression at quality 90. Each frame is
     /// an independent JPEG so frame loss is contained. Byte-stream
     /// transport.
     Mjpeg,

@@ -1,55 +1,47 @@
 # Concepts
 
-> The mental model behind Portal. Roles, observations, and control handoff.
+Consider a robot arm controlled by a policy on another machine. The policy
+needs camera frames and joint positions to choose an action. A human may need
+to take over, and a recorder may need to save both demonstrations and policy runs.
 
-Four ideas cover almost everything. There are three roles. The robot publishes,
-operators drive, observers watch. Observations arrive pre-fused. One operator
-holds control at a time.
-
-This page explains each one. It is the shortest path to understanding what
-Portal actually does for you.
+Portal connects these processes in a LiveKit room. This page follows the data
+from the robot to the policy, explains how control transfers, and describes the
+frame format and callback behavior you need when connecting your own hardware.
 
 ## Roles
 
-Portal has three roles, and you pick one by choosing a class.
+Choose a class based on what the process needs to do:
 
-| Class | Publishes | Subscribes to |
-|---|---|---|
-| `Robot` | video frames, state | actions |
-| `Operator` | actions | video frames and state, fused into observations |
-| `Observer` | nothing | video frames, state and executed actions, raw |
+| Class | Use it to | Sends | Receives |
+|---|---|---|---|
+| `Robot` | Connect cameras and hardware | Frames and state | Actions from the active operator |
+| `Operator` | Run a policy or human teleoperator | Actions | Frames and state, matched into observations by default |
+| `Observer` | Record a session or supervise control | Annotations and control requests | Raw frames, state, and active actions by default |
 
-There is **one robot per session**. There can be **any number of operators and
-observers**. A human teleoperating and a policy running inference are
-operators. A recorder logging data and a supervisor routing control are
-observers: they see everything in the room but never send actions, and they
-may still move the active operator.
+Each session has one robot and any number of operators and observers. For
+example, a policy and a human each use `Operator`, while a separate recorder
+uses `Observer`. An observer can transfer control but cannot send motor actions.
 
-Both sides declare the same schema, using `add_video`, `add_state_typed`, and
-`add_action_typed`. Camera names, field names, field order, and per-field
-dtypes must all match. A mismatch is detected and the traffic is dropped, so
-this is the first thing to check when nothing arrives.
+Participants declare camera names and state and action fields before connecting.
+These declarations are the **schema**: they specify how to interpret data such
+as a floating-point joint position or a boolean gripper command. Field names,
+order, and data types must match between senders and receivers. Use a
+[shared YAML file](reference/config-file.md) to keep them consistent.
 
-Role is fixed at construction. Calling `send_action` on a `Robot` or an
-`Observer` raises `PortalError.WrongRole`.
+Roles are fixed at construction. Each class only has its own role's methods:
+`Operator` has no `send_state`, for example. An `Observer`'s `send_*` methods
+exist only to raise `PortalError.WrongRole`.
 
 ## The observation model
 
-This is the part Portal exists for.
+A policy needs camera frames and joint readings from the same moment. Pairing
+an old image with the latest joint position can describe a pose the robot never
+held.
 
-A robotics policy wants one bundle per step: "at time T, here are my camera
-frames and my joint readings." That is the shape your model already consumes.
-
-LiveKit does not deliver data that way, and neither does any other transport.
-Video rides an encoder, a congestion-controlled channel, and a decoder. State
-packets ride a data channel with none of that. On the receiver they surface as
-separate event streams arriving out of phase. Video typically runs 30 to 80 ms
-behind a state packet stamped at the same instant.
-
-Portal closes that gap. Every outgoing frame and state packet is stamped on the
-**robot's clock**, which every peer shares through
-[time sync](03-portal-api.md#time-sync). On the operator side, a per-session
-buffer matches them by that timestamp and hands you one object:
+Video and state travel independently. Encoding and decoding can delay video
+relative to state, even when the robot captures both together. Portal uses
+capture timestamps to match them instead of pairing them by arrival time.
+The operator receives an `Observation` containing the matched data:
 
 ```python
 Observation(
@@ -80,21 +72,21 @@ rgb = frame_bytes_to_numpy_rgb(bytes(frame.data), frame.width, frame.height)
 > **Note.** The helper returns a zero-copy view over the frame bytes. Call
 > `.copy()` before mutating it.
 
-### Matching, in one paragraph
+### How matching works
 
-For a state at timestamp `S`, a frame at `F` on a given track is a candidate if
-`|S - F|` is under the search window. Portal picks the nearest candidate per
-track. Then one of three things happens.
+For each state sample, Portal looks for the nearest frame from every declared
+camera within a configured time window. With the defaults, that window is
+50 ms on either side of the state's timestamp.
 
-- **Match.** Every track had a candidate. The observation fires.
-- **Wait.** Some track has nothing in range yet, but newer frames could still
-  land in range. Portal holds the state.
-- **Drop.** Some track's newest frame is already past the window. Timestamps
-  only move forward, so no future frame can match. `on_drop` fires.
+- If every camera has a match, Portal delivers an observation.
+- If a frame could still arrive within the window, Portal waits.
+- If a camera has advanced beyond the window, Portal reports the unmatched
+  state through `on_drop`.
 
-The window comes from two knobs, `fps` and `tolerance`, and defaults to 50 ms.
-See [Tuning](04-tuning.md) for how to change it and
-[Synchronization](reference/synchronization.md) for the full algorithm.
+For example, a wrist camera can delay an observation even while the front
+camera is streaming. Use [tuning](06-tuning.md) to adjust the window or choose
+what happens when a camera stalls. The [synchronization reference](reference/synchronization.md)
+describes the matching algorithm.
 
 ### Handling drops
 
@@ -111,7 +103,7 @@ op.on_drop(on_drop)
 
 A few drops at startup are normal while video warms up. A steady stream of them
 means the match window is too tight or a camera is behind. See
-[Troubleshooting](08-troubleshooting.md#sync-drop).
+[Troubleshooting](10-troubleshooting.md#sync-drop).
 
 ## Control handoff
 
@@ -143,8 +135,8 @@ flowchart TD
     style DROP stroke-dasharray: 4 4
 ```
 
-Everyone in the room can read the pointer and everyone can change it. The
-robot's copy is the source of truth.
+Participants can read the active identity. Operators and observers can request
+a change; the robot's value determines whose actions reach its callback.
 
 Handoff is one call, from any participant:
 
@@ -158,85 +150,42 @@ await human.set_active_operator(human.local_identity())
 await human.set_active_operator("policy-v1")
 ```
 
-The robot's stream of executed actions is continuous across that cutover. There
-is no reconnect and no renegotiation.
+Participants remain connected during the handoff. The robot accepts subsequent
+actions according to the updated active identity.
 
 Three behaviors are worth knowing up front.
 
-**The pointer starts unset.** A fresh robot has no active operator and drops
-every action it receives. Your first operator has to claim control, or nothing
+**Control starts unset.** A fresh robot has no active operator, unless its token
+seeds one, and drops every action it receives. Your first operator has to claim control, or nothing
 moves. This is the most common first-run surprise.
 
 **Inactive operators get no feedback.** Their `send_action` calls succeed and
 the packets reach the robot, which drops them. There is no error and no
 callback. Read `op.active_operator()` if you need to know whether you are being
-honored.
+accepted.
 
-**The pointer stays pinned on disconnect.** If the active operator drops off,
+**Control persists across disconnects.** If the active operator drops off,
 the robot keeps pointing at that identity so a reconnect resumes control. To
 move it, someone has to call `set_active_operator` with a new identity.
 
-Full mechanics and the callback list are in
-[Portal API](03-portal-api.md#the-active-operator).
+For human in the loop and orchestration end to end, see
+[Arbitration](04-arbitration.md). Full mechanics and the callback list are in
+[Portal API](05-portal-api.md#the-active-operator).
 
 ## Putting it together
 
-```mermaid
-flowchart LR
-    subgraph Robot["Robot host"]
-        H[Hardware<br/>cameras + motors]
-        RP[Robot<br/>publish frames/state<br/>subscribe actions]
-        H --> RP
-    end
+A control loop follows these steps:
 
-    subgraph Cloud["LiveKit room"]
-        V[(Video tracks)]
-        S[(State stream)]
-        A[(Action stream)]
-    end
+1. The robot reads its cameras and joints, then publishes frames and state with
+   capture timestamps.
+2. The operator matches frames to state and calls `on_observation`.
+3. Your policy computes an action and sends it with `send_action`.
+4. The robot checks the sender against the active operator and calls `on_action`
+   for accepted actions. Your callback applies them to the hardware.
 
-    subgraph Operator["Operator host"]
-        OP[Operator<br/>subscribe + match<br/>publish actions]
-        M[Policy /<br/>teleop / recorder]
-        OP --> M
-        M --> OP
-    end
-
-    RP -- stamped frames --> V
-    RP -- stamped state --> S
-    A --> RP
-
-    V --> OP
-    S --> OP
-    OP -- actions --> A
-```
-
-One tick, end to end:
-
-```mermaid
-sequenceDiagram
-    participant R as Robot
-    participant L as LiveKit room
-    participant O as Operator
-    participant M as Policy
-
-    loop every tick
-        R->>R: read hardware
-        R->>L: send_video_frame(cam1, frame) ts=T
-        R->>L: send_state(joints) ts=T
-    end
-
-    L-->>O: video frames (variable latency)
-    L-->>O: state packet
-
-    Note over O: match frames to state<br/>within the search window
-
-    O-->>M: on_observation({frames, state, ts})
-    M-->>O: action
-    O->>L: send_action(action)
-    L-->>R: on_action(action) if sender is active
-    R->>R: drive the motors
-```
+An observer can record the streams alongside this loop. By default it keeps
+frames and state separately, preserving timestamps for alignment after recording.
+See [Data recording](03-data-recording.md).
 
 ## Video frame format
 
@@ -248,30 +197,21 @@ That is exactly a NumPy `uint8` array of shape `(H, W, 3)` in RGB order, which
 is what `PIL.Image.convert("RGB")` and OpenCV's
 `cvtColor(frame, COLOR_BGR2RGB)` give you.
 
-**Width and height must both be even.** I420 chroma subsampling requires it.
-Odd dimensions raise `PortalError.InvalidFrameDimensions`.
+**On WebRTC tracks, width and height must both be even.** I420 chroma
+subsampling requires it. Odd dimensions raise
+`PortalError.InvalidFrameDimensions`. [Frame-video](07-frame-video.md) tracks
+have no such constraint.
 
-On the default WebRTC path, Portal converts RGB to I420 using libyuv's SIMD
-routines before handing the frame to WebRTC. Rough cost on modern ARM64 (NEON)
-or x86 (AVX2):
-
-| Resolution | Per frame | At 30 fps |
-|---|---|---|
-| 640x480 | 0.3 to 0.9 ms | 1 to 3% of a core |
-| 1280x720 | 1 to 3 ms | 3 to 10% |
-| 1920x1080 | 2 to 6 ms | 6 to 20% |
-
-If your camera already produces I420 or NV12, you are paying for a round trip.
-For RGB and BGR sources, which covers most cameras and most Python pipelines,
-this is as fast as converting it yourself.
-
-If a policy reads those pixels, the lossy WebRTC path may not be acceptable at
-all. See [Frame video](05-frame-video.md).
+The default WebRTC path converts RGB to I420 before encoding. If your policy
+or dataset requires exact RGB pixels, select PNG or RAW instead. See
+[Frame video](07-frame-video.md) for codec choices and their bandwidth costs.
 
 ### Frames must carry a timestamp
 
-Every video frame Portal receives must carry `user_timestamp` in its LiveKit
-packet-trailer metadata. Portal sets this automatically on tracks it publishes.
+Every WebRTC video frame Portal receives must carry `user_timestamp` in its
+LiveKit frame metadata. Portal sets this automatically on tracks it publishes.
+Frames without it are dropped and logged as
+[`missing-timestamp`](10-troubleshooting.md#missing-timestamp).
 
 A subscribed track from a publisher that does **not** set it cannot be matched
 and is unsupported. Either republish the source through Portal, or enable
@@ -282,22 +222,20 @@ detail if you are writing your own publisher.
 ## Callbacks and threading
 
 Callbacks you register with `on_observation`, `on_action`, and friends fire on
-the asyncio loop that was running when you registered them. Your code never
+the asyncio loop that called `connect()`. Your code never
 runs on the tokio worker thread.
 
 That means a slow callback stalls your own loop, not Portal's internals. It
 does still cost you frames, because the per-track receive path sheds frames
 when processing falls behind. Keep callbacks short and move heavy work
-elsewhere. See [`recv-overflow`](08-troubleshooting.md#recv-overflow).
+elsewhere. See [`recv-overflow`](10-troubleshooting.md#recv-overflow).
 
-If a callback raises, Portal catches it, logs it under
-[`callback-panic`](08-troubleshooting.md#callback-panic), and keeps the session
-alive. It cannot tell you the line number, so wrap the body in `try` and
-`except` while debugging.
+If a Python callback raises, Portal prints its traceback and keeps the session
+running. Monitor application logs to detect callback failures.
 
 ## Next steps
 
-- [Portal API](03-portal-api.md). Every method, with the gotchas.
-- [Tuning](04-tuning.md). The knobs behind the match window.
-- [Metrics](07-metrics.md). What to watch in production.
+- [Portal API](05-portal-api.md). Configuration, methods, and callbacks.
+- [Tuning](06-tuning.md). Adjust the matching window and handle camera stalls.
+- [Metrics](09-metrics.md). What to watch in production.
 - [Synchronization](reference/synchronization.md). The full matching algorithm.

@@ -21,7 +21,7 @@ use std::collections::{BTreeSet, HashMap};
 
 /// Default JPEG quality for `add_video` when MJPEG is selected without an
 /// explicit value. Tuned for inference workloads: visually near-lossless on
-/// natural images, ~10-20x compression versus raw RGB.
+/// natural images, ~8-17x compression versus raw RGB on robot camera frames.
 pub const DEFAULT_MJPEG_QUALITY: u8 = 90;
 
 /// Default H264 encoder bitrate ceiling (kbps) for `add_video` when no
@@ -346,12 +346,12 @@ impl PortalConfig {
     /// Track names must be unique across all `add_video` calls regardless
     /// of codec; a duplicate panics.
     ///
-    /// **Byte-stream latency**: frames on the byte-stream path pay roughly
-    /// `1 ms + 2 ms × ⌈size / BYTE_STREAM_CHUNK_SIZE⌉` per frame, set by
-    /// the SCTP data channel drain rate (not Portal's encode cost). Pick a
-    /// codec whose encoded size fits in one chunk for low-latency
-    /// closed-loop work. MJPEG at 224×224 to 480p typically does. Raw at
-    /// anything above ~70×70 spills into multiple chunks.
+    /// **Byte-stream latency**: every byte-stream track shares one SCTP data
+    /// channel (~5 MB/s on localhost), so per-frame latency and the fps
+    /// ceiling follow from the encoded size, not Portal's encode cost. For
+    /// low-latency closed-loop work prefer MJPEG: a 640×480 camera frame is
+    /// ~60-85 KB (~40 ms on localhost) versus ~400 KB for deflated Raw.
+    /// Measured numbers are in docs/07-frame-video.md.
     pub fn add_video(&mut self, name: impl Into<String>, codec: Codec, options: VideoOptions) {
         let VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution } = options;
         let name = name.into();

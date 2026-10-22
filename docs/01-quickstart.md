@@ -1,13 +1,12 @@
 # Quickstart
 
-> Run a robot and an operator against each other in about five minutes.
+Build a control loop with two Python scripts. `robot.py` publishes synthetic
+camera frames and joint state. `operator_app.py` receives them as synchronized
+observations and sends actions back. Both run locally through a LiveKit server;
+you do not need a physical robot.
 
-You will write two files. `robot.py` publishes video and joint state.
-`operator_app.py` receives them fused into observations and sends actions back.
-Both run on your own machine for now, talking through a real LiveKit server.
-
-You do not need a physical robot. The robot script publishes a synthetic test
-pattern.
+After the loop is running, you can add `recorder.py` to save the session.
+To run an existing app instead, use the [basic example](../examples/python/basic/).
 
 ## Prerequisites
 
@@ -96,12 +95,12 @@ Identities must be unique inside a room. There is one robot per session, so
 `"binh-teleop"`.
 
 > **Note.** Minting tokens with your API secret belongs on a server, not in a
-> robot or a browser. It is inline here to keep the quickstart to two files.
+> robot or a browser. This example creates tokens locally to simplify setup.
 
 ## 4. Write the robot
 
 This runs next to the hardware. It declares what it publishes (one camera, five
-state fields) and what it accepts (the same five as actions). Then it pumps
+state fields) and what it accepts (the same five as actions). It sends
 frames and state at 30 fps.
 
 Save it as `robot.py`.
@@ -192,14 +191,14 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Frames must be `uint8` NumPy arrays of shape `(H, W, 3)` in RGB order. Width
-and height must both be even. See
+Frames must be `uint8` NumPy arrays of shape `(H, W, 3)` in RGB order. On the
+default WebRTC video path, width and height must both be even. See
 [Concepts: frame format](02-concepts.md#video-frame-format).
 
 ## 5. Write the operator
 
 This runs wherever your policy or teleop UI lives. It declares the same schema,
-consumes fused observations, and publishes actions.
+receives synchronized observations, and publishes actions.
 
 Save it as `operator_app.py`.
 
@@ -303,7 +302,86 @@ warmed up, so the earliest states have nothing to match against. Once video is
 running they stop.
 
 Nothing printing at all? Go to
-[Troubleshooting](08-troubleshooting.md#nothing-is-arriving).
+[Troubleshooting](10-troubleshooting.md#nothing-is-arriving).
+
+## 7. Add an observer to record data
+
+To review the session later, add an `Observer`. It receives frames, state, and
+active actions without sending control actions. Recording can continue while
+control moves between a policy and a human.
+
+Install the Rerun extra, which provides the built-in `.rrd` writer:
+
+```bash
+pip install 'livekit-portal[rerun]'
+```
+
+Save this as `recorder.py`.
+
+```python
+# recorder.py
+import asyncio
+import os
+
+from livekit.portal import DType, Observer, ObserverConfig
+from livekit.portal.recording import RrdSink
+
+from portal_token import ROOM, mint
+
+# Identical to the robot's schema, again.
+SCHEMA = [
+    ("j1", DType.F32),
+    ("j2", DType.F32),
+    ("j3", DType.F32),
+    ("gripper", DType.BOOL),
+    ("mode", DType.I8),
+]
+
+
+async def main() -> None:
+    cfg = ObserverConfig(ROOM)
+    cfg.add_video("cam1")
+    cfg.add_state_typed(SCHEMA)
+    cfg.add_action_typed(SCHEMA)
+    # A recorder stores raw streams and aligns them offline, so it doesn't
+    # bundle observations. Operators default to True; observers already
+    # default to False.
+    cfg.set_observation_sync(False)
+
+    obs = Observer(cfg)
+
+    synced = asyncio.Event()
+    obs.on_time_synced(synced.set)
+    await obs.connect(os.environ["LIVEKIT_URL"], mint("recorder"))
+    await synced.wait()   # start on the robot's clock (skip with TimeSyncSource.SYSTEM)
+
+    sink = RrdSink("data/sessions")
+    obs.record_to(sink)
+    print(f"[recorder] recording to {sink.path}")
+
+    try:
+        await asyncio.sleep(30)
+    finally:
+        await obs.disconnect()   # writes what is queued, then closes the file
+    print(f"[recorder] done: rerun {sink.path}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run it in a third terminal while the robot and operator are up:
+
+```bash
+python recorder.py    # terminal 3
+```
+
+When it finishes, open the archive with `rerun data/sessions/<file>.rrd`.
+Scrub the `robot_time` timeline and each frame, the state and the action sent
+in response line up on one row.
+
+See [Data recording](03-data-recording.md) for what's in the archive, how to
+write your own sink, and how to turn recordings into training datasets.
 
 ## What just happened
 
@@ -312,15 +390,14 @@ operator buffered both streams and matched them by that timestamp, then fired
 `on_observation` once per matched pair. Actions went back on a separate
 reliable channel, gated so only the active operator's arrive.
 
-That gate is why step 5 calls `set_active_operator`. Without it the robot
-drops everything, which is the single most common first-run surprise.
+Step 5 calls `set_active_operator` so the robot accepts this operator's actions.
+Until control is assigned, observations can arrive but all actions are rejected.
 
-Read [Concepts](02-concepts.md) next for the model behind all of that.
+Read [Concepts](02-concepts.md) for how participants exchange data and control.
 
 ## Try the shipped examples
 
-The examples do the same thing with the rough edges sanded off, including
-`.env` loading and a live metrics printout.
+The examples include `.env` loading and periodic metrics output:
 
 - [`examples/python/basic/`](../examples/python/basic). What you just built,
   plus a YAML-config variant. No hardware.
@@ -352,6 +429,10 @@ bash scripts/build_ffi_python.sh release
 cd python && uv sync
 ```
 
+The `python/` workspace needs Python 3.12, because the lerobot plugins in it do.
+On 3.10 or 3.11, skip `uv sync` and install the package on its own after the
+build: `pip install -e python/packages/livekit-portal`.
+
 `build_ffi_python.sh` runs `cargo build -p livekit-portal-ffi`, drops the
 platform cdylib next to the Python package, and generates the UniFFI bindings.
 The first build takes a few minutes. Later builds are incremental. Rerun it
@@ -364,8 +445,6 @@ uv add --editable /abs/path/to/portal/python/packages/livekit-portal
 # or
 pip install -e /abs/path/to/portal/python/packages/livekit-portal
 ```
-
-If the cdylib lives somewhere else, point `LIVEKIT_PORTAL_FFI_LIB` at it.
 
 ## Already on lerobot?
 
@@ -385,7 +464,7 @@ replacement for it. Read [Concepts](02-concepts.md) first, then
 ## Next steps
 
 - [Concepts](02-concepts.md). Roles, the observation model, control handoff.
-- [Portal API](03-portal-api.md). The full surface.
-- [Tuning](04-tuning.md). `fps`, `slack`, and `tolerance`.
+- [Portal API](05-portal-api.md). The full surface.
+- [Tuning](06-tuning.md). `fps`, `slack`, and `tolerance`.
 - [Config from YAML](reference/config-file.md). Move the schema out of code so
   both sides load one file.

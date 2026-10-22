@@ -1,81 +1,45 @@
 # LiveKit Portal documentation
 
-> Cameras, joint state, and actions between a remote robot and one or more
-> operators, over LiveKit.
+LiveKit Portal connects robots to remote operators over a LiveKit room. Use it
+to teleoperate a robot, run a policy on another machine, or record demonstrations.
+The robot streams camera frames and state; operators send actions back.
 
-Portal gives your control code a local-looking robot that happens to be
-somewhere else on the internet. It carries video and state one way, actions
-the other way, and hands your policy a single fused `Observation` per tick.
+Start with the [quickstart](01-quickstart.md) to run a complete control loop
+without physical hardware. Then use the guides below for your application.
 
-If you are new here, read [Quickstart](01-quickstart.md) and then
-[Concepts](02-concepts.md). That is enough to run Portal and understand what
-it does. Everything after that is reference material you can reach for when a
-specific question comes up.
+## Build your application
 
-## Start here
-
-| Page | What you get |
+| Task | Guide |
 |---|---|
-| [1. Quickstart](01-quickstart.md) | Install, mint a token, run a robot and an operator end to end. |
-| [2. Concepts](02-concepts.md) | The mental model. Roles, observations, control handoff, frame format. |
-| [3. Portal API](03-portal-api.md) | The main surface. `Robot`, `Operator`, `Observer`, callbacks, send methods, control plane, keypoints, recording. |
+| Connect a robot and an operator | [Quickstart](01-quickstart.md) |
+| Understand how data and control move between participants | [Concepts](02-concepts.md) |
+| Record demonstrations for review or training | [Data recording](03-data-recording.md) |
+| Let a human take over from a policy | [Control handoff and arbitration](04-arbitration.md) |
+| Configure roles, send data, and register callbacks | [Portal API](05-portal-api.md) |
+| Share camera and field definitions between processes | [Config from YAML](reference/config-file.md) |
+| Connect an existing LeRobot robot or teleoperator | [LeRobot plugins](reference/lerobot.md) |
 
-## Then as needed
+Runnable projects are in [`examples/python/`](../examples/python): start with
+`basic`, then try `inference`, `modal-mock-inference`, or `so101` for hardware.
 
-| Page | Reach for it when |
+## Tune and debug
+
+| Task | Guide |
 |---|---|
-| [4. Tuning](04-tuning.md) | You want to change `fps`, `slack`, or `tolerance`, or you are seeing drops. |
-| [5. Frame video](05-frame-video.md) | A policy reads the pixels and lossy H.264 is not acceptable. |
-| [6. RPC](06-rpc.md) | You need one-shot commands like `home` or `calibrate`. |
-| [7. Metrics](07-metrics.md) | You want to know what `portal.metrics()` contains and which number to watch. |
-| [8. Troubleshooting](08-troubleshooting.md) | Something is not working, or a tagged warning showed up in your logs. |
-| [9. Migrating to v0.3](09-migrating-to-v0.3.md) | You are upgrading from v0.2. Every breaking change and what to do. |
+| Adjust observation matching or handle a stalled camera | [Tuning](06-tuning.md) |
+| Choose image quality and bandwidth for a policy | [Frame video](07-frame-video.md) |
+| Send a request such as homing or calibration | [RPC](08-rpc.md) |
+| Measure latency, frame delivery, and recording drops | [Metrics](09-metrics.md) |
+| Diagnose missing data or a warning in the logs | [Troubleshooting](10-troubleshooting.md) |
+| Upgrade an existing v0.2 application | [Migrating to v0.3](11-migrating-to-v0.3.md) |
 
 ## Reference
 
-Deeper material. None of it is required reading.
+- [Synchronization](reference/synchronization.md): how Portal matches camera
+  frames and state, including buffering and drop behavior.
+- [Wire protocol](reference/wire-protocol.md): implement a compatible peer with
+  another LiveKit SDK.
+- [End-to-end encryption](reference/e2ee.md): configure a shared encryption key.
 
-| Page | What's in it |
-|---|---|
-| [Config from YAML](reference/config-file.md) | Build `RobotConfig` / `OperatorConfig` from a shareable wire-contract file. |
-| [E2EE](reference/e2ee.md) | Shared-key end-to-end encryption for media and data. |
-| [Synchronization](reference/synchronization.md) | The full match algorithm, cursors, fair-share, complexity. |
-| [Wire protocol](reference/wire-protocol.md) | Topics, attributes, RPC, and binary layouts for building a Portal peer in any LiveKit SDK. |
-| [lerobot plugins](reference/lerobot.md) | Optional convenience wrappers for stacks already on lerobot. |
-
-## Find your path
-
-**I want to run something right now.** [Quickstart](01-quickstart.md), then
-[`examples/python/basic/`](../examples/python/basic). No hardware needed.
-
-**I am writing a policy against Portal.** [Concepts](02-concepts.md), then
-[Portal API](03-portal-api.md). If your policy reads pixels, add
-[Frame video](05-frame-video.md).
-
-**I am seeing dropped observations.** [Troubleshooting](08-troubleshooting.md)
-for the warning tag, then [Tuning](04-tuning.md) for the knob to turn.
-
-**I want a human and a policy sharing one robot.**
-[Concepts: control handoff](02-concepts.md#control-handoff), then
-[Portal API: the active operator](03-portal-api.md#the-active-operator).
-
-**I am on lerobot already.** Read [Concepts](02-concepts.md) first, because
-the plugins are a thin wrapper over the same model. Then
-[lerobot plugins](reference/lerobot.md).
-
-**I am writing a Portal peer in another SDK.**
-[Wire protocol](reference/wire-protocol.md) is the whole contract.
-
-## Conventions in these pages
-
-Code samples are Python. The same model holds in the Rust core and in the
-other LiveKit SDKs.
-
-"Robot", "Operator" and "Observer" are the three roles. One robot per session,
-any number of operators and observers. See [Concepts](02-concepts.md).
-
-Samples that show a full file are runnable as written once you fill in your
-LiveKit credentials. Samples that show a fragment say so.
-
-Defaults quoted in these pages match the shipped code. If a number here
-disagrees with what you observe, the code wins and the docs have a bug.
+Examples use Python unless labeled otherwise. Full scripts include their setup;
+code fragments assume the configuration or connection described on the page.

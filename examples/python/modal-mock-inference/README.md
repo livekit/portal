@@ -135,7 +135,7 @@ The policy prints how many frames it decoded:
 The robot prints the measurements once a second:
 
 ```
-[robot] t= 4s sent=75 replies=71 dropped=4 glass2glass=88.40ms codec_lag=12.10ms e2e=91.20ms/128.6ms active=policy
+[robot] t= 4s sent=75 replies=71 dropped=4 glass2glass=88.40ms codec_lag=12.10ms e2e=91.20ms/128.6ms rtt=24.10ms active=policy
 ```
 
 What each field means:
@@ -209,4 +209,4 @@ Frame size and run length are constants at the top of `robot.py`: `WIDTH`,
 If `dropped` climbs or `decode_rate` falls, the QR is getting mangled before
 the plain video would. Raise `WIDTH`/`HEIGHT`, or set `codec: png` in
 `portal.yaml` for a lossless comparison. See
-[frame video](../../../docs/05-frame-video.md).
+[frame video](../../../docs/07-frame-video.md).

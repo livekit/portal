@@ -59,10 +59,10 @@ pub enum Codec {
     /// Uncompressed RGB24. Largest payload, zero encode cost. Use when CPU is
     /// scarce or you want bit-exact frames with no codec dependency.
     Raw,
-    /// PNG, lossless. ~2-3x compression on natural images. ~10-30 ms encode at
-    /// 480p.
+    /// PNG, lossless. ~1.6-3x compression on robot camera frames. ~1.3 ms
+    /// encode, ~2 ms decode at 640×480 on an M4 Pro.
     Png,
-    /// Motion JPEG, lossy. ~10-20x compression at quality 90. Sub-millisecond
+    /// Motion JPEG, lossy. ~8-17x compression at quality 90. Sub-millisecond
     /// decode. Each frame is an independent JPEG (no temporal coding), so
     /// frame loss is contained.
     Mjpeg,

@@ -61,8 +61,8 @@ marked under `keypoints/`.
 
 Everything in the archive is on the robot's clock, even though four processes
 produced it, because every peer syncs to the robot's clock in the background. See
-[Recording](../../../docs/03-portal-api.md#recording) for the entity layout.
-Turning archives into a dataset is up to your own tooling.
+[Data recording](../../../docs/03-data-recording.md) for the entity layout,
+how to write your own sink, and how to turn archives into a dataset.
 
 ## What you should see
 
@@ -79,7 +79,7 @@ actions coming back:
 ```
 
 Nothing arriving? See
-[Troubleshooting](../../../docs/08-troubleshooting.md#nothing-is-arriving). The
+[Troubleshooting](../../../docs/10-troubleshooting.md#nothing-is-arriving). The
 usual cause is a token missing `can_update_own_metadata`.
 
 ## The files
@@ -133,7 +133,7 @@ matching frame. A few at startup are normal.
 
 **Metrics.** `periodic_metrics` in `_common.py` prints RTT, sync delta, jitter,
 buffer fill, and drop counts. Lift it for your own scripts. See
-[Metrics](../../../docs/07-metrics.md).
+[Metrics](../../../docs/09-metrics.md).
 
 **Observers, keypoints and recording.** `recorder.py` and `orchestrator.py`
 load `portal.yaml` with `ObserverConfig`. The orchestrator steers with
@@ -146,10 +146,10 @@ Everything is driven by `.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LIVEKIT_URL` | `ws://localhost:7880` | Server URL. |
+| `LIVEKIT_URL` | none | Required. Server URL, e.g. `ws://localhost:7880` in `.env.example`. |
 | `LIVEKIT_API_KEY` | none | Required. |
 | `LIVEKIT_API_SECRET` | none | Required. |
-| `LIVEKIT_ROOM` | `portal-demo` | Room name, shared by every script. |
+| `LIVEKIT_ROOM` | none | Required. Room name, shared by every script; `.env.example` uses `portal-demo`. |
 | `PORTAL_FPS` | `30` | Capture rate. Both sides must agree. |
 | `PORTAL_FRAME_WIDTH` | `320` | Frame width. Must be even. |
 | `PORTAL_FRAME_HEIGHT` | `240` | Frame height. Must be even. |

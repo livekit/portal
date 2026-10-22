@@ -1,14 +1,12 @@
 # Portal API
 
-> The main surface. Build a config, construct a `Robot` or an `Operator`,
-> register callbacks, push data.
+Use this reference when connecting your hardware, policy, or recorder to Portal.
+For a complete running application, start with the [quickstart](01-quickstart.md).
 
-This is the API everything else in the repository is built on, including the
-optional lerobot plugins. It works with any robotics stack, because it has no
-opinion about where your frames or your actions come from.
-
-The shape is always the same. Build a config. Construct the role. Register
-callbacks. Connect. Push data.
+Choose `Robot` to publish sensor data and receive actions, `Operator` to send
+actions, or `Observer` to record and supervise. For each role, create a config,
+register callbacks, then connect to a LiveKit room. Your application supplies
+the sensor readings and implements the control logic.
 
 ## Install
 
@@ -88,12 +86,15 @@ Conversion happens at the wire boundary.
 
 ### Full config surface
 
-Both `RobotConfig` and `OperatorConfig` accept all of these. Anything
-role-specific is a no-op on the wrong side.
+`RobotConfig`, `OperatorConfig` and `ObserverConfig` accept all of these,
+except `set_observation_sync`, which only the operator and observer configs
+have. `set_action_subscription` is a no-op on the robot. Defaults are the same
+for every role, except that an observer starts with observation sync off and the
+`"active"` action subscription.
 
 | Method | Default | What it does |
 |---|---|---|
-| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](05-frame-video.md). |
+| `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](07-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
@@ -105,14 +106,14 @@ role-specific is a no-op on the wrong side.
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
 | `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
 | `set_track_max_lag_ms(str, int)` | — | Per-track override of `set_max_lag_ms`. |
-| `set_observation_sync(bool)` | `True` | Operator-only. Bundle state and frames into observations. Off skips the sync buffer entirely. |
+| `set_observation_sync(bool)` | `True` (`False` for an observer) | Operator and observer only. Bundle state and frames into observations. Off skips the sync buffer entirely. |
 | `set_time_sync_source(TimeSyncSource)` | `PORTAL` | Where `now_us()` comes from: `PORTAL` syncs to the robot, `SYSTEM` trusts the host clock. |
 | `set_reuse_stale_frames(bool)` | `False` | Deprecated. Alias for `set_stall_behavior(FREEZE)` with `set_max_lag_ms(0)`. |
-| `set_action_subscription(str)` | `"none"` | Operator-only. Which received actions reach `on_action`: `"none"`, `"active"` or `"all"`. |
+| `set_action_subscription(str)` | `"none"` (`"active"` for an observer) | Operator and observer. Which received actions reach `on_action`: `"none"`, `"active"` or `"all"`. |
 | `set_e2ee_key(bytes)` | none | Shared-key encryption. See [E2EE](reference/e2ee.md). |
 
 `set_fps`, `set_slack`, and `set_tolerance` are covered in
-[Tuning](04-tuning.md).
+[Tuning](06-tuning.md).
 
 Every field is also readable back as a property, which is how you inspect a
 config you loaded from YAML instead of building by hand:
@@ -131,6 +132,8 @@ config you loaded from YAML instead of building by hand:
 | `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
 | `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. Deprecated. |
 | `action_subscription` | `ActionSubscription` | `set_action_subscription`. |
+| `observation_sync` | `bool` | `set_observation_sync`. Operator and observer configs only. |
+| `time_sync_source` | `TimeSyncSource` | `set_time_sync_source`. |
 | `has_e2ee_key` | `bool` | Whether a key was set. The bytes are not readable back. |
 
 ```python
@@ -147,7 +150,6 @@ You can also build the whole config from a file with
 
 ```python
 import asyncio
-import time
 
 from livekit.portal import DType, Robot, RobotConfig
 
@@ -165,7 +167,7 @@ async def main(url: str, token: str, hardware) -> None:
 
     def on_action(action) -> None:
         # action.values is the typed dict.
-        # action.timestamp_us is the operator's clock.
+        # action.timestamp_us is on the robot's clock (the sender's estimate of it).
         # action.sender is the operator identity, stamped at the gate.
         # Only the active operator reaches here.
         hardware.apply(action.values)
@@ -176,7 +178,7 @@ async def main(url: str, token: str, hardware) -> None:
     try:
         while hardware.running:
             reading = hardware.read()
-            ts = int(time.time() * 1_000_000)
+            ts = robot.now_us()
             robot.send_video_frame("camera1", reading.rgb, timestamp_us=ts)
             robot.send_state(reading.joints, timestamp_us=ts)
             await asyncio.sleep(1 / 30)
@@ -188,8 +190,8 @@ async def main(url: str, token: str, hardware) -> None:
 Stamp the frame and the state from the **same** `ts`. That shared timestamp is
 what lets the operator pair them.
 
-If you omit `timestamp_us`, Portal stamps with the current time at the moment
-of the call. That is fine when the two calls are adjacent, and wrong if you
+If you omit `timestamp_us`, Portal stamps with `now_us()` at the moment of the
+call. That is fine when the two calls are adjacent, and wrong if you
 capture, do 40 ms of processing, then send.
 
 `send_video_frame` infers width and height from the NumPy array. Pass them
@@ -235,19 +237,19 @@ async def main(url: str, token: str, policy) -> None:
 
 Passing `in_reply_to_ts_us` is optional but cheap, and it is what turns
 `metrics.policy.e2e_us_p50` into a real observation-to-action latency instead
-of a network ping. See [Metrics](07-metrics.md#policy).
+of a network ping. See [Metrics](09-metrics.md#policy).
 
 ## Lifecycle
 
 ```python
 await portal.connect(url, token)   # join the room
 await portal.disconnect()          # leave it
-portal.close()                     # release the native handle
+portal.close()                     # drop the native handle
 ```
 
-Call `close()` when you are finished with the object. It frees the underlying
-Rust handle. Skipping it leaks until the process exits, which is harmless for
-a script and not for a long-running service that builds portals repeatedly.
+`close()` is optional. It drops Python's reference to the native handle, and
+UniFFI frees the Rust side once Python garbage-collects it, with or without the
+call. `Observer.close()` also stops any recording, like `stop_recording()`.
 
 `connect` raises `PortalError.AlreadyConnected` if you call it twice.
 
@@ -351,23 +353,25 @@ declared type.
 ## The active operator
 
 The robot accepts actions from one operator at a time, named by its
-`active_operator` pointer. Anyone in the room can read it or change it. The
-robot's copy is authoritative.
+`active_operator` pointer. Anyone in the room can read it. Operators and
+observers can change it; the robot refuses the request from anyone else with
+RPC error `2003`. The robot's copy is authoritative.
 
 ```python
-# Either role
+# Every role
 portal.active_operator()                        # Optional[str]
 await portal.set_active_operator("policy-v1")   # None clears it
 portal.operators()                              # connected operator identities
 portal.local_identity()                         # own identity, after connect
 
-# Operator only
+# Operator and observer
 op.robot_identity()                             # the robot, once discovered
 ```
 
 `set_active_operator` is symmetric. The robot writes its own attribute
-directly. An operator sends a `portal.set_active_operator` RPC and the robot's
-handler does the write. Either way the change propagates to everyone.
+directly. An operator or observer sends a `portal.set_active_operator` RPC and
+the robot's handler does the write. Either way the change propagates to
+everyone.
 
 React to changes with three callbacks:
 
@@ -376,41 +380,6 @@ portal.on_operator_joined(lambda identity: ...)
 portal.on_operator_left(lambda identity: ...)
 portal.on_active_operator_changed(lambda identity: ...)   # identity may be None
 ```
-
-## Time sync
-
-Every peer syncs to the robot's clock in the background, on the `portal_clock`
-topic. It is always on.
-
-```python
-portal.now_us()                      # now on the robot's clock; on the robot, its own
-portal.on_time_synced(lambda: ...)   # first sync, and after each resync
-
-m = portal.metrics().time_sync
-m.synced, m.offset_us, m.uncertainty_us
-```
-
-Before the first sync, `now_us()` is local time and `synced` is `False`.
-Anything you send in that window is stamped on your own clock, so a recorder or
-an orchestrator should wait for `on_time_synced` before it starts. At the first
-sync `now_us()` switches to the robot's clock in one step, which can go
-backwards once if this host's clock was ahead. From then on it never repeats and
-never goes backwards. It is the default
-timestamp for everything you send. Details are in
-[Metrics](07-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
-
-**Opting out.** A lab whose hosts are already synced, with PTP or
-GPS-disciplined clocks, can trust the system clock instead:
-
-```python
-cfg.set_time_sync_source(TimeSyncSource.SYSTEM)   # default: TimeSyncSource.PORTAL
-```
-
-`now_us()` is then the host's system time, still never repeating or going
-backwards, and `synced` is `True` from the start. Portal keeps running the
-exchange without applying it. A non-zero `measured_offset_us` shows a PTP
-setup that has drifted or failed, before it shows up as bad data. It is a
-per-peer choice, so `portal` and `system` peers share a room.
 
 ### Behavior worth knowing
 
@@ -430,10 +399,48 @@ api.AccessToken(key, secret).with_attributes(
 )
 ```
 
-**Both roles need `can_update_own_metadata=True`** in their token. `Robot` and
-`Operator` self-set an `lk.portal.role` attribute on connect, and that write
-fails without the grant. See
-[Troubleshooting](08-troubleshooting.md#connect-fails-with-a-metadata-error).
+**Every role needs `can_update_own_metadata=True`** in its token. `Robot`,
+`Operator` and `Observer` self-set `lk.portal.role` and `lk.portal.version`
+attributes on connect, and that write fails without the grant. See
+[Troubleshooting](10-troubleshooting.md#connect-fails-with-a-metadata-error).
+
+## Time sync
+
+Every peer syncs to the robot's clock in the background, on the `portal_clock`
+topic. It is always on.
+
+```python
+portal.now_us()                      # now on the robot's clock; on the robot, its own
+portal.on_time_synced(lambda: ...)   # first sync, and after each resync
+
+m = portal.metrics().time_sync
+m.synced, m.offset_us, m.uncertainty_us
+```
+
+Before the first sync, `now_us()` is local time and `synced` is `False`.
+Anything you send in that window is stamped on your own clock, so a recorder or
+an orchestrator should wait for `on_time_synced` before it starts.
+`on_time_synced` never fires on the robot, whose clock is the reference, or
+with `TimeSyncSource.SYSTEM`. In both cases `metrics().time_sync.synced` is
+`True` from the start, so check that instead of waiting. At the first
+sync `now_us()` switches to the robot's clock in one step, which can go
+backwards once if this host's clock was ahead. From then on it never repeats and
+never goes backwards. It is the default
+timestamp for everything you send. Details are in
+[Metrics](09-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
+
+**Opting out.** A lab whose hosts are already synced, with PTP or
+GPS-disciplined clocks, can trust the system clock instead:
+
+```python
+cfg.set_time_sync_source(TimeSyncSource.SYSTEM)   # default: TimeSyncSource.PORTAL
+```
+
+`now_us()` is then the host's system time, still never repeating or going
+backwards, and `synced` is `True` from the start. Portal keeps running the
+exchange without applying it. A non-zero `measured_offset_us` shows a PTP
+setup that has drifted or failed, before it shows up as bad data. It is a
+per-peer choice, so `portal` and `system` peers share a room.
 
 ## Keypoints
 
@@ -476,19 +483,20 @@ without any extra API.
 |---|---|---|
 | **Single operator** | robot, 1 operator | Operator claims control at startup. |
 | **Human in the loop** | robot, policy, human | Either side calls `set_active_operator`. Executed actions stay continuous across the cutover. |
-| **Data recording** | robot, policy, human, recorder | Recorder joins with `set_action_subscription("active")` and logs every executed action with `action.sender`. |
+| **Data recording** | robot, policy, human, recorder | Recorder is an observer, which defaults to `set_action_subscription("active")`, and logs every active action with `action.sender`. See [Data recording](03-data-recording.md). |
 | **Shadow evaluation** | robot, active policy, candidate policy | Candidate streams actions and the gate drops them. A recorder with `set_action_subscription("all")` gets both streams, with `action.active` telling them apart. |
 | **Supervisor** | robot, N operators, supervisor UI | Supervisor never claims control. It only calls `set_active_operator` to route. |
 
-Working versions of the last three live in the integration tests:
+A runnable walkthrough of human in the loop and orchestration is in
+[Arbitration](04-arbitration.md). Working versions of the last three live in the integration tests:
 [action subscription](../python/packages/livekit-portal/tests/integration/test_action_subscription.py),
 [handoff](../python/packages/livekit-portal/tests/integration/test_multi_operator.py).
 
 ## Operator-side action subscription
 
-By default an operator only sends actions. It never sees what the robot
-actually executed. Recorders, shadow policies, and monitoring UIs need that
-view. `set_action_subscription` decides which actions reach `on_action`.
+To display or compare actions from other operators, enable action subscription.
+`set_action_subscription` selects which actions reach `on_action`; operators
+subscribe to none by default, while observers subscribe to active actions.
 
 ```python
 cfg = OperatorConfig("session-1")
@@ -505,11 +513,11 @@ op.on_action(lambda action: log.append(action))
 | `active` | only the active operator's actions, the same gate the robot runs |
 | `all` | every operator's actions, including the ones the gate dropped |
 
-Every action carries `sender` and `active`, both stamped at gate time.
-`active=False` marks a shadow action the robot ignored. With `all` you can
-record a candidate policy next to the one actually driving and compare them
-offline. It means the action passed the gate, not that the robot carried it
-out.
+Each receiving participant evaluates `active` against its local view of the
+active operator. `sender` identifies the action's source. With `all`, you can
+record a candidate policy's actions alongside the active operator's actions.
+These fields do not confirm that the robot received or physically executed an
+action. For execution feedback, publish the measured result as robot state.
 
 Actions are broadcast to the whole room either way, so this is a local filter
 and `all` costs nothing extra on the wire. `none` is the default because most
@@ -591,7 +599,7 @@ default settings holds them at 45 to 146 ms at 1080p.
 The setting covers the whole process and has to be in place before its first
 LiveKit connection. Portal sets it on connect. If something else in the process
 connected to LiveKit first, Portal logs
-[`playout-delay`](08-troubleshooting.md#playout-delay) and receives with the
+[`playout-delay`](10-troubleshooting.md#playout-delay) and receives with the
 default delay.
 
 #### Simulcast and screencast
@@ -643,7 +651,7 @@ cfg.add_video("debug", codec=VideoCodec.RAW)
 The user-facing API does not change. `send_video_frame`, `on_video_frame`,
 `get_video_frame`, and observations all behave identically, and frames arrive
 as RGB either way. Codec choice, the latency math, and per-track fps ceilings
-are in [Frame video](05-frame-video.md).
+are in [Frame video](07-frame-video.md).
 
 ## RPC
 
@@ -658,7 +666,7 @@ reply = await op.perform_rpc("home", payload="{}")
 ```
 
 Handlers must return a string. Full surface, error codes, and payload limits
-are in [RPC](06-rpc.md).
+are in [RPC](08-rpc.md).
 
 ## Metrics
 
@@ -673,7 +681,7 @@ m.policy.e2e_us_p95
 portal.reset_metrics()
 ```
 
-Every field is documented in [Metrics](07-metrics.md).
+Every field is documented in [Metrics](09-metrics.md).
 
 ## Gotchas
 
@@ -689,7 +697,7 @@ cast. `int` is accepted for float dtypes. `bool` is rejected everywhere except
 fingerprint over the ordered field names and dtypes. A peer whose schema
 disagrees sees its packets dropped with one warning per offending fingerprint.
 The healthy side keeps running. Nothing throws. See
-[`schema-mismatch`](08-troubleshooting.md#schema-mismatch).
+[`schema-mismatch`](10-troubleshooting.md#schema-mismatch).
 
 **Unknown field names on send are dropped.** Keys not in the declared schema
 get one warning and are then ignored silently. A typo in a field name looks
@@ -713,18 +721,20 @@ sender's side. Check `op.active_operator()`.
 | Variant | Cause |
 |---|---|
 | `AlreadyConnected` | `connect` called on a connected portal. |
-| `NotConnected` | A send or RPC before `connect`, or after `disconnect`. |
+| `NotConnected` | `perform_rpc`, `send_keypoint`, or the robot's `set_active_operator` before `connect` or after `disconnect`. |
+| `Room` | Connecting or a transport call failed: a bad token, a missing `can_update_own_metadata` grant, or an oversize keypoint. Carries the server's message. |
 | `NoPeer` | `perform_rpc` with no peer discovered and no `destination`. |
 | `AmbiguousPeer` | Several remote participants and no peer identified. Pass `destination`. |
-| `UnknownVideoTrack` | Track name was never declared with `add_video`. |
+| `UnknownVideoTrack` | Track name was never declared with `add_video`, or a robot's `send_video_frame` before `connect`. |
 | `WrongFrameSize` | Buffer length is not `width * height * 3`. |
 | `InvalidFrameDimensions` | Width or height is odd. |
-| `WrongRole` | `send_action` on a robot, or `send_state` on an operator. |
+| `WrongRole` | A send the role can't make, such as any `Observer.send_*`. Also `send_state` or `send_action` before `connect` or after `disconnect`, when no publisher exists. |
 | `ObservationSyncDisabled` | `on_observation` or `get_observation` on a peer with `set_observation_sync(False)`. |
 | `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
 | `Deserialization` | A received payload could not be parsed. |
 | `Codec` | Frame encode or decode failed. |
-| `Rpc` | The remote handler raised. Carries the `RpcError`. |
+| `InvalidKeypoint` | A keypoint payload is not a JSON object. |
+| `Rpc` | The remote handler raised. In Python, the code and message are only in `str(e)` (`rpc error <code>: <message>`); there are no `.code` or `.data` attributes. |
 
 `ConfigFileError` is separate and only comes from the YAML loader. See
 [Config from YAML](reference/config-file.md#errors).
@@ -742,7 +752,7 @@ robot.get_action()
 
 # control plane
 robot.active_operator() / await robot.set_active_operator(identity)
-robot.operators() / robot.local_identity()
+robot.operators() / robot.observers() / robot.local_identity()
 robot.on_operator_joined(cb) / robot.on_operator_left(cb)
 robot.on_active_operator_changed(cb)
 
@@ -752,7 +762,7 @@ await robot.send_keypoint(type, payload=None, timestamp_us=None) / robot.on_keyp
 
 # rpc, metrics, lifecycle
 robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
-await robot.perform_rpc(method, payload, destination=None, response_timeout_ms=None)
+await robot.perform_rpc(method, payload="", destination=None, response_timeout_ms=None)
 robot.metrics() / robot.reset_metrics()
 await robot.connect(url, token) / await robot.disconnect() / robot.close()
 ```
@@ -769,7 +779,7 @@ op.on_action(cb) / op.get_action()           # requires action subscription
 
 # control plane
 op.active_operator() / await op.set_active_operator(identity)
-op.operators() / op.robot_identity() / op.local_identity()
+op.operators() / op.observers() / op.robot_identity() / op.local_identity()
 op.on_operator_joined(cb) / op.on_operator_left(cb)
 op.on_active_operator_changed(cb)
 
@@ -779,7 +789,7 @@ await op.send_keypoint(type, payload=None, timestamp_us=None) / op.on_keypoint(c
 
 # rpc, metrics, lifecycle
 op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)
-await op.perform_rpc(method, payload, destination=None, response_timeout_ms=None)
+await op.perform_rpc(method, payload="", destination=None, response_timeout_ms=None)
 op.metrics() / op.reset_metrics()
 await op.connect(url, token) / await op.disconnect() / op.close()
 ```
@@ -791,8 +801,8 @@ await op.connect(url, token) / await op.disconnect() / op.close()
 obs.on_state(cb) / obs.on_video_frame(track, cb)
 obs.on_action(cb) / obs.get_action()         # default subscription: "active"
 obs.get_state() / obs.get_video_frame(track)
-obs.on_observation(cb) / obs.get_observation()   # only with set_observation_sync(True)
-obs.send_action(...) / obs.send_state(...)   # always raise PortalError.WrongRole
+obs.on_observation(cb) / obs.get_observation() / obs.on_drop(cb)   # only with set_observation_sync(True)
+obs.send_action(...) / obs.send_state(...) / obs.send_video_frame(...)   # always raise PortalError.WrongRole
 
 # control plane
 obs.active_operator() / await obs.set_active_operator(identity)   # None takes control from everyone
@@ -886,17 +896,16 @@ Two timelines, both on the robot's clock:
   on `robot_time` alone.
 - **`portal/schema` records field order.** Rerun entities are independent, so
   without it anything reading the file would have to guess joint order.
-- **`action/<sender>/active`** is 1 for actions the robot executed and 0 for
+- **`action/<sender>/active`** is 1 for actions accepted by the local control gate and 0 for
   shadow actions, recorded with `set_action_subscription("all")`.
 
-Turning archives into datasets (LeRobot or anything else) is up to your own
-tooling. For other formats, such as MCAP or your own storage, write your own
-sink.
+For a walkthrough, writing your own sink, and turning archives into training
+datasets, see [Data recording](03-data-recording.md).
 
 ## Using `Portal` directly
 
-`Robot` and `Operator` are facades over a unified `Portal` class, which is also
-exported:
+`Robot`, `Operator` and `Observer` are facades over a unified `Portal` class,
+which is also exported:
 
 ```python
 from livekit.portal import Portal, PortalConfig, Role
@@ -906,17 +915,18 @@ portal = Portal(cfg)
 ```
 
 `Portal` gets the same behavior the facades do. The gate, the role attribute,
-and the built-in RPC handler are all present, with no opt-in flag. The only
-difference is that the type system exposes every method regardless of role, so
-you can call one that raises `WrongRole` at runtime.
+and the built-in RPC handler are all present, with no opt-in flag. Two
+differences: the type system exposes every method regardless of role, so you
+can call one that raises `WrongRole` at runtime, and recording (`record_to`,
+`stop_recording`, `metrics().observer`) exists only on the `Observer` facade.
 
-Prefer `Robot` or `Operator` in new code. Reach for `Portal` when the role is
+Prefer `Robot`, `Operator` or `Observer` in new code. Reach for `Portal` when the role is
 genuinely dynamic.
 
 ## Next steps
 
-- [Tuning](04-tuning.md). `fps`, `slack`, `tolerance`, and reliability.
-- [Frame video](05-frame-video.md). Pixel-exact frames for policies.
-- [Metrics](07-metrics.md). Every counter, and which ones to alert on.
+- [Tuning](06-tuning.md). `fps`, `slack`, `tolerance`, and reliability.
+- [Frame video](07-frame-video.md). Pixel-exact frames for policies.
+- [Metrics](09-metrics.md). Every counter, and which ones to alert on.
 - [Config from YAML](reference/config-file.md). Move the schema into one shared
   file.

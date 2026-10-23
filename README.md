@@ -29,7 +29,7 @@ camera frames and robot state to the operator, and control actions back to the
 robot. It works with any robotics stack, using LiveKit Cloud or a self-hosted
 LiveKit server.
 
-## What Portal adds
+## Features
 
 - **Low-latency video.** LiveKit advertises [glass-to-glass latency as low as
   30 ms](https://livekit.com/robotics). Actual latency depends on the network,

@@ -92,6 +92,48 @@ that uncertainty are not reliable.
   Large frames can delay state delivery.
 - High `send` latency blocks the robot's control loop. Try a lower resolution.
 
+## Measuring overhead across regions
+
+Over a real network, most of `loop` is the network itself. To see what LiveKit
+and Portal add, compare three round trips taken at the same time between the
+same two machines:
+
+1. **Network floor.** A direct ping between the two machines, outside LiveKit.
+   Don't route it through a VPN relay: if both machines are behind NAT, punch a
+   direct UDP path rather than measuring the relay.
+2. **LiveKit.** The same round trip on the plain LiveKit SDK (`livekit.rtc`):
+   the robot sends a reliable data packet and a video frame stamped with
+   `FrameMetadata.user_timestamp`, and the other side echoes each one back.
+3. **Portal.** The same round trip through Portal: the operator replies with
+   `send_action(..., in_reply_to_ts_us=...)` from `on_state`,
+   `on_video_frame` and `on_observation`. This is what `loop` measures.
+
+Time every round trip on the robot's clock, so clock sync can't skew it.
+Interleave the LiveKit and Portal runs, and keep the ping running throughout,
+so all three see the same network.
+
+### Example: Vietnam to San Francisco
+
+A hard case: the robot in San Francisco, the operator in Haiphong, Vietnam, both
+on [LiveKit Cloud](https://cloud.livekit.io). H264 640x480 at 30 fps, 30 s per
+run. Median round trips from the best of three interleaved runs:
+
+| Round trip | p50 | Added |
+|---|---|---|
+| Direct UDP ping | 184.1 ms | network floor |
+| LiveKit SDK, data echo | 221.0 ms | +36.9 ms LiveKit route |
+| Portal, `on_state` → action | 222.4 ms | +1.4 ms Portal |
+| LiveKit SDK, video echo | 233.9 ms | +12.9 ms video pipeline |
+| Portal, `on_video_frame` → action | 235.5 ms | +1.6 ms Portal |
+| Portal, `on_observation` → action | 235.1 ms | fusing frame and state adds nothing measurable |
+
+Most of LiveKit's extra time is the route: each machine connects to its nearest
+LiveKit edge (97 ms round trip from Haiphong, 10 ms from San Francisco). Tail
+latency followed the network: p95 ranged from about 320 ms to over 1 s from run
+to run, and the direct ping's p95 moved with it. Portal's share was
+under 5 ms in every run that wasn't hit by a network burst. A shorter path
+shrinks the network and LiveKit terms.
+
 ## Configuration
 
 Set options in `.env`. Use the same `PORTAL_FPS` and `PORTAL_CODEC` on both sides.

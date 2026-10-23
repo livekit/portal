@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-dark.svg">
-  <img alt="p50 latency per stream on a local server: send 0.2 ms, state 1.2 ms, video 5.9 ms, observation 6.2 ms, action 0.5 ms, full loop 6.8 ms." src="../../../docs/images/example-benchmark-light.svg" width="100%">
+  <img alt="The robot and the teleoperator with each stream between them, p50 on a local server: video 5.9 ms and state 1.2 ms to the teleoperator, which matches them into an observation at 6.2 ms, action 0.5 ms back, full loop 6.8 ms." src="../../../docs/images/example-benchmark-light.svg" width="100%">
 </picture>
 
 Measure latency, jitter, and gaps between arrivals for video, state, observations,
@@ -113,6 +113,11 @@ Interleave the LiveKit and Portal runs, and keep the ping running throughout,
 so all three see the same network.
 
 ### Example: Vietnam to San Francisco
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-cloud-dark.svg">
+  <img alt="Robot in San Francisco, teleoperator in Hanoi, on LiveKit Cloud, 640x480 H264 at 30 fps. Video about 124 ms and state about 111 ms to the teleoperator, observation at about 124 ms, action about 111 ms back, loop 235.1 ms. The direct ping round trip is 184.1 ms; Portal adds about 1.5 ms over plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-cloud-light.svg" width="100%">
+</picture>
 
 A hard case: the robot in San Francisco, the operator in Hanoi, Vietnam, both
 on [LiveKit Cloud](https://cloud.livekit.io). H264 640x480 at 30 fps, 30 s per

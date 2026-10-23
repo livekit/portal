@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-basic-dark.svg">
-  <img alt="robot.py streams video and state into a LiveKit room; teleoperator.py takes control and sends actions back; observer.py records every track to an .rrd archive." src="../../../docs/images/example-basic-light.svg" width="100%">
+  <img alt="robot.py streams video and state into a LiveKit room; teleoperator.py takes control and sends actions back; observer.py records every track." src="../../../docs/images/example-basic-light.svg" width="100%">
 </picture>
 
 Stream synthetic video and arm state, send actions, and record a session. No

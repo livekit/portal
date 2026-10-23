@@ -14,7 +14,7 @@
 </p>
 
 <!--BEGIN_DESCRIPTION-->
-<p align="center"><b>Teleoperate robots, run remote policies, and record demonstrations with LiveKit Portal.</b></p>
+<p align="center"><b>Teleoperate robots, run remote policies, and record HITL demonstrations with LiveKit Portal.</b></p>
 <!--END_DESCRIPTION-->
 
 <p align="center">
@@ -107,7 +107,7 @@ the human was in control, with each action labeled by sender and control status.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/portal-room-dark.svg">
-  <img alt="The robot, a policy, a human and a recorder in one LiveKit room, sharing video and data tracks, the active_operator attribute and the robot's clock; the recorder writes an .rrd archive." src="docs/images/portal-room-light.svg" width="100%">
+  <img alt="The robot, a policy, a human and a recorder in one LiveKit room, sharing video and data tracks, the active_operator attribute and the robot's clock." src="docs/images/portal-room-light.svg" width="100%">
 </picture>
 
 That gives you the policy attempt, the human correction, and the context needed
@@ -144,7 +144,7 @@ For an existing LeRobot application, use the [LeRobot plugins](docs/reference/le
 <a href="examples/python/basic">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-basic-dark.svg">
-  <img alt="robot.py streams video and state into a LiveKit room; teleoperator.py takes control and sends actions back; observer.py records every track to an .rrd archive." src="docs/images/example-basic-light.svg" width="100%">
+  <img alt="robot.py streams video and state into a LiveKit room; teleoperator.py takes control and sends actions back; observer.py records every track." src="docs/images/example-basic-light.svg" width="100%">
 </picture>
 </a>
 <p><a href="examples/python/basic"><b>Basic</b></a><br>Robot, teleoperator and observer with synthetic video. Control handoff, RPC and recording. No hardware.</p>

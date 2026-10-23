@@ -62,14 +62,14 @@ Sample output with a local `livekit-server --dev`, 640x480 H264 at 30 fps:
 
 Stream definitions:
 
-| Stream | Measured on | From | To |
-|---|---|---|---|
-| `send` | robot | `send_video_frame` called | call returns (RGB to I420 conversion and enqueue) |
-| `video` | operator | frame captured | decoded frame delivered to `on_video_frame` |
-| `state` | operator | state captured | state delivered to `on_state` |
-| `obs` | operator | capture | fused observation delivered to `on_observation` |
-| `action` | robot | operator calls `send_action` | action delivered to `on_action` |
-| `loop` | robot | capture | corresponding action arrives |
+| Stream   | Measured on | From                         | To                                                |
+| -------- | ----------- | ---------------------------- | ------------------------------------------------- |
+| `send`   | robot       | `send_video_frame` called    | call returns (RGB to I420 conversion and enqueue) |
+| `video`  | operator    | frame captured               | decoded frame delivered to `on_video_frame`       |
+| `state`  | operator    | state captured               | state delivered to `on_state`                     |
+| `obs`    | operator    | capture                      | fused observation delivered to `on_observation`   |
+| `action` | robot       | operator calls `send_action` | action delivered to `on_action`                   |
+| `loop`   | robot       | capture                      | corresponding action arrives                      |
 
 Columns:
 
@@ -114,21 +114,21 @@ so all three see the same network.
 
 ### Example: Vietnam to San Francisco
 
-A hard case: the robot in San Francisco, the operator in Haiphong, Vietnam, both
+A hard case: the robot in San Francisco, the operator in Hanoi, Vietnam, both
 on [LiveKit Cloud](https://cloud.livekit.io). H264 640x480 at 30 fps, 30 s per
 run. Median round trips from the best of three interleaved runs:
 
-| Round trip | p50 | Added |
-|---|---|---|
-| Direct UDP ping | 184.1 ms | network floor |
-| LiveKit SDK, data echo | 221.0 ms | +36.9 ms LiveKit route |
-| Portal, `on_state` → action | 222.4 ms | +1.4 ms Portal |
-| LiveKit SDK, video echo | 233.9 ms | +12.9 ms video pipeline |
-| Portal, `on_video_frame` → action | 235.5 ms | +1.6 ms Portal |
+| Round trip                        | p50      | Added                                          |
+| --------------------------------- | -------- | ---------------------------------------------- |
+| Direct UDP ping                   | 184.1 ms | network floor                                  |
+| LiveKit SDK, data echo            | 221.0 ms | +36.9 ms LiveKit route                         |
+| Portal, `on_state` → action       | 222.4 ms | +1.4 ms Portal                                 |
+| LiveKit SDK, video echo           | 233.9 ms | +12.9 ms video pipeline                        |
+| Portal, `on_video_frame` → action | 235.5 ms | +1.6 ms Portal                                 |
 | Portal, `on_observation` → action | 235.1 ms | fusing frame and state adds nothing measurable |
 
 Most of LiveKit's extra time is the route: each machine connects to its nearest
-LiveKit edge (97 ms round trip from Haiphong, 10 ms from San Francisco). Tail
+LiveKit edge (97 ms round trip from Hanoi, 10 ms from San Francisco). Tail
 latency followed the network: p95 ranged from about 320 ms to over 1 s from run
 to run, and the direct ping's p95 moved with it. Portal's share was
 under 5 ms in every run that wasn't hit by a network burst. A shorter path
@@ -138,25 +138,25 @@ shrinks the network and LiveKit terms.
 
 Set options in `.env`. Use the same `PORTAL_FPS` and `PORTAL_CODEC` on both sides.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `LIVEKIT_URL` | none | Required. Server URL, e.g. `ws://localhost:7880`. |
-| `LIVEKIT_API_KEY` | none | Required. |
-| `LIVEKIT_API_SECRET` | none | Required. |
-| `LIVEKIT_ROOM` | none | Required. `.env.example` uses `portal-benchmark`. |
-| `PORTAL_FPS` | `30` | Capture rate. |
-| `PORTAL_CODEC` | `h264` | `h264`, `vp8`, `vp9`, `av1`, `mjpeg`, `png` or `raw`. See [Frame video](../../../docs/07-frame-video.md). |
-| `PORTAL_FRAME_WIDTH` | `640` | Frame width. Must be even. |
-| `PORTAL_FRAME_HEIGHT` | `480` | Frame height. Must be even. |
-| `PORTAL_WARMUP_SECONDS` | `3` | Streamed but not measured, while the encoder ramps up its bitrate. |
-| `PORTAL_DURATION_SECONDS` | `30` | How long the robot measures. |
+| Variable                  | Default | Purpose                                                                                                   |
+| ------------------------- | ------- | --------------------------------------------------------------------------------------------------------- |
+| `LIVEKIT_URL`             | none    | Required. Server URL, e.g. `ws://localhost:7880`.                                                         |
+| `LIVEKIT_API_KEY`         | none    | Required.                                                                                                 |
+| `LIVEKIT_API_SECRET`      | none    | Required.                                                                                                 |
+| `LIVEKIT_ROOM`            | none    | Required. `.env.example` uses `portal-benchmark`.                                                         |
+| `PORTAL_FPS`              | `30`    | Capture rate.                                                                                             |
+| `PORTAL_CODEC`            | `h264`  | `h264`, `vp8`, `vp9`, `av1`, `mjpeg`, `png` or `raw`. See [Frame video](../../../docs/07-frame-video.md). |
+| `PORTAL_FRAME_WIDTH`      | `640`   | Frame width. Must be even.                                                                                |
+| `PORTAL_FRAME_HEIGHT`     | `480`   | Frame height. Must be even.                                                                               |
+| `PORTAL_WARMUP_SECONDS`   | `3`     | Streamed but not measured, while the encoder ramps up its bitrate.                                        |
+| `PORTAL_DURATION_SECONDS` | `30`    | How long the robot measures.                                                                              |
 
 The token requests a 0–1 ms playout delay to reduce receiver buffering.
 
 ## Files
 
-| File | What it does |
-|---|---|
-| `robot.py` | Streams video and state, measures `loop`, `action` and `send`. |
+| File              | What it does                                                       |
+| ----------------- | ------------------------------------------------------------------ |
+| `robot.py`        | Streams video and state, measures `loop`, `action` and `send`.     |
 | `teleoperator.py` | Replies to every observation, measures `obs`, `video` and `state`. |
-| `_common.py` | Settings, tokens, test frames, pacing, and statistics. |
+| `_common.py`      | Settings, tokens, test frames, pacing, and statistics.             |

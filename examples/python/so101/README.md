@@ -1,19 +1,21 @@
-# SO-101 teleoperation over LiveKit Portal
+# SO-101 teleoperation
 
-End-to-end example: drive a physical **SO-101 follower arm** from a remote
-**SO-101 leader arm** over a LiveKit Portal session, with synced joint state
-+ one camera streamed back for visualization in [rerun](https://rerun.io).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-so101-dark.svg">
+  <img alt="robot.py wraps the SO-101 follower and camera with LiveKitTeleoperator; teleoperator.py drives it from an SO-101 leader through LiveKitRobot and shows it in Rerun." src="../../../docs/images/example-so101-light.svg" width="100%">
+</picture>
 
-Two scripts, one per machine:
+Control an SO-101 follower arm with a remote SO-101 leader over Portal. View
+camera video, joint positions, and actions in [Rerun](https://rerun.io).
+
+Run one script on each machine:
 
 | Script            | Runs on                          | Hardware attached                 |
 | ----------------- | -------------------------------- | --------------------------------- |
 | `robot.py`        | The machine next to the arm      | SO-101 follower + USB camera      |
 | `teleoperator.py` | The operator's laptop            | SO-101 leader arm                 |
 
-They connect to the **same LiveKit room** and sync via Portal.
-
----
+Both scripts must connect to the same LiveKit room.
 
 ## 1. Prerequisites
 
@@ -26,8 +28,6 @@ They connect to the **same LiveKit room** and sync via Portal.
 - The Portal native library built once at the repo root:
   `bash scripts/build_ffi_python.sh`
 
----
-
 ## 2. Install
 
 From this directory:
@@ -36,35 +36,26 @@ From this directory:
 uv sync
 ```
 
-Installs `lerobot[feetech]`, the Portal SDK, the `lerobot-robot-livekit`
-and `lerobot-teleoperator-livekit` plugins, and `rerun-sdk` into a local
-venv. The three Portal packages are picked up as editable installs from
-`../../../python/packages/`.
-
----
+`uv sync` installs LeRobot, Rerun, and the Portal SDK and plugins. Portal packages
+use editable installs from `../../../python/packages/`.
 
 ## 3. Find the serial ports
 
-Each arm needs its own serial port. Use lerobot's helper. Unplug the arm
-it asks about, press enter, then plug it back in:
+Run the port finder for each arm and follow its prompts:
 
 ```bash
 # Run once for the follower, once for the leader.
 uv run lerobot-find-port
 ```
 
-Record the two paths (e.g. `/dev/tty.usbmodem...` on macOS, `/dev/ttyACM...`
-on Linux). You'll put them in `.env` below.
-
----
+Save both paths for `.env`, e.g. `/dev/tty.usbmodem...` on macOS or
+`/dev/ttyACM...` on Linux.
 
 ## 4. Calibrate the arms
 
-**This step is required on first use** and any time you swap servos or
-significantly disassemble/reassemble an arm. Calibration maps raw encoder
-ticks to joint angles and captures each motor's range of motion. Files are
-cached under `~/.cache/huggingface/lerobot/calibration/` keyed by the `id`
-you pass.
+Calibrate before first use and after replacing servos or reassembling an arm.
+Calibration files are stored in `~/.cache/huggingface/lerobot/calibration/`, keyed
+by the device ID. Use the same IDs in `.env`.
 
 ### 4a. Leader
 
@@ -76,13 +67,12 @@ uv run lerobot-calibrate \
 ```
 
 Follow the on-screen prompts:
+
 1. Move the arm to the **middle of its range**, press enter → sets homing offsets.
 2. Move **every joint through its full range** (except `wrist_roll`, which
    is treated as full-turn), press enter → records min/max.
 
 ### 4b. Follower
-
-Same flow, different flags:
 
 ```bash
 uv run lerobot-calibrate \
@@ -94,15 +84,13 @@ uv run lerobot-calibrate \
 > Leaders are torque-off during calibration (you move them by hand).
 > Followers will self-drive during range capture. Keep clear of the arm.
 
----
-
 ## 5. Configure `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in:
+Set the LiveKit connection, serial ports, and camera options:
 
 ```ini
 LIVEKIT_URL=wss://your-project.livekit.cloud      # or ws://localhost:7880
@@ -125,11 +113,8 @@ SO101_LEADER_PORT=/dev/tty.usbmodem-LEADER
 SO101_LEADER_ID=so101_leader                      # must match --teleop.id from step 4a
 ```
 
-Same `.env` file works on both sides. Each script reads only the fields
-it needs. If the two machines have different ports, either keep two copies
-or use `.env.local` for per-machine overrides (loaded after `.env`).
-
----
+Use the same LiveKit settings on both machines. Set machine-specific values in
+separate `.env` files or in `.env.local`, which overrides `.env`.
 
 ## 6. Run
 
@@ -145,40 +130,34 @@ uv run robot.py
 uv run teleoperator.py
 ```
 
-The rerun viewer auto-spawns on the operator side. You'll see:
-- `observation/<camera_name>`: live video from the follower (JPEG-compressed,
-  scrubbable on the `robot_time` timeline aligned to the follower's clock).
+Rerun opens on the operator machine. Select the `robot_time` timeline to view:
+
+- `observation/<camera_name>`: follower camera video.
 - `observation/<motor>.pos`: follower joint positions as scalar plots.
 - `action/<motor>.pos`: commanded positions from the leader.
 
 Stop either side with Ctrl-C.
 
----
-
 ## 7. Troubleshooting
 
-**"No calibration file found"**. You skipped step 4. Run `lerobot-calibrate`
-for the side that complained. IDs in `.env` must match the IDs you used during
-calibration (we default to `so101_leader` / `so101_follower` above).
+**"No calibration file found"**. Run `lerobot-calibrate` for the affected arm.
+Check that its ID in `.env` matches the calibration ID.
 
-**Follower doesn't move**. Check the LiveKit room name matches on both sides,
-and that your API key has `can_publish` / `can_subscribe` (the mint helper
-sets this automatically). Watch either script's stdout for connection errors.
+**Follower doesn't move**. Check that both scripts use the same LiveKit room
+and inspect their output for connection errors. Tokens need `can_publish` and
+`can_subscribe`; the token helper sets both.
 
 **Laggy or frozen video**. Confirm `PORTAL_FPS` matches on both sides. If
 you're on a local dev server, keep the two scripts on the same LAN for
-minimum RTT.
+lower network latency.
 
 **Camera not detected**. Try another `SO101_CAMERA_INDEX` (0, 1, 2…). On
-macOS, the first time you run it the OS may prompt for camera permission,
-accept and rerun.
+macOS, grant camera permission if prompted, then rerun.
 
 **`ImportError: cannot find liblivekit_portal_ffi`**. Build the native
 library: `cd ../../.. && bash scripts/build_ffi_python.sh`.
 
----
-
-## How the pieces fit
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -202,6 +181,5 @@ flowchart LR
     LT <-. "LiveKit room<br/>(LIVEKIT_ROOM)" .-> LR
 ```
 
-The Portal plugins (`lerobot-robot-livekit`, `lerobot-teleoperator-livekit`)
-wrap Portal inside lerobot's `Robot` / `Teleoperator` interfaces, so each
-side sees the *other* arm as a local lerobot device.
+The Portal plugins implement LeRobot's `Robot` and `Teleoperator` interfaces
+for remote observation and action exchange.

@@ -1,32 +1,38 @@
 # Basic example
 
-> Portal's API end to end, with no hardware.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-basic-dark.svg">
+  <img alt="robot.py streams video and state into a LiveKit room; teleoperator.py takes control and sends actions back; observer.py records every track to an .rrd archive." src="../../../docs/images/example-basic-light.svg" width="100%">
+</picture>
 
-Three roles share one room:
+Stream synthetic video and arm state, send actions, and record a session. No
+hardware required.
 
-- **`robot.py`** streams a synthetic camera and arm state, and executes actions
-  from the operator in control.
-- **`teleoperator.py`** takes control, reads observations, and sends actions back.
-- **`observer.py`** records the session to a Rerun archive and marks each take
-  with keypoints. It sees everything and never drives.
+| Script | Role |
+|---|---|
+| `robot.py` | Streams video and state; executes actions from the active operator. |
+| `teleoperator.py` | Takes control, reads observations, and sends actions. |
+| `observer.py` | Records a Rerun archive and marks takes with keypoints. |
 
-All three load the same wire contract from `portal.yaml`. Everything that isn't
-Portal (settings, tokens, the fake camera, pacing) lives in `_common.py`.
+All three connect to the same room and load `portal.yaml`.
 
-## What you need
+## Requirements
 
 - Python 3.12 and [`uv`](https://docs.astral.sh/uv/)
-- A LiveKit server. [LiveKit Cloud](https://cloud.livekit.io) free tier works, so
-  does a local `livekit-server --dev`.
+- A LiveKit server: [LiveKit Cloud](https://cloud.livekit.io) or local
+  `livekit-server --dev`.
 
-## Run it
+## Run
+
+From this directory, copy `.env.example`, set your LiveKit URL and credentials,
+and install dependencies:
 
 ```bash
-cp .env.example .env      # fill in LIVEKIT_API_KEY and LIVEKIT_API_SECRET
+cp .env.example .env
 uv sync
 ```
 
-Then one terminal per role:
+Run each role in a separate terminal:
 
 ```bash
 uv run robot.py           # terminal 1
@@ -34,10 +40,9 @@ uv run teleoperator.py    # terminal 2
 uv run observer.py        # terminal 3, optional
 ```
 
-Each runs for `PORTAL_DURATION_SECONDS` and disconnects. The observer prints the
-archive's path at the end. Open it with `rerun <path>` and scrub the
-`robot_time` timeline to see each frame, the state and the action taken in
-response on one row, with the takes marked under `keypoints/`.
+Each role exits after `PORTAL_DURATION_SECONDS`. The observer prints the archive
+path. Open it with `rerun <path>` and select `robot_time` to view frames, state,
+and actions. Take markers appear under `keypoints/`.
 
 ## What you should see
 
@@ -52,35 +57,27 @@ response on one row, with the takes marked under `keypoints/`.
 [observer] idle {}
 ```
 
-Nothing arriving? See
-[Troubleshooting](../../../docs/10-troubleshooting.md#nothing-is-arriving). The
-usual cause is a token missing `can_update_own_metadata`.
+If no data arrives, check that the token includes `can_update_own_metadata`.
+See [Troubleshooting](../../../docs/10-troubleshooting.md#nothing-is-arriving).
 
-## What each role shows
+## API usage
 
-**Robot.** It stamps each frame and state with one `now_us()` value, so the
-operator receives them fused into one observation. `get_action()` returns the
-latest action from the operator in control. The robot ignores everyone else.
-It also registers a `say` RPC.
+- **Robot:** Uses the same `now_us()` timestamp for video and state so Portal
+  fuses them into one observation. Reads the active operator's latest action
+  with `get_action()` and registers a `say` RPC.
+- **Teleoperator:** Claims control with `set_active_operator`, reads typed state
+  with `get_observation()`, and calls `send_action`. Passes `in_reply_to_ts_us`
+  to enable end-to-end latency measurement.
+- **Observer:** Waits for `on_time_synced`, records with `record_to(RrdSink(...))`,
+  and marks takes with `send_keypoint`. See
+  [Data recording](../../../docs/03-data-recording.md).
 
-**Teleoperator.** It claims control with `set_active_operator`, since the robot
-starts with nobody in control. It reads the latest observation with
-`get_observation()`. `obs.state` comes back typed per the schema: floats, a
-`bool` gripper, an `int` mode. It replies with `send_action`, passing
-`in_reply_to_ts_us` so the robot can measure end-to-end latency
-(`metrics().policy.e2e_us_p95`).
-
-**Observer.** It waits for `on_time_synced` so the archive is on the robot's
-clock from its first row, then records with `record_to(RrdSink(...))`. It
-brackets each take with `recording` and `idle` keypoints using `send_keypoint`.
-See [Data recording](../../../docs/03-data-recording.md).
-
-`print_metrics` in `_common.py` prints the headline numbers from `metrics()`.
-See [Metrics](../../../docs/09-metrics.md).
+`_common.py` handles settings, tokens, synthetic frames, pacing, and
+[metrics](../../../docs/09-metrics.md) output.
 
 ## Configuration
 
-Everything is driven by `.env`.
+Set connection details and runtime options in `.env`.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -92,13 +89,12 @@ Everything is driven by `.env`.
 | `PORTAL_TAKE_SECONDS` | `5` | Length of each take the observer marks. |
 | `PORTAL_RECORDING_DIR` | `data/sessions` | Where the observer writes `.rrd` archives. |
 
-The fps, tracks and schemas are in `portal.yaml`. See
+Set FPS, tracks, and schemas in `portal.yaml`. See
 [Config from YAML](../../../docs/reference/config-file.md).
 
-## Next steps
+## Related examples and docs
 
-- [Quickstart](../../../docs/01-quickstart.md). The same thing, built up step by
-  step.
-- [Concepts](../../../docs/02-concepts.md). The model behind what you just ran.
-- [`../so101/`](../so101). The same ideas on real hardware, with the LeRobot plugins.
-- [`../benchmark/`](../benchmark). Latency and jitter for each stream on your network.
+- [Quickstart](../../../docs/01-quickstart.md)
+- [Concepts](../../../docs/02-concepts.md)
+- [SO-101 hardware teleoperation](../so101)
+- [Latency benchmark](../benchmark)

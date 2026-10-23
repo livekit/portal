@@ -137,11 +137,37 @@ For an existing LeRobot application, use the [LeRobot plugins](docs/reference/le
 
 ## Examples
 
-| Example | What it demonstrates |
-|---|---|
-| [Basic](examples/python/basic) | Synthetic video, actions, recording, and control handoff. No hardware required. |
-| [SO-101](examples/python/so101) | A remote leader arm controlling a physical follower, with the LeRobot plugins. |
-| [Benchmark](examples/python/benchmark) | Latency and jitter for every stream, and for the full capture-to-action loop. |
+<table>
+<tr>
+<td width="33%" valign="top">
+<a href="examples/python/basic">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-basic-dark.svg">
+  <img alt="robot.py streams video and state into a LiveKit room; teleoperator.py takes control and sends actions back; observer.py records every track to an .rrd archive." src="docs/images/example-basic-light.svg" width="100%">
+</picture>
+</a>
+<p><a href="examples/python/basic"><b>Basic</b></a><br>Robot, teleoperator and observer with synthetic video. Control handoff, RPC and recording. No hardware.</p>
+</td>
+<td width="33%" valign="top">
+<a href="examples/python/so101">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-so101-dark.svg">
+  <img alt="robot.py wraps the SO-101 follower and camera with LiveKitTeleoperator; teleoperator.py drives it from an SO-101 leader through LiveKitRobot and shows it in Rerun." src="docs/images/example-so101-light.svg" width="100%">
+</picture>
+</a>
+<p><a href="examples/python/so101"><b>SO-101</b></a><br>A remote leader arm driving a physical follower through the LeRobot plugins.</p>
+</td>
+<td width="33%" valign="top">
+<a href="examples/python/benchmark">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-benchmark-dark.svg">
+  <img alt="p50 latency per stream on a local server: send 0.2 ms, state 1.2 ms, video 5.9 ms, observation 6.2 ms, action 0.5 ms, full loop 6.8 ms." src="docs/images/example-benchmark-light.svg" width="100%">
+</picture>
+</a>
+<p><a href="examples/python/benchmark"><b>Benchmark</b></a><br>Latency and jitter for every stream, and the full capture-to-action loop.</p>
+</td>
+</tr>
+</table>
 
 For configuration, tuning, and troubleshooting, see the [documentation](docs/).
 For methods and callbacks, see the [API reference](docs/05-portal-api.md).

@@ -1,30 +1,33 @@
 # Benchmark example
 
-> How fast is Portal on your network, and how steady?
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-dark.svg">
+  <img alt="p50 latency per stream on a local server: send 0.2 ms, state 1.2 ms, video 5.9 ms, observation 6.2 ms, action 0.5 ms, full loop 6.8 ms." src="../../../docs/images/example-benchmark-light.svg" width="100%">
+</picture>
 
-The same robot and operator as the [basic example](../basic), stripped down to
-measure. The robot streams synthetic video and joint state. The operator replies
-to every observation straight away, as a zero-latency policy would. Each side
-reports latency percentiles, jitter, and the longest silence for every stream it
-receives.
+Measure latency, jitter, and gaps between arrivals for video, state, observations,
+and actions. The robot streams synthetic data; the operator replies to each
+observation immediately.
 
-Every peer syncs to the robot's clock, so `now_us() - timestamp_us` is a true
-one-way latency, even when the two scripts run on different machines.
+Both peers use the robot's clock to measure one-way latency across machines.
 
-## What you need
+## Requirements
 
 - Python 3.12 and [`uv`](https://docs.astral.sh/uv/)
-- A LiveKit server. Run a local `livekit-server --dev` to measure Portal itself,
-  or point at [LiveKit Cloud](https://cloud.livekit.io) to measure your network.
+- A LiveKit server: local `livekit-server --dev` or
+  [LiveKit Cloud](https://cloud.livekit.io). Results include network latency.
 
-## Run it
+## Run
+
+From this directory, copy `.env.example`, set your LiveKit URL and credentials,
+and install dependencies:
 
 ```bash
-cp .env.example .env      # fill in LIVEKIT_API_KEY and LIVEKIT_API_SECRET
+cp .env.example .env
 uv sync
 ```
 
-Then two terminals, on one machine or two:
+Run the scripts in separate terminals, on one or two machines:
 
 ```bash
 uv run robot.py           # terminal 1
@@ -41,7 +44,7 @@ the end.
 
 ## Reading the results
 
-Here is a run against a local `livekit-server --dev`, 640x480 H264 at 30 fps:
+Sample output with a local `livekit-server --dev`, 640x480 H264 at 30 fps:
 
 ```
 [teleoperator] results:
@@ -57,52 +60,41 @@ Here is a run against a local `livekit-server --dev`, 640x480 H264 at 30 fps:
   portal   e2e_p50=6.64ms e2e_p95=8.93ms
 ```
 
-The streams, in the order data moves:
+Stream definitions:
 
 | Stream | Measured on | From | To |
 |---|---|---|---|
-| `send` | robot | `send_video_frame` called | it returns. RGB to I420 conversion plus enqueue, the time your control loop is blocked. |
+| `send` | robot | `send_video_frame` called | call returns (RGB to I420 conversion and enqueue) |
 | `video` | operator | frame captured | decoded frame delivered to `on_video_frame` |
 | `state` | operator | state captured | state delivered to `on_state` |
 | `obs` | operator | capture | fused observation delivered to `on_observation` |
 | `action` | robot | operator calls `send_action` | action delivered to `on_action` |
-| `loop` | robot | capture | the action that answers it arrives. This bounds your control loop. |
+| `loop` | robot | capture | corresponding action arrives |
 
-And the columns:
+Columns:
 
-- **`p50` / `p95` / `p99` / `max`** latency percentiles. Size your control
-  budget against the tail, not the median.
-- **`jitter`** the mean change in latency between consecutive samples. High
-  jitter with a low median means bursts: your policy sees uneven timing even
-  though the average looks fine.
-- **`max_gap`** the longest silence between two arrivals. At 30 fps the floor
-  is about 33 ms. A large value is a stall or a freeze.
+- **`p50` / `p95` / `p99` / `max`:** Latency percentiles and maximum.
+- **`jitter`:** Mean absolute change in latency between consecutive samples.
+- **`max_gap`:** Longest interval between arrivals; about 33 ms at a steady 30 fps.
 
-Each side also prints a `portal` line, taken from
-[`metrics()`](../../../docs/09-metrics.md). The robot's `e2e_p50/p95` is
-Portal's own measure of `loop`. The operator's `rtt_p95` is the network round
-trip alone, and `clock_uncertainty` is how far the shared clock could be off.
-Read one-way numbers smaller than it as noise.
+The `portal` line reports SDK [metrics](../../../docs/09-metrics.md):
+`e2e_p50/p95` measures the observation-action loop, `rtt_p95` measures round-trip
+latency, and `clock_uncertainty` estimates clock error. One-way measurements below
+that uncertainty are not reliable.
 
-### What to look for
+### Interpreting results
 
-- **`obs` tracks `video`, not `state`.** An observation waits for both, and
-  video is the slow path: encode, packetize, jitter buffer, decode. The gap
-  between `video` and `state` is the price of the video codec.
-- **`loop` is about `obs + action`.** The difference is time spent in your
-  callbacks. Here it is zero, so anything left over is scheduling.
-- **`loop` far above `rtt`** means the cost is in the media pipeline, not the
-  network. Try a smaller frame, or `PORTAL_CODEC=mjpeg`.
-- **`state` rises to match `video` on a byte-stream codec.** `mjpeg`, `png`
-  and `raw` frames share the reliable data channel with state, so a state
-  packet can wait behind a frame.
-- **`send` above a few milliseconds** eats into the robot's tick. Lower the
-  resolution.
+- `obs` waits for both video and state, so it usually tracks the slower video path.
+- `loop` includes observation latency, action latency, and callback processing.
+- High `loop` relative to `rtt` can indicate media pipeline overhead. Try smaller
+  frames or `PORTAL_CODEC=mjpeg`.
+- With `mjpeg`, `png`, or `raw`, video and state share a reliable data channel.
+  Large frames can delay state delivery.
+- High `send` latency blocks the robot's control loop. Try a lower resolution.
 
 ## Configuration
 
-Everything is driven by `.env`. Robot and operator must agree on `PORTAL_FPS`
-and `PORTAL_CODEC`.
+Set options in `.env`. Use the same `PORTAL_FPS` and `PORTAL_CODEC` on both sides.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -117,14 +109,12 @@ and `PORTAL_CODEC`.
 | `PORTAL_WARMUP_SECONDS` | `3` | Streamed but not measured, while the encoder ramps up its bitrate. |
 | `PORTAL_DURATION_SECONDS` | `30` | How long the robot measures. |
 
-The token sets the room's playout delay to zero, as the
-[basic example](../basic) does. Without it the server lets the receiver buffer
-video for smoothness, and that buffer shows up as latency.
+The token requests a 0–1 ms playout delay to reduce receiver buffering.
 
-## The files
+## Files
 
 | File | What it does |
 |---|---|
 | `robot.py` | Streams video and state, measures `loop`, `action` and `send`. |
 | `teleoperator.py` | Replies to every observation, measures `obs`, `video` and `state`. |
-| `_common.py` | Everything that isn't Portal: settings, tokens, test frames, pacing and statistics. |
+| `_common.py` | Settings, tokens, test frames, pacing, and statistics. |

@@ -21,8 +21,8 @@ file loaded from Python, from the FFI, or from the Rust crate produces an
 equivalent config every time.
 
 A runnable version lives in
-[`examples/python/basic/`](../../examples/python/basic), as `portal.yaml` plus
-`robot_yaml.py` and `teleoperator_yaml.py`.
+[`examples/python/basic/`](../../examples/python/basic), where `robot.py`,
+`teleoperator.py` and `observer.py` all load one `portal.yaml`.
 
 ## Loading
 

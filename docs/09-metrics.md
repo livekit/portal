@@ -251,10 +251,7 @@ if t.transport.actions_received:
 
 ## Printing a snapshot
 
-The examples ship a working periodic printer. Lift it from
-[`examples/python/basic/_common.py`](../examples/python/basic/_common.py).
-
-A minimal version:
+A minimal periodic printer:
 
 ```python
 import asyncio

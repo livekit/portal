@@ -340,8 +340,7 @@ policy. It runs until you stop it with Ctrl-C.
 The rules live in one place now, so they're easy to change: only some
 identities may take over, a human always beats a policy, nobody takes over
 during a grasp, or control rotates every few minutes to collect data from
-several policies. [`examples/python/basic/orchestrator.py`](../examples/python/basic/orchestrator.py)
-does that last one.
+several policies.
 
 Three things to keep in mind:
 

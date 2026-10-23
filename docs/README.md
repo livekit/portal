@@ -20,7 +20,7 @@ without physical hardware. Then use the guides below for your application.
 | Connect an existing LeRobot robot or teleoperator | [LeRobot plugins](reference/lerobot.md) |
 
 Runnable projects are in [`examples/python/`](../examples/python): start with
-`basic`, then try `inference`, `modal-mock-inference`, or `so101` for hardware.
+`basic`, then try `so101` for hardware or `benchmark` to measure latency.
 
 ## Tune and debug
 

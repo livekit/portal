@@ -235,10 +235,9 @@ is fine and your window is too tight. Raise `tolerance`.
 If `frames_received` is well below `frames_sent`, the problem sits upstream of
 sync. Look at the network, the encoder, and the publish queue.
 
-Every field is documented in [Metrics](09-metrics.md). The shipped examples
-print a live summary every two seconds. Lift `periodic_metrics` from
-[`examples/python/basic/_common.py`](../examples/python/basic/_common.py) for
-your own scripts.
+Every field is documented in [Metrics](09-metrics.md). For a per-stream latency and
+jitter breakdown on your own network, run the
+[benchmark example](../examples/python/benchmark).
 
 ## Next steps
 

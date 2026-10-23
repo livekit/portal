@@ -140,9 +140,8 @@ For an existing LeRobot application, use the [LeRobot plugins](docs/reference/le
 | Example | What it demonstrates |
 |---|---|
 | [Basic](examples/python/basic) | Synthetic video, actions, recording, and control handoff. No hardware required. |
-| [Inference](examples/python/inference) | A policy that plans actions and sends one per control tick. |
-| [Cloud inference](examples/python/modal-mock-inference) | A policy running on Modal, with latency measurements. |
-| [SO-101](examples/python/so101) | A remote leader arm controlling a physical follower. |
+| [SO-101](examples/python/so101) | A remote leader arm controlling a physical follower, with the LeRobot plugins. |
+| [Benchmark](examples/python/benchmark) | Latency and jitter for every stream, and for the full capture-to-action loop. |
 
 For configuration, tuning, and troubleshooting, see the [documentation](docs/).
 For methods and callbacks, see the [API reference](docs/05-portal-api.md).

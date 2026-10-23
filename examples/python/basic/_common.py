@@ -1,185 +1,99 @@
-"""Shared helpers for the robot / operator example scripts.
-
-Reads LiveKit API credentials from .env, mints a JWT for the given identity
-and room. Keeps the example scripts focused on Portal usage.
-"""
+"""Everything in the example that is not Portal: settings, tokens, a fake camera
+and arm, pacing, and printing."""
 from __future__ import annotations
 
+import asyncio
 import datetime
+import math
 import os
 import pathlib
-import sys
-from typing import Optional
+import time
+from dataclasses import dataclass
 
-try:
-    from dotenv import load_dotenv  # type: ignore
-except ImportError as exc:  # pragma: no cover
-    print(
-        "examples require python-dotenv. Install with:\n"
-        "    uv pip install livekit-api python-dotenv",
-        file=sys.stderr,
-    )
-    raise SystemExit(1) from exc
+import numpy as np
+from dotenv import load_dotenv
+from livekit import api
 
-try:
-    from livekit import api  # type: ignore
-except ImportError as exc:  # pragma: no cover
-    print(
-        "examples require livekit-api. Install with:\n"
-        "    uv pip install livekit-api python-dotenv",
-        file=sys.stderr,
-    )
-    raise SystemExit(1) from exc
+HERE = pathlib.Path(__file__).parent
+CONFIG = HERE / "portal.yaml"
+WIDTH, HEIGHT = 320, 240
 
 
-def load_env(search_from: Optional[pathlib.Path] = None) -> None:
-    """Load `.env` and `.env.local` from the script dir, its parent, or cwd.
+@dataclass(frozen=True)
+class Settings:
+    url: str
+    room: str
+    duration: float
+    take_seconds: float
+    recording_dir: str
 
-    Files are loaded in this order (first match of each filename wins, later
-    wins within the same directory so `.env.local` overrides `.env`):
-      1. <script_dir>/.env         then <script_dir>/.env.local
-      2. <script_dir>/../.env      then <script_dir>/../.env.local
-      3. <cwd>/.env                then <cwd>/.env.local
-    Non-fatal if nothing is found. caller can still rely on real env vars.
-    """
-    start = search_from or pathlib.Path(__file__).parent
-    search_dirs = [start, start.parent, pathlib.Path.cwd()]
-    loaded_any = False
-    for d in search_dirs:
-        env = d / ".env"
-        if env.exists():
-            load_dotenv(env, override=False)
-            loaded_any = True
-        env_local = d / ".env.local"
-        if env_local.exists():
-            load_dotenv(env_local, override=True)
-            loaded_any = True
-        if loaded_any:
-            return
-
-
-def mint_token(
-    identity: str,
-    room: str,
-    ttl_hours: int = 6,
-    min_playout_delay_ms: int = 0,
-    max_playout_delay_ms: int = 1,
-) -> str:
-    """Mint a LiveKit JWT for `identity` scoped to `room`.
-
-    Attaches a `RoomConfiguration` so the server creates the room (on first
-    join) with tight playout delay bounds. Default `0..1 ms` minimizes video
-    latency. matches LiveKit's recommendation for low-latency teleop. Pass
-    larger bounds (e.g. `max_playout_delay_ms=150`) if you need smoother
-    playback at the cost of latency.
-    """
-    key = os.environ.get("LIVEKIT_API_KEY")
-    secret = os.environ.get("LIVEKIT_API_SECRET")
-    if not key or not secret:
-        raise RuntimeError(
-            "LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set (see .env.example)"
+    @classmethod
+    def from_env(cls) -> Settings:
+        load_dotenv(HERE / ".env")
+        return cls(
+            url=os.environ["LIVEKIT_URL"],
+            room=os.environ["LIVEKIT_ROOM"],
+            duration=float(os.environ.get("PORTAL_DURATION_SECONDS", 30)),
+            take_seconds=float(os.environ.get("PORTAL_TAKE_SECONDS", 5)),
+            recording_dir=os.environ.get("PORTAL_RECORDING_DIR", "data/sessions"),
         )
 
-    grants = api.VideoGrants(
-        room_join=True,
-        room=room,
-        can_publish=True,
-        can_subscribe=True,
-        # `Robot` and `Operator` self-set the `lk.portal.role` attribute on
-        # connect so other participants can discover them. The grant must
-        # permit it. Tokens that omit this flag fail at connect with a clear
-        # error message.
-        can_update_own_metadata=True,
-    )
-
-    from livekit.protocol.room import RoomConfiguration
-    room_config = RoomConfiguration(
-        name=room,
-        min_playout_delay=min_playout_delay_ms,
-        max_playout_delay=max_playout_delay_ms,
-    )
-
-    token = (
-        api.AccessToken(key, secret)
-        .with_identity(identity)
-        .with_grants(grants)
-        .with_room_config(room_config)
-        .with_ttl(datetime.timedelta(hours=ttl_hours))
-    )
-    return token.to_jwt()
+    def token(self, identity: str) -> str:
+        grants = api.VideoGrants(
+            room_join=True,
+            room=self.room,
+            can_publish=True,
+            can_subscribe=True,
+            # Portal advertises each peer's role in its participant attributes.
+            can_update_own_metadata=True,
+        )
+        # Zero playout delay: don't let the receiver buffer video for smoothness.
+        room_config = api.RoomConfiguration(name=self.room, min_playout_delay=0, max_playout_delay=1)
+        return (
+            api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"])
+            .with_identity(identity)
+            .with_grants(grants)
+            .with_room_config(room_config)
+            .with_ttl(datetime.timedelta(hours=6))
+            .to_jwt()
+        )
 
 
-def required_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"{name} must be set (see .env.example)")
-    return value
+async def ticks(fps: int, duration: float):
+    """Yield the tick number at `fps` for `duration` seconds."""
+    next_tick = time.monotonic()
+    for i in range(int(duration * fps)):
+        yield i
+        next_tick += 1 / fps
+        await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
 
 
-def env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    return int(raw) if raw else default
+def camera_frame(t: float) -> np.ndarray:
+    """A moving gradient, (H, W, 3) uint8 RGB."""
+    x = np.arange(WIDTH, dtype=np.float32) / WIDTH
+    y = np.arange(HEIGHT, dtype=np.float32)[:, None] / HEIGHT
+    r = np.broadcast_to(np.sin(2 * math.pi * (x + t)), (HEIGHT, WIDTH))
+    g = np.broadcast_to(np.sin(2 * math.pi * (y + t * 0.7)), (HEIGHT, WIDTH))
+    b = np.sin(2 * math.pi * (x + y + t * 1.3) / 2)
+    return ((np.stack([r, g, b], axis=-1) + 1) * 127.5).astype(np.uint8)
 
 
-def env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    return float(raw) if raw else default
-
-
-def _dump_metrics(prefix: str, metrics) -> None:
-    """Pretty-print the full PortalMetrics snapshot. Walks the UniFFI
-    dataclasses directly — no protobuf `MessageToDict` anymore."""
-    sections = {
-        "sync": metrics.sync,
-        "transport": metrics.transport,
-        "buffers": metrics.buffers,
-        "rtt": metrics.rtt,
+def arm_state(t: float) -> dict:
+    return {
+        "j1": math.sin(t),
+        "j2": math.cos(t),
+        "j3": 0.1 * t,
+        "gripper": int(t) % 2 == 0,
+        "mode": int(t) % 3,
     }
-    print(f"{prefix} metrics:")
-    for section, record in sections.items():
-        print(f"  {section}:")
-        # UniFFI records expose fields via dataclass attributes; we walk
-        # `__dict__` to stay agnostic to naming.
-        for k, v in record.__dict__.items():
-            print(f"    {k}: {v}")
 
 
-def _format_us(value) -> str:
-    """Format a microsecond counter as `NNNus` or `N.NNms`, or `-` if None/0."""
-    if value is None or value == 0:
-        return "-"
-    if value < 1000:
-        return f"{value}us"
-    return f"{value / 1000:.2f}ms"
-
-
-async def periodic_metrics(portal, prefix: str, interval: float = 2.0):
-    """Background task that logs the time-varying metrics (RTT, jitter, sync
-    deltas, buffer fill) every `interval` seconds. Cancel with `task.cancel()`
-    before disconnect."""
-    import asyncio
-
-    try:
-        while True:
-            await asyncio.sleep(interval)
-            m = portal.metrics()
-            rtt_last = _format_us(m.rtt.rtt_us_last)
-            rtt_mean = _format_us(m.rtt.rtt_us_mean)
-            rtt_p95 = _format_us(m.rtt.rtt_us_p95)
-            sync_p50 = _format_us(m.sync.match_delta_us_p50)
-            sync_p95 = _format_us(m.sync.match_delta_us_p95)
-            frame_jitter = {k: _format_us(v) for k, v in m.transport.frame_jitter_us.items()}
-            video_fill = dict(m.buffers.video_fill)
-            print(
-                f"{prefix} rtt={rtt_last}/{rtt_mean}/{rtt_p95} (last/mean/p95)"
-                f" sync_delta={sync_p50}/{sync_p95} (p50/p95)"
-                f" state_jitter={_format_us(m.transport.state_jitter_us)}"
-                f" action_jitter={_format_us(m.transport.action_jitter_us)}"
-                f" frame_jitter={frame_jitter}"
-                f" video_fill={video_fill}"
-                f" state_fill={m.buffers.state_fill}"
-                f" dropped={m.sync.states_dropped}"
-                f" obs={m.sync.observations_emitted}"
-            )
-    except asyncio.CancelledError:
-        pass
+def print_metrics(name: str, m) -> None:
+    """The headline numbers from `metrics()`, skipping ones this role doesn't measure."""
+    latencies_us = {
+        "rtt_p95": m.rtt.rtt_us_p95,
+        "e2e_p95": m.policy.e2e_us_p95,
+        "sync_delta_p95": m.sync.match_delta_us_p95,
+    }
+    shown = " ".join(f"{k}={v / 1000:.1f}ms" for k, v in latencies_us.items() if v is not None)
+    print(f"[{name}] {shown}")

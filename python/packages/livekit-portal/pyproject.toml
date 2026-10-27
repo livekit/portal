@@ -29,6 +29,16 @@ rerun = [
     "rerun-sdk>=0.24",
     "pillow>=10",
 ]
+# `livekit-portal convert`: `.rrd` archives to a LeRobot v3 dataset. The lazy
+# `.rrd` reader it uses arrived in Rerun 0.38, and lerobot needs Python 3.12.
+lerobot = [
+    "rerun-sdk>=0.38",
+    "pillow>=10",
+    "lerobot[dataset]>=0.5.0; python_version >= '3.12'",
+]
+
+[project.scripts]
+livekit-portal = "livekit.portal._cli:main"
 
 [tool.pytest.ini_options]
 # `asyncio_mode = "auto"` lets async test functions run without a

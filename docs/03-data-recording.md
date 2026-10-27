@@ -315,7 +315,7 @@ Record raw, store the archive, convert on demand.
 flowchart LR
     R[Robot] --> O[Observer<br/>RrdSink]
     O -->|.rrd per session| B[(Bucket<br/>S3 / GCS)]
-    B -->|on demand| C[Converter]
+    B -->|on demand| C[livekit-portal convert]
     C --> D1[LeRobot dataset]
     C --> D2[Your own format]
 ```
@@ -326,12 +326,10 @@ flowchart LR
 2. **Push finished archives to a bucket.** After `disconnect()` or
    `stop_recording()` returns, the file is complete. Upload `sink.path` from
    there, or have a separate process sweep the directory.
-3. **Convert to a training dataset when you train**, not when you record. A
-   converter reads the archives, splits them into episodes at your keypoints,
-   aligns frames, state and actions on `robot_time` with whatever rule the
-   policy needs, and writes a LeRobot dataset or any other format. Rerun's
-   [dataframe API](https://rerun.io/docs) reads `.rrd`
-   files back as Arrow tables.
+3. **Convert to a training dataset when you train**, not when you record.
+   [`livekit-portal convert`](#convert-recordings-into-training-datasets)
+   reads the archives, splits them into episodes at your keypoints, aligns
+   frames, state and actions on `robot_time`, and writes a LeRobot dataset.
 
 The bucket of `.rrd` files is the source of truth. Datasets are derived from
 it, and you can derive a new one any time: a different frame rate, different
@@ -343,11 +341,112 @@ A training dataset usually needs samples at a fixed rate and a specific episode
 layout. Keep those choices in a conversion step so you can revisit them without
 repeating data collection.
 
-For example, one session may include policy actions, human corrections, and a
-candidate policy running without control. A converter can select the relevant
-sender, split episodes at keypoints, and align frames with state using the
-original timestamps. The archive remains available for a different selection
-or sampling rate later.
+`livekit-portal convert` turns `RrdSink` archives into a dataset. It ships as
+an extra, and needs Python 3.12 because lerobot does:
 
-Portal provides the recording API; you supply the dataset conversion for your
-training pipeline.
+```bash
+pip install 'livekit-portal[lerobot]'
+
+livekit-portal convert data/sessions --output lerobotv3 --dry-run   # look first
+livekit-portal convert data/sessions --output lerobotv3 --repo-id me/pick-place
+livekit-portal convert a.rrd b.rrd --output lerobotv3 --repo-id me/pick-place --push
+```
+
+Pass `.rrd` files, directories of them, or both. Every archive goes into one
+dataset, so they must share a schema: the converter refuses archives whose
+state fields, action fields or cameras differ, rather than converting with
+columns dropped or misnamed.
+
+#### How rows are built
+
+One row per action, with the state and frames that action answered:
+
+- **Actions come off `action_time`**, so two actions answering the same frame
+  are two rows. Reading `robot_time` alone would keep only the last.
+- **Observations are taken as of the action's `robot_time`**: the newest state
+  and frame of each camera at or before it. A row is skipped when any of them
+  is older than `--max-stale-ms`.
+- **By default the rows are the actions that drove the robot**, those recorded
+  with `active` set. `--sender NAME` takes one sender's actions instead,
+  whether or not it was in control, for example a shadow policy.
+- **Field order comes from `portal/schema`**, never from the entity names.
+
+#### Episodes
+
+Keypoints cut the session. An `--episode-start` keypoint (default `recording`)
+opens an episode and an `--episode-end` keypoint (default `idle`) closes it,
+which is what the [basic example's orchestrator](../examples/python/basic/orchestrator.py)
+sends. The episode's task is the opening keypoint's `task_description`
+payload, or `--task` when it has none.
+
+- A second `recording` before an `idle` closes the open episode and opens a
+  new one.
+- An `--episode-discard` keypoint (default `discard`) closes the open episode
+  and drops it, for a take that went wrong.
+- An episode still open when the archive ends is dropped as an unfinished take.
+- An archive with no `recording` keypoint at all is one episode, so a session
+  recorded without an orchestrator still converts.
+
+#### Options
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--output` | required | Dataset format. `lerobotv3` is the only one today. |
+| `--fps` | the robot's state rate | Dataset fps. Inferred from the median spacing of state samples. |
+| `--episode-start`, `--episode-end` | `recording`, `idle` | Keypoint types that bound an episode. |
+| `--episode-discard` | `discard` | Keypoint type that ends an episode and drops it. |
+| `--task` | `""` | Task for an episode whose keypoint has no `task_description`. |
+| `--sender` | the active one | Take this sender's actions instead. |
+| `--max-stale-ms` | `200` | How old a state or frame may be and still pair with an action. |
+| `--dry-run` | | Report what each archive holds and write nothing. |
+
+With `--output lerobotv3`:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--repo-id` | `local/portal` | Dataset id, `<user>/<name>`. |
+| `--root` | `data/<repo-id>` | Where the dataset is written. |
+| `--push` | off | Push to the Hugging Face Hub as `--repo-id` when done. Log in with `hf auth login` first. |
+| `--private` | off | With `--push`, create a private repo. |
+| `--overwrite` | off | Replace a non-empty `--root`. Without it the converter refuses. |
+| `--robot-type` | `livekit_portal` | `robot_type` in the dataset's metadata. |
+| `--image-writer-threads` | `4` | Encoder threads. Use `1` if a run aborts with a libdispatch semaphore error on macOS. |
+
+The dataset has `observation.state` and `action` as `float32` vectors named
+after the schema fields, and one `observation.images.<camera>` video per track.
+
+#### From Python
+
+The same pieces are importable, for a format the CLI does not write or a
+selection it does not offer:
+
+```python
+from livekit.portal.convert import EpisodeRule, Selection, read_archive
+
+archive = read_archive("data/sessions/lab-20260101T120000.rrd")
+for episode in archive.episodes(EpisodeRule()):
+    for row in archive.rows(episode, Selection(max_stale_us=100_000)):
+        row.state, row.action, row.frames   # frames: (H, W, 3) uint8 RGB per camera
+```
+
+`archive.keypoints` holds every keypoint, for episode rules other than a
+start and an end type.
+
+#### Adding an output format
+
+An output is a class with a `name`, a `help` line, `add_arguments(group)` for
+its own flags, and `from_args(args)` returning a `Writer`. The writer follows
+the same shape as a [sink](#writing-a-sink):
+
+```python
+from livekit.portal.convert import DatasetSpec, Episode
+
+
+class MyWriter:
+    def open(self, spec: DatasetSpec) -> None: ...   # schema, fps, frame shapes
+    def write_episode(self, episode: Episode, rows) -> int: ...   # rows written
+    def close(self) -> None: ...
+```
+
+Register the class in `OUTPUTS` in `livekit/portal/convert/__init__.py` and it
+becomes an `--output` choice. See `_lerobot.py` for the LeRobot one.

@@ -142,8 +142,9 @@ Two timelines, both on the robot's clock:
 | `metrics/*` | observer's `now_us()` | — |
 | `portal/schema` | static: field order and dtypes, tracks, time sync source | — |
 
-- **`robot_time` lines up an action with the frame it answered.** Scrub to any
-  instant and the frame, the state and the action taken in response share a row.
+- **`robot_time` places an action at its observation anchor.** State and frames
+  with the same timestamp share its position on the timeline. Missing samples
+  remain missing; recording doesn't fill gaps.
 - **`action_time` keeps every action.** Rerun keeps one value per entity per
   timestamp, so two actions answering the same frame would overwrite each other
   on `robot_time` alone.
@@ -331,8 +332,8 @@ flowchart LR
    alignment and the target format are specific to their training stack.
    [`livekit-portal convert`](#convert-recordings-into-training-datasets) is
    a ready-made one for a common case: it splits archives into episodes at a
-   fixed set of keypoints, aligns frames, state and actions on `robot_time`,
-   and writes a LeRobot dataset.
+   configurable set of keypoints, reads actions from `action_time`, selects
+   observations at their anchors on `robot_time`, and writes a LeRobot dataset.
 
 The bucket of `.rrd` files is the source of truth. Datasets are derived from
 it, and you can derive a new one any time: a different frame rate, different
@@ -363,24 +364,38 @@ livekit-portal convert data/sessions --output lerobotv3 --repo-id me/pick-place
 livekit-portal convert a.rrd b.rrd --output lerobotv3 --repo-id me/pick-place --push
 ```
 
-Pass `.rrd` files, directories of them, or both. Every archive goes into one
+Pass `.rrd` files, directories of them, or both. Directory searches aren't
+recursive. `--dry-run` reports episodes, cameras, and senders and checks schema
+compatibility; it doesn't validate every output row. Every archive goes into one
 dataset, so they must share a schema: the converter refuses archives whose
 state fields, action fields or cameras differ, rather than converting with
 columns dropped or misnamed.
 
 #### How rows are built
 
-One row per action, with the state and frames that action answered:
+Each selected action with complete observations produces one row. The
+converter applies these rules:
 
 - **Actions come off `action_time`**, so two actions answering the same frame
   are two rows. Reading `robot_time` alone would keep only the last.
 - **Observations are taken as of the action's `robot_time`**: the newest state
-  and frame of each camera at or before it. A row is skipped when any of them
-  is older than `--max-stale-ms`.
-- **By default the rows are the actions that drove the robot**, those recorded
-  with `active` set. `--sender NAME` takes one sender's actions instead,
-  whether or not it was in control, for example a shadow policy.
+  and frame of each camera at or before it. This is the declared observation
+  anchor, or the action's send timestamp if no anchor was supplied. A row is
+  skipped if any required sample is missing or older than `--max-stale-ms`
+  (200 ms by default). Use `--max-stale-ms 0` to require exact timestamps.
+- **By default, rows use actions marked active at the recorder's gate.** This
+  identifies control status, not confirmed hardware execution. `--sender NAME`
+  selects one sender's actions regardless of control status. To include shadow
+  actions, record them with `set_action_subscription("all")`.
 - **Field order comes from `portal/schema`**, never from the entity names.
+
+The converter doesn't resample actions or insert rows for missing samples.
+`--fps` sets the output dataset rate and defaults to the median robot state
+rate. LeRobot assigns timestamps from row indices and this rate. For example,
+10 actions per second written at 30 fps produce a timeline three times shorter
+than collection time. Missing samples don't retain timing gaps in that output.
+Choose an appropriate rate for your action stream, or use a custom conversion
+step when training requires resampling or original irregular timestamps.
 
 #### Keypoint convention
 
@@ -414,8 +429,12 @@ follows this convention. To use your own type names, pass them with
 - An `--episode-discard` keypoint (default `discard`) closes the open episode
   and drops it, for a take that went wrong.
 - An episode still open when the archive ends is dropped as an unfinished take.
-- An archive with no `recording` keypoint at all is one episode, so a session
-  recorded without an orchestrator still converts.
+- An archive with no start keypoint (`recording` by default) is one episode,
+  so a session recorded without an orchestrator still converts. With a custom
+  `--episode-start`, this rule uses that type instead.
+
+These markers select data during conversion; they don't start or stop the
+archive writer. Start the recorder before sending the first episode marker.
 
 #### Options
 
@@ -445,6 +464,12 @@ With `--output lerobotv3`:
 The dataset has `observation.state` and `action` as `float32` vectors named
 after the schema fields, and one `observation.images.<camera>` video per track.
 
+Conversion builds a new dataset from the supplied archives; it doesn't append
+to an existing dataset. By default, output goes to `data/<repo-id>`. Use
+`--root` for another directory. A non-empty output directory is rejected unless
+`--overwrite` is supplied, which replaces its contents. Keep source archives
+separate from the output so you can rebuild with different selections.
+
 #### From Python
 
 The same pieces are importable, for a format the CLI does not write or a
@@ -458,6 +483,11 @@ for episode in archive.episodes(EpisodeRule()):
     for row in archive.rows(episode, Selection(max_stale_us=100_000)):
         row.state, row.action, row.frames   # frames: (H, W, 3) uint8 RGB per camera
 ```
+
+`Selection()` allows samples up to 200,000 microseconds old, matching the
+CLI's 200 ms default. Use `Selection(max_stale_us=0)` for exact matches.
+`row.timestamp_us` is the observation anchor and `row.action_timestamp_us` is
+the action's send time. These retain the source timing before dataset export.
 
 `archive.keypoints` holds every keypoint, for episode rules other than a
 start and an end type.

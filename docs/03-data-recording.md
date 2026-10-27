@@ -327,9 +327,12 @@ flowchart LR
    `stop_recording()` returns, the file is complete. Upload `sink.path` from
    there, or have a separate process sweep the directory.
 3. **Convert to a training dataset when you train**, not when you record.
-   [`livekit-portal convert`](#convert-recordings-into-training-datasets)
-   reads the archives, splits them into episodes at your keypoints, aligns
-   frames, state and actions on `robot_time`, and writes a LeRobot dataset.
+   Most teams write their own conversion, because episode boundaries,
+   alignment and the target format are specific to their training stack.
+   [`livekit-portal convert`](#convert-recordings-into-training-datasets) is
+   a ready-made one for a common case: it splits archives into episodes at a
+   fixed set of keypoints, aligns frames, state and actions on `robot_time`,
+   and writes a LeRobot dataset.
 
 The bucket of `.rrd` files is the source of truth. Datasets are derived from
 it, and you can derive a new one any time: a different frame rate, different
@@ -342,7 +345,15 @@ layout. Keep those choices in a conversion step so you can revisit them without
 repeating data collection.
 
 `livekit-portal convert` turns `RrdSink` archives into a dataset. It ships as
-an extra, and needs Python 3.12 because lerobot does:
+an extra, and needs Python 3.12 because lerobot does.
+
+> [!NOTE]
+> The converter is a convention for getting started, not the way recordings
+> must be turned into data. It expects the [keypoints below](#keypoint-convention)
+> and makes fixed choices about rows and alignment. For your own training
+> pipeline, read the `.rrd` archives directly (with
+> [Rerun's reader](https://rerun.io/docs) or the
+> [Python API](#from-python) below) and build the dataset you need.
 
 ```bash
 pip install 'livekit-portal[lerobot]'
@@ -371,14 +382,33 @@ One row per action, with the state and frames that action answered:
   whether or not it was in control, for example a shadow policy.
 - **Field order comes from `portal/schema`**, never from the entity names.
 
+#### Keypoint convention
+
+The converter finds episodes in the keypoints recorded with the session. Send
+these from any peer, usually the operator or a supervising observer:
+
+| Type | Payload | Meaning |
+|---|---|---|
+| `recording` | `{"task_description": "pick up the cube"}`, optional | Opens an episode. The task becomes the episode's LeRobot task. |
+| `idle` | none | Closes the open episode and keeps it. |
+| `discard` | none | Closes the open episode and drops it. |
+
+```python
+await op.send_keypoint("recording", {"task_description": "pick up the cube"})
+...                                        # the demonstration
+await op.send_keypoint("idle")             # or "discard" for a bad take
+```
+
+Keypoints are stamped on the robot's clock like everything else, so the episode
+is the span of `robot_time` between them. Other keypoint types are recorded but
+ignored by the converter. The [basic example's orchestrator](../examples/python/basic/orchestrator.py)
+follows this convention. To use your own type names, pass them with
+`--episode-start`, `--episode-end` and `--episode-discard`.
+
 #### Episodes
 
-Keypoints cut the session. An `--episode-start` keypoint (default `recording`)
-opens an episode and an `--episode-end` keypoint (default `idle`) closes it,
-which is what the [basic example's orchestrator](../examples/python/basic/orchestrator.py)
-sends. The episode's task is the opening keypoint's `task_description`
-payload, or `--task` when it has none.
-
+- An episode's task is the opening keypoint's `task_description` payload, or
+  `--task` when it has none.
 - A second `recording` before an `idle` closes the open episode and opens a
   new one.
 - An `--episode-discard` keypoint (default `discard`) closes the open episode

@@ -29,6 +29,9 @@ def add_parser(subparsers) -> None:
         "convert",
         help="convert .rrd recordings into a training dataset",
         description="Convert RrdSink .rrd recordings into one training dataset.",
+        epilog="Episodes follow a keypoint convention: 'recording' (payload "
+               "{\"task_description\": ...}) opens one, 'idle' closes it, 'discard' "
+               "drops it. See docs/03-data-recording.md.",
     )
     parser.add_argument("paths", nargs="+", help=".rrd files, or directories holding them")
     parser.add_argument("--output", required=True, choices=sorted(OUTPUTS), help="dataset format")

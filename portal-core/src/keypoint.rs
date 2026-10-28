@@ -18,9 +18,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[doc(hidden)]
-pub const KEYPOINT_TOPIC: &str = "portal_keypoint";
-
 /// An annotation. `kind` is the keypoint's `type`, renamed because `type`
 /// is a Rust keyword.
 #[derive(Debug, Clone, PartialEq)]

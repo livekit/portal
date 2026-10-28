@@ -139,6 +139,10 @@ impl Sinks {
                     log::error!("[callback-panic] on_active_operator_changed callback panicked");
                 }
             }
+            // The awaiting `set_active_operator` reads the call's outcome
+            // itself, and with native RPC the core hands application
+            // requests to no one: LiveKit delivers them to their handlers.
+            Event::RpcResult { .. } | Event::RpcRequest { .. } => {}
         }
     }
 

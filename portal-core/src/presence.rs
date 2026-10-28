@@ -12,93 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Who is in the room: role discovery from participant attributes, the
+//! Who is in the session: role discovery from each peer's presence, the
 //! protocol-version check, and the active-operator pointer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
+use crate::transport::{PROTOCOL_VERSION, PeerId, Presence};
 use crate::types::Role;
 
-/// Participant attribute keys used by Portal for role discovery and the
-/// multi-controller pointer. Namespaced to avoid colliding with any
-/// application-level attributes the user may also be setting.
-pub const ROLE_ATTR_KEY: &str = "lk.portal.role";
-pub const ACTIVE_OPERATOR_ATTR_KEY: &str = "lk.portal.active_operator";
-/// Wire protocol version every peer publishes. Peers only recognise each
-/// other when it matches, so a mixed-version room fails loudly instead of
-/// exchanging packets neither side can read.
-pub const PROTOCOL_VERSION_ATTR_KEY: &str = "lk.portal.version";
-pub const PROTOCOL_VERSION: &str = "3";
-const ROLE_VALUE_ROBOT: &str = "robot";
-const ROLE_VALUE_OPERATOR: &str = "operator";
-const ROLE_VALUE_OBSERVER: &str = "observer";
-
-/// Attributes a peer sets on itself at connect so others can discover it.
-pub fn role_attributes(role: Role) -> HashMap<String, String> {
-    let value = match role {
-        Role::Robot => ROLE_VALUE_ROBOT,
-        Role::Operator => ROLE_VALUE_OPERATOR,
-        Role::Observer => ROLE_VALUE_OBSERVER,
-    };
-    HashMap::from([
-        (ROLE_ATTR_KEY.to_string(), value.to_string()),
-        (PROTOCOL_VERSION_ATTR_KEY.to_string(), PROTOCOL_VERSION.to_string()),
-    ])
-}
-
-/// Classify a participant by their `lk.portal.role` attribute. Returns
-/// `None` if the attribute is absent, has an unknown value, or the
-/// participant speaks a different protocol version.
-pub fn classify_role(attrs: &HashMap<String, String>) -> Option<Role> {
-    let role = match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
-        Some(ROLE_VALUE_ROBOT) => Role::Robot,
-        Some(ROLE_VALUE_OPERATOR) => Role::Operator,
-        Some(ROLE_VALUE_OBSERVER) => Role::Observer,
-        _ => return None,
-    };
-    is_compatible(attrs).then_some(role)
-}
-
-fn is_compatible(attrs: &HashMap<String, String>) -> bool {
-    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str) == Some(PROTOCOL_VERSION)
-}
-
-/// The active operator named by an attribute map, `None` when unset or
-/// cleared (the empty string).
-pub fn active_operator_attr(attrs: &HashMap<String, String>) -> Option<String> {
-    attrs.get(ACTIVE_OPERATOR_ATTR_KEY).filter(|v| !v.is_empty()).cloned()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PresenceEvent {
-    OperatorJoined(String),
-    OperatorLeft(String),
-    ActiveOperatorChanged(Option<String>),
+pub enum RosterEvent {
+    OperatorJoined(PeerId),
+    OperatorLeft(PeerId),
+    ActiveOperatorChanged(Option<PeerId>),
     RobotLeft,
 }
 
 /// Rosters and the active-operator pointer.
 #[derive(Debug, Default)]
-pub struct Presence {
-    /// On Robot side: source of truth, mirrored as own `lk.portal.active_operator`
-    /// attribute. On Operator side: a mirror of the robot's attribute.
-    pub active_operator: Option<String>,
-    /// Currently-connected operators (excluding self).
-    pub operators: HashSet<String>,
-    /// Currently-connected observers (excluding self). Kept apart from
-    /// `operators` so that list only holds peers that can drive.
-    pub observers: HashSet<String>,
-    /// The robot's identity, discovered from its `lk.portal.role`.
-    pub robot_identity: Option<String>,
-    /// Identities already warned about for a protocol version mismatch, so
-    /// each one is logged once rather than on every attribute change.
-    version_mismatch_warned: HashSet<String>,
+pub struct Roster {
+    /// On the robot: the source of truth, announced in its own presence.
+    /// Elsewhere: a mirror of the robot's.
+    pub active_operator: Option<PeerId>,
+    /// Connected operators (excluding self).
+    pub operators: HashSet<PeerId>,
+    /// Connected observers (excluding self). Kept apart from `operators`
+    /// so that list only holds peers that can drive.
+    pub observers: HashSet<PeerId>,
+    pub robot: Option<PeerId>,
+    /// Peers already warned about for a protocol version mismatch, so each
+    /// one is logged once rather than on every presence update.
+    version_mismatch_warned: HashSet<PeerId>,
 }
 
-impl Presence {
+pub struct PresenceUpdate<'a> {
+    pub self_role: Role,
+    pub peer: &'a str,
+    pub presence: &'a Presence,
+}
+
+impl Roster {
     /// Whether `id` is a recognised Portal peer of any role.
     pub fn is_known_peer(&self, id: &str) -> bool {
-        self.robot_identity.as_deref() == Some(id)
+        self.robot.as_deref() == Some(id)
             || self.operators.contains(id)
             || self.observers.contains(id)
     }
@@ -110,71 +66,61 @@ impl Presence {
 
     pub fn clear(&mut self) {
         self.active_operator = None;
-        self.operators.clear();
-        self.observers.clear();
-        self.robot_identity = None;
+        self.clear_for_reconnect();
     }
 
-    /// Partial clear on reconnect. Drops the per-room rosters so the
-    /// post-reconnect participant events rebuild them, but keeps
-    /// `active_operator` pinned:
+    /// Partial clear when the link is restored. Drops the rosters so the
+    /// presence that follows rebuilds them, but keeps `active_operator`
+    /// pinned:
     ///
-    /// * **Robot side.** The pointer is the source of truth. The robot
-    ///   ignores attribute events on its own identity and LiveKit never
-    ///   reports self as connected, so clearing it would halt control
-    ///   across a transient reconnect.
-    /// * **Operator side.** The mirror is reseeded by the robot's next
-    ///   participant event, and `classify_and_update` only reports a change
-    ///   on a different value, so keeping it avoids a spurious callback.
+    /// * **Robot side.** The pointer is the source of truth, and no
+    ///   transport reports a peer's own presence back to it, so clearing it
+    ///   would halt control across a transient outage.
+    /// * **Elsewhere.** The mirror is reseeded by the robot's next
+    ///   presence, and `update` only reports a change on a different value,
+    ///   so keeping it avoids a spurious callback.
     pub fn clear_for_reconnect(&mut self) {
         self.operators.clear();
         self.observers.clear();
-        self.robot_identity = None;
+        self.robot = None;
     }
 
-    /// Classify a remote participant and reconcile the rosters. Idempotent:
-    /// re-observing the same participant reports nothing new.
-    pub fn classify_and_update(&mut self, update: ParticipantUpdate<'_>) -> Option<PresenceEvent> {
-        let ParticipantUpdate { self_role, identity, attributes } = update;
-        match classify_role(attributes) {
+    /// Classify a peer by its presence and reconcile the rosters.
+    /// Idempotent: re-observing the same presence reports nothing new.
+    pub fn update(&mut self, update: PresenceUpdate<'_>) -> Option<RosterEvent> {
+        let PresenceUpdate { self_role, peer, presence } = update;
+        match presence.compatible_role() {
             Some(Role::Robot) => {
-                if self.robot_identity.as_deref() != Some(identity) {
-                    self.robot_identity = Some(identity.to_string());
+                if self.robot.as_deref() != Some(peer) {
+                    self.robot = Some(peer.to_string());
                 }
-                // Operators and observers mirror the robot's `active_operator`.
-                if self_role == Role::Robot {
+                // Operators and observers mirror the robot's pointer.
+                if self_role == Role::Robot || self.active_operator == presence.active_operator {
                     return None;
                 }
-                let new_value = active_operator_attr(attributes);
-                if self.active_operator == new_value {
-                    return None;
-                }
-                self.active_operator = new_value.clone();
-                Some(PresenceEvent::ActiveOperatorChanged(new_value))
+                self.active_operator = presence.active_operator.clone();
+                Some(RosterEvent::ActiveOperatorChanged(presence.active_operator.clone()))
             }
             Some(Role::Operator) => self
                 .operators
-                .insert(identity.to_string())
-                .then(|| PresenceEvent::OperatorJoined(identity.to_string())),
+                .insert(peer.to_string())
+                .then(|| RosterEvent::OperatorJoined(peer.to_string())),
             Some(Role::Observer) => {
-                self.observers.insert(identity.to_string());
+                self.observers.insert(peer.to_string());
                 None
             }
             None => {
-                // Either the role attribute isn't visible yet (a follow-up
-                // attributes event will bring it) or the peer speaks another
-                // protocol version and stays out of the rosters.
-                if attributes.contains_key(ROLE_ATTR_KEY)
-                    && !is_compatible(attributes)
-                    && self.version_mismatch_warned.insert(identity.to_string())
+                // Either the role isn't visible yet (a follow-up presence
+                // brings it) or the peer speaks another protocol version and
+                // stays out of the rosters.
+                if presence.role.is_some()
+                    && !presence.is_compatible()
+                    && self.version_mismatch_warned.insert(peer.to_string())
                 {
                     log::warn!(
-                        "[version-mismatch] ignoring '{identity}': it speaks Portal protocol {:?}, this \
+                        "[version-mismatch] ignoring '{peer}': it speaks Portal protocol {:?}, this \
                          peer speaks {PROTOCOL_VERSION:?}; upgrade both sides to the same release",
-                        attributes
-                            .get(PROTOCOL_VERSION_ATTR_KEY)
-                            .map(String::as_str)
-                            .unwrap_or("<none>"),
+                        presence.protocol_version.as_deref().unwrap_or("<none>"),
                     );
                 }
                 None
@@ -182,138 +128,114 @@ impl Presence {
         }
     }
 
-    /// A participant left. The `active_operator` pointer stays pinned by
-    /// design: a same-identity reconnect resumes control, a different
-    /// operator claims explicitly via `set_active_operator`.
-    pub fn disconnect(&mut self, identity: &str) -> Vec<PresenceEvent> {
+    /// A peer left. The pointer stays pinned by design: the same identity
+    /// rejoining resumes control, a different operator claims explicitly
+    /// via `set_active_operator`.
+    pub fn remove(&mut self, peer: &str) -> Vec<RosterEvent> {
         let mut events = Vec::new();
-        if self.operators.remove(identity) {
-            events.push(PresenceEvent::OperatorLeft(identity.to_string()));
+        if self.operators.remove(peer) {
+            events.push(RosterEvent::OperatorLeft(peer.to_string()));
         }
-        self.observers.remove(identity);
-        if self.robot_identity.as_deref() == Some(identity) {
-            self.robot_identity = None;
-            events.push(PresenceEvent::RobotLeft);
+        self.observers.remove(peer);
+        if self.robot.as_deref() == Some(peer) {
+            self.robot = None;
+            events.push(RosterEvent::RobotLeft);
         }
         events
     }
-}
-
-pub struct ParticipantUpdate<'a> {
-    pub self_role: Role,
-    pub identity: &'a str,
-    pub attributes: &'a HashMap<String, String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn attrs(role: &str, version: Option<&str>) -> HashMap<String, String> {
-        let mut attrs = HashMap::from([(ROLE_ATTR_KEY.to_string(), role.to_string())]);
-        if let Some(v) = version {
-            attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), v.to_string());
+    fn presence(role: Role, version: Option<&str>) -> Presence {
+        Presence {
+            role: Some(role),
+            protocol_version: version.map(String::from),
+            active_operator: None,
         }
-        attrs
     }
 
-    fn update<'a>(
-        self_role: Role,
-        identity: &'a str,
-        attributes: &'a HashMap<String, String>,
-    ) -> ParticipantUpdate<'a> {
-        ParticipantUpdate { self_role, identity, attributes }
+    fn update<'a>(self_role: Role, peer: &'a str, presence: &'a Presence) -> PresenceUpdate<'a> {
+        PresenceUpdate { self_role, peer, presence }
     }
 
     #[test]
     fn matching_version_is_classified() {
-        assert_eq!(classify_role(&attrs("robot", Some(PROTOCOL_VERSION))), Some(Role::Robot));
-        assert_eq!(classify_role(&attrs("operator", Some(PROTOCOL_VERSION))), Some(Role::Operator));
+        let robot = presence(Role::Robot, Some(PROTOCOL_VERSION));
+        assert_eq!(robot.compatible_role(), Some(Role::Robot));
+        let operator = presence(Role::Operator, Some(PROTOCOL_VERSION));
+        assert_eq!(operator.compatible_role(), Some(Role::Operator));
     }
 
     #[test]
     fn missing_or_other_version_is_ignored() {
-        assert_eq!(classify_role(&attrs("operator", None)), None);
-        assert_eq!(classify_role(&attrs("operator", Some("2"))), None);
-        assert_eq!(classify_role(&attrs("robot", Some(""))), None);
-        assert_eq!(classify_role(&HashMap::new()), None);
+        assert_eq!(presence(Role::Operator, None).compatible_role(), None);
+        assert_eq!(presence(Role::Operator, Some("2")).compatible_role(), None);
+        assert_eq!(presence(Role::Robot, Some("")).compatible_role(), None);
+        assert_eq!(Presence::default().compatible_role(), None);
     }
 
     #[test]
-    fn role_attributes_classify_as_their_role() {
+    fn local_presence_classifies_as_its_role() {
         for role in [Role::Robot, Role::Operator, Role::Observer] {
-            assert_eq!(classify_role(&role_attributes(role)), Some(role));
+            assert_eq!(Presence::local(role).compatible_role(), Some(role));
         }
     }
 
     #[test]
     fn mismatched_peer_stays_out_of_rosters() {
-        let mut presence = Presence::default();
-        presence.classify_and_update(update(Role::Robot, "old-operator", &attrs("operator", None)));
-        presence.classify_and_update(update(
-            Role::Robot,
-            "old-operator",
-            &attrs("operator", Some("2")),
-        ));
-        assert!(presence.operators.is_empty());
-        assert!(presence.version_mismatch_warned.contains("old-operator"));
+        let mut roster = Roster::default();
+        roster.update(update(Role::Robot, "old-operator", &presence(Role::Operator, None)));
+        roster.update(update(Role::Robot, "old-operator", &presence(Role::Operator, Some("2"))));
+        assert!(roster.operators.is_empty());
+        assert!(roster.version_mismatch_warned.contains("old-operator"));
 
-        presence.classify_and_update(update(
-            Role::Operator,
-            "old-robot",
-            &attrs("robot", Some("2")),
-        ));
-        assert!(presence.robot_identity.is_none());
+        roster.update(update(Role::Operator, "old-robot", &presence(Role::Robot, Some("2"))));
+        assert!(roster.robot.is_none());
     }
 
     #[test]
     fn observers_have_their_own_roster() {
-        assert_eq!(classify_role(&attrs("observer", Some(PROTOCOL_VERSION))), Some(Role::Observer));
-
-        let mut presence = Presence::default();
-        let observer = attrs("observer", Some(PROTOCOL_VERSION));
-        let operator = attrs("operator", Some(PROTOCOL_VERSION));
+        let mut roster = Roster::default();
+        let observer = Presence::local(Role::Observer);
+        let operator = Presence::local(Role::Operator);
         let joined: Vec<_> = [
-            presence.classify_and_update(update(Role::Robot, "recorder", &observer)),
-            presence.classify_and_update(update(Role::Robot, "teleop", &operator)),
+            roster.update(update(Role::Robot, "recorder", &observer)),
+            roster.update(update(Role::Robot, "teleop", &operator)),
         ]
         .into_iter()
         .flatten()
         .collect();
 
-        assert!(presence.observers.contains("recorder"));
-        assert!(!presence.operators.contains("recorder"));
+        assert!(roster.observers.contains("recorder"));
+        assert!(!roster.operators.contains("recorder"));
         assert_eq!(
             joined,
-            vec![PresenceEvent::OperatorJoined("teleop".into())],
+            vec![RosterEvent::OperatorJoined("teleop".into())],
             "observers are not operators"
         );
     }
 
     #[test]
     fn observers_mirror_the_active_operator() {
-        let mut presence = Presence::default();
-        let mut robot_attrs = attrs("robot", Some(PROTOCOL_VERSION));
-        robot_attrs.insert(ACTIVE_OPERATOR_ATTR_KEY.to_string(), "teleop".to_string());
-        let event = presence.classify_and_update(update(Role::Observer, "robot", &robot_attrs));
-        assert_eq!(presence.active_operator.as_deref(), Some("teleop"));
-        assert_eq!(event, Some(PresenceEvent::ActiveOperatorChanged(Some("teleop".into()))));
-        assert_eq!(
-            presence.classify_and_update(update(Role::Observer, "robot", &robot_attrs)),
-            None
-        );
+        let mut roster = Roster::default();
+        let robot =
+            Presence { active_operator: Some("teleop".into()), ..Presence::local(Role::Robot) };
+        let event = roster.update(update(Role::Observer, "robot", &robot));
+        assert_eq!(roster.active_operator.as_deref(), Some("teleop"));
+        assert_eq!(event, Some(RosterEvent::ActiveOperatorChanged(Some("teleop".into()))));
+        assert_eq!(roster.update(update(Role::Observer, "robot", &robot)), None);
     }
 
     #[test]
     fn rejoining_operator_is_reported_once() {
-        let mut presence = Presence::default();
-        let op = attrs("operator", Some(PROTOCOL_VERSION));
-        assert!(presence.classify_and_update(update(Role::Robot, "teleop", &op)).is_some());
-        assert!(presence.classify_and_update(update(Role::Robot, "teleop", &op)).is_none());
-        assert_eq!(
-            presence.disconnect("teleop"),
-            vec![PresenceEvent::OperatorLeft("teleop".into())]
-        );
-        assert!(presence.disconnect("teleop").is_empty());
+        let mut roster = Roster::default();
+        let op = Presence::local(Role::Operator);
+        assert!(roster.update(update(Role::Robot, "teleop", &op)).is_some());
+        assert!(roster.update(update(Role::Robot, "teleop", &op)).is_none());
+        assert_eq!(roster.remove("teleop"), vec![RosterEvent::OperatorLeft("teleop".into())]);
+        assert!(roster.remove("teleop").is_empty());
     }
 }

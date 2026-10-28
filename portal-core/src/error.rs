@@ -69,4 +69,8 @@ pub enum PortalError {
 
     #[error("{0}")]
     Rpc(RpcError),
+
+    /// The config asks for something the transport cannot do.
+    #[error("unsupported by this transport: {0}")]
+    Unsupported(String),
 }

@@ -18,8 +18,7 @@
 //! state packets would skew the round trip).
 
 use livekit::prelude::*;
-use portal_core::clock::CLOCK_TOPIC;
-use portal_core::data::{ACTION_TOPIC, STATE_TOPIC};
+use portal_core::transport::Stream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -79,23 +78,24 @@ impl Lanes {
         }
     }
 
-    /// Queue a packet without blocking. Topics without a lane (keypoints)
+    /// Queue a packet without blocking. Streams without a lane (keypoints)
     /// are published by their caller, which awaits the result.
-    pub fn send(&self, publish: Publish) {
-        let lane = match publish.topic {
-            STATE_TOPIC => &self.state,
-            ACTION_TOPIC => &self.action,
-            CLOCK_TOPIC => &self.clock,
-            topic => {
-                log::warn!("[publish-failed] no queue for topic '{topic}'");
+    pub fn send(&self, stream: Stream, publish: Publish) {
+        let lane = match stream {
+            Stream::State => &self.state,
+            Stream::Action => &self.action,
+            Stream::Clock => &self.clock,
+            Stream::Keypoint | Stream::Control | Stream::Presence => {
+                log::warn!("[publish-failed] no queue for stream '{}'", stream.name());
                 return;
             }
         };
         let topic = publish.topic;
+        let quiet = stream == Stream::Clock;
         match lane.tx.try_send(packet(publish)) {
             Ok(()) => {}
             // Clock packets are dropped quietly: the next ping replaces them.
-            Err(mpsc::error::TrySendError::Full(_)) if topic != CLOCK_TOPIC => {
+            Err(mpsc::error::TrySendError::Full(_)) if !quiet => {
                 log::warn!(
                     "[publish-full] topic '{topic}' queue full (cap={PUBLISH_QUEUE_CAP}), dropping packet"
                 );

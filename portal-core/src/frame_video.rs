@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Frame-video transport: per-frame byte-stream publish/receive that
-//! bypasses the WebRTC media path.
+//! Portal's frame envelope: one self-describing message per frame, for
+//! transports that carry video as bytes (`VideoCaps::ByteFramesOnly`, and
+//! `DriverEncoded` for its timestamps).
 //!
 //! WebRTC video is I420 + lossy codec. Policies trained on raw uint8 RGB get
 //! a different input distribution after a Portal hop, which is a silent
 //! correctness bug for inference. Frame-video tracks ship each frame
-//! independently over a reliable byte stream so the receiver gets exactly
-//! the bytes the publisher fed to the codec — RGB on both ends, with no
-//! temporal-codec rewriting in between.
+//! independently so the receiver gets exactly the bytes the publisher fed
+//! to the codec — RGB on both ends, with no temporal-codec rewriting in
+//! between.
 //!
-//! Wire format (per byte stream, topic `portal_frame_video`):
+//! Wire format:
 //!
 //! ```text
 //! [u8  version = 1]
@@ -36,27 +37,12 @@
 //! ```
 //!
 //! Width/height as u16 covers anything up to 65535, well beyond camera
-//! frame dimensions. Track name is in the payload (one topic for all
-//! frame-video tracks) so each Portal can declare multiple tracks
-//! without paying for one topic subscription per track.
+//! frame dimensions. The track name is in the envelope, so a transport may
+//! multiplex every track on one channel (LiveKit does) or give each its
+//! own (`video/{track}` on MoQ).
 //!
-//! One byte stream per frame. Frame loss is contained — a dropped stream
-//! drops one frame, not state. Stream-level reliability is byte-level
-//! (TCP-like under the hood). Frames either arrive whole or do not arrive.
-//!
-//! ## Latency floor
-//!
-//! LiveKit byte streams fragment payloads at `BYTE_STREAM_CHUNK_SIZE`
-//! (15 KB) and ship each chunk through a single SCTP data-channel
-//! sender shared by every byte-stream track. On localhost that channel
-//! carries ~5 MB/s in total, bounded by SCTP send and libwebrtc's
-//! `buffered_amount` drain rather than the SDK's writer loop.
-//!
-//! Implication for codec choice: the cost is per byte, not per frame.
-//! Measured on 640×480 robot camera frames, MJPEG q90 (~60-85 KB) lands
-//! in ~40 ms; PNG (~300-450 KB) and deflated Raw (~400 KB) in ~70-105 ms.
-//! Pick by encoded size, not by quality knob. Numbers in
-//! docs/07-frame-video.md.
+//! A frame either arrives whole or not at all; a lost frame loses only
+//! itself.
 
 use std::collections::HashMap;
 
@@ -66,18 +52,6 @@ use crate::codec::{Codec, CodecResult, decode_frame, encode_frame_into, estimate
 use crate::config::PortalConfig;
 use crate::error::{PortalError, PortalResult};
 use crate::types::{FrameSource, VideoFrameData};
-
-/// Reserved Portal topic for frame-video byte streams. A single topic
-/// multiplexes all frame-video tracks; the per-frame header carries the
-/// track name.
-pub const FRAME_VIDEO_TOPIC: &str = "portal_frame_video";
-
-/// LiveKit byte streams fragment payloads into chunks of this many bytes.
-/// Mirrors `livekit/src/room/data_stream/outgoing.rs::CHUNK_SIZE`. Exposed
-/// so Portal users can do their own chunk-count math when picking a codec
-/// — a payload above this size pays the per-chunk SCTP cost (~2 ms each
-/// on localhost) for every additional chunk.
-pub const BYTE_STREAM_CHUNK_SIZE: usize = 15_000;
 
 /// On-wire version of the per-frame header. Bumped when the layout
 /// changes; receivers ignore frames with unknown versions instead of
@@ -92,8 +66,7 @@ const HEADER_FIXED_LEN: usize = 16;
 /// Cap on track-name length on the wire. The framing header allots a `u16`
 /// (65535 bytes), but a name longer than this is almost certainly malformed
 /// — capping early bounds the CPU a malicious or buggy peer can spend on
-/// the receive path before we drop. Matches the typical LiveKit topic-name
-/// budget.
+/// the receive path before we drop.
 const TRACK_NAME_MAX: usize = 256;
 
 fn codec_id(c: Codec) -> u8 {

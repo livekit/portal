@@ -39,7 +39,7 @@ use parking_lot::Mutex;
 use portal_core::Input;
 use portal_core::config::VideoTrackSpec;
 use portal_core::error::PortalResult;
-use portal_core::frame_video::{FRAME_VIDEO_TOPIC, RgbFrame, build_frame_payload_with};
+use portal_core::frame_video::{RgbFrame, build_frame_payload_with};
 use portal_core::metrics::TrackMetrics;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -47,8 +47,7 @@ use tokio::task::JoinHandle;
 use crate::clock::anchored_now_us;
 use crate::codec::{Codec, encode_frame_into};
 use crate::portal::Shared;
-
-pub use portal_core::frame_video::BYTE_STREAM_CHUNK_SIZE;
+use crate::wire::FRAME_VIDEO_TOPIC;
 
 // --- Publisher ---
 

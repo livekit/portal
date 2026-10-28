@@ -13,15 +13,19 @@
 // limitations under the License.
 
 //! Transport-free core of LiveKit Portal: config, wire format, observation
-//! sync and clock math. No sockets, tasks or timers, so it builds for
-//! `wasm32-unknown-unknown` as well as native. `livekit-portal` drives it
-//! over the LiveKit Rust SDK.
+//! sync, clock math, presence and the active-operator gate. No sockets,
+//! tasks or timers, so it builds for `wasm32-unknown-unknown` as well as
+//! native. It speaks Portal's own transport model (`transport`), which a
+//! driver maps onto its transport: `livekit-portal` drives it over the
+//! LiveKit Rust SDK, and `loopback` runs it in-process for tests.
 
 #[doc(hidden)]
 pub mod clock;
 pub mod codec;
 pub mod config;
 pub mod config_file;
+#[doc(hidden)]
+pub mod control;
 mod core;
 pub mod data;
 pub mod dtype;
@@ -30,6 +34,7 @@ pub mod frame;
 pub mod frame_video;
 #[doc(hidden)]
 pub mod keypoint;
+pub mod loopback;
 pub mod metrics;
 #[doc(hidden)]
 pub mod placeholder;
@@ -39,13 +44,16 @@ pub mod rpc;
 pub mod serialization;
 #[doc(hidden)]
 pub mod sync_buffer;
+pub mod transport;
 pub mod types;
 
 pub use crate::core::{
-    Connected, DataReceived, Event, Input, OpId, Output, ParticipantInfo, PortalCore,
-    RPC_CALLER_ROSTER_WAIT_US, RPC_NOT_AUTHORIZED, RPC_NOT_CONNECTED, RPC_SET_ATTRIBUTES_FAILED,
-    RpcId, RpcRequest, SET_ACTIVE_OPERATOR_RPC, SendAction, SendKeypoint, SendState,
-    SendVideoFrame, SetActiveOperator, Step, VideoRoute, VideoTransport,
+    ACTION_MAX_AGE_MS, CLOCK_MAX_AGE_MS, Connect, CoreInit, DEFAULT_RPC_TIMEOUT_MS, Event, Input,
+    OpId, Output, PRESENCE_HEARTBEAT_US, PRESENCE_TIMEOUT_US, PerformRpc, PortalCore,
+    RPC_CALLER_ROSTER_WAIT_US, RPC_NOT_AUTHORIZED, RPC_NOT_CONNECTED, RPC_PRESENCE_FAILED,
+    RPC_RECIPIENT_DISCONNECTED, RPC_RESPONSE_TIMEOUT, RPC_UNSUPPORTED_METHOD, ReplyRpc, RpcId,
+    RpcRequest, SET_ACTIVE_OPERATOR_RPC, SendAction, SendKeypoint, SendState, SendVideoFrame,
+    SetActiveOperator, Step, VideoRoute, VideoTransport,
 };
 pub use codec::Codec;
 pub use config::{
@@ -56,16 +64,15 @@ pub use config_file::ConfigFileError;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
 pub use frame::FramePayload;
-pub use frame_video::{BYTE_STREAM_CHUNK_SIZE, FRAME_VIDEO_TOPIC};
 pub use keypoint::Keypoint;
 pub use metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
     TransportMetrics,
 };
-pub use presence::{
-    ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY,
-};
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
+pub use transport::{
+    Delivery, PROTOCOL_VERSION, PeerId, Presence, Stream, TransportCaps, VideoCaps, stream_path,
+};
 pub use types::{
     Action, ActionSubscription, FrameSource, Observation, Role, StallBehavior, StallConfig, State,
     SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,

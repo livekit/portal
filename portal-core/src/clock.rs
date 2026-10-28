@@ -27,8 +27,6 @@ use std::collections::VecDeque;
 use crate::metrics::TimeSyncMetrics;
 use crate::types::TimeSyncSource;
 
-pub const CLOCK_TOPIC: &str = "portal_clock";
-
 const PING_KIND: u8 = 0;
 const PONG_KIND: u8 = 1;
 const PING_LEN: usize = 1 + 4 + 8;
@@ -321,6 +319,9 @@ impl MonotonicClock {
 // --- Synced clock ---
 
 const UNSYNCED_PING_INTERVAL_US: u64 = 250_000;
+/// Pings remembered for matching pongs: 16 s of the synced rate. A pong
+/// for an older ping is dropped; its round trip would be useless anyway.
+const OUTSTANDING_PINGS: usize = 16;
 const SYNCED_PING_INTERVAL_US: u64 = 1_000_000;
 
 pub struct ClockOptions {
@@ -343,6 +344,10 @@ pub struct ClockSync {
     /// Next ping, while connected as a non-robot peer.
     next_ping_us: Option<u64>,
     seq: u32,
+    /// `(seq, t1)` of recent pings. On a broadcast transport every peer
+    /// hears the robot's pongs, so a pong counts only if it answers one of
+    /// these; the wire carries no addressee.
+    outstanding: VecDeque<(u32, u64)>,
 }
 
 impl ClockSync {
@@ -358,6 +363,7 @@ impl ClockSync {
             robot_identity: None,
             next_ping_us: None,
             seq: 0,
+            outstanding: VecDeque::with_capacity(OUTSTANDING_PINGS),
         }
     }
 
@@ -417,6 +423,7 @@ impl ClockSync {
         }
         self.restart();
         self.seq = 0;
+        self.outstanding.clear();
         self.next_ping_us = Some(now_us);
     }
 
@@ -440,7 +447,22 @@ impl ClockSync {
             false => UNSYNCED_PING_INTERVAL_US,
         };
         self.next_ping_us = Some(next + interval);
-        robot.map(|r| (ClockPacket::Ping { seq, t1: now_us }, r.to_string()))
+        let robot = robot?;
+        if self.outstanding.len() == OUTSTANDING_PINGS {
+            self.outstanding.pop_front();
+        }
+        self.outstanding.push_back((seq, now_us));
+        Some((ClockPacket::Ping { seq, t1: now_us }, robot.to_string()))
+    }
+
+    /// Whether a pong answers one of this peer's own pings. Each ping is
+    /// claimed once, so a duplicated pong doesn't count twice.
+    pub fn claim_pong(&mut self, seq: u32, t1: u64) -> bool {
+        let Some(i) = self.outstanding.iter().position(|p| *p == (seq, t1)) else {
+            return false;
+        };
+        self.outstanding.remove(i);
+        true
     }
 
     pub fn record(&mut self, robot_identity: &str, sample: Sample) -> EstimatorEvent {
@@ -795,5 +817,37 @@ mod tests {
         clock.start_pinging(0);
         assert_eq!(clock.next_ping_us(), None);
         assert_eq!(clock.poll_ping(S, Some("robot")), None);
+    }
+
+    #[test]
+    fn only_pongs_to_our_own_pings_count() {
+        let mut clock = clock(false, TimeSyncSource::Portal);
+        clock.start_pinging(0);
+        let (ClockPacket::Ping { seq, t1 }, _) = clock.poll_ping(0, Some("robot")).expect("ping")
+        else {
+            panic!("expected a ping");
+        };
+        assert!(!clock.claim_pong(seq, t1 + 1), "another peer's ping");
+        assert!(clock.claim_pong(seq, t1));
+        assert!(!clock.claim_pong(seq, t1), "a duplicate counts once");
+    }
+
+    #[test]
+    fn only_recent_pings_are_remembered() {
+        let mut clock = clock(false, TimeSyncSource::Portal);
+        clock.start_pinging(0);
+        let mut pings = Vec::new();
+        for i in 0..=OUTSTANDING_PINGS as u64 {
+            let at = clock.next_ping_us().expect("scheduled");
+            let (ClockPacket::Ping { seq, t1 }, _) = clock.poll_ping(at, Some("r")).expect("ping")
+            else {
+                panic!("expected a ping");
+            };
+            pings.push((seq, t1, i));
+        }
+        let (seq, t1, _) = pings[0];
+        assert!(!clock.claim_pong(seq, t1), "the oldest was forgotten");
+        let (seq, t1, _) = pings[OUTSTANDING_PINGS];
+        assert!(clock.claim_pong(seq, t1));
     }
 }

@@ -22,11 +22,11 @@ mod portal;
 pub mod rpc;
 mod sinks;
 mod video;
+mod wire;
 
 pub use portal_core::{config, config_file, dtype, error, metrics, types};
 
 pub use codec::Codec;
-pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
 pub use portal::{
     ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, Portal, ROLE_ATTR_KEY,
     SET_ACTIVE_OPERATOR_RPC,
@@ -48,3 +48,4 @@ pub use portal_core::types::{
     SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,
 };
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
+pub use wire::BYTE_STREAM_CHUNK_SIZE;

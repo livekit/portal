@@ -25,17 +25,14 @@ use crate::serialization::{
 };
 use crate::types::{Action, State, TypedValue, to_value_maps};
 
-/// Reserved Portal topics. State and action travel as data packets.
-pub const STATE_TOPIC: &str = "portal_state";
-pub const ACTION_TOPIC: &str = "portal_action";
-
 /// Encodes one stream's packets. Keeps the per-field carry-forward
 /// snapshot, so it lives as long as the connection.
 pub struct DataPublisher {
     schema: Vec<FieldSpec>,
     /// Precomputed schema fingerprint, embedded in every outgoing packet.
     fingerprint: u32,
-    topic: &'static str,
+    /// Stream name, for logs.
+    name: &'static str,
     stream: DataStream,
     // Per-field snapshot of the last sent value, stored as f64 for lossless
     // carry-forward. `send_map` carries these forward when a caller supplies
@@ -68,24 +65,20 @@ pub struct Encoded {
 impl DataPublisher {
     pub fn new(schema: &[FieldSpec], stream: DataStream) -> Self {
         let schema = schema.to_vec();
-        let (fingerprint, topic) = match stream {
-            DataStream::State => (schema_fingerprint(&schema), STATE_TOPIC),
-            DataStream::Action => (action_fingerprint(&schema), ACTION_TOPIC),
+        let (fingerprint, name) = match stream {
+            DataStream::State => (schema_fingerprint(&schema), "state"),
+            DataStream::Action => (action_fingerprint(&schema), "action"),
         };
         let last_values = vec![0.0; schema.len()];
         Self {
             schema,
             fingerprint,
-            topic,
+            name,
             stream,
             last_values,
             warned_saturated: HashSet::new(),
             warned_unknown_keys: HashSet::new(),
         }
-    }
-
-    pub fn topic(&self) -> &'static str {
-        self.topic
     }
 
     /// Encode from a map of typed values, reordering to declared field
@@ -153,8 +146,8 @@ impl DataPublisher {
             }
             if self.warned_unknown_keys.insert(key.clone()) {
                 log::warn!(
-                    "[unknown-field] topic '{}': field '{}' not in schema, ignored",
-                    self.topic,
+                    "[unknown-field] stream '{}': field '{}' not in schema, ignored",
+                    self.name,
                     key
                 );
             }
@@ -166,8 +159,8 @@ impl DataPublisher {
             if self.warned_saturated.insert(i) {
                 let field = &self.schema[i];
                 log::warn!(
-                    "[saturated] topic '{}': field '{}' clamped to {:?} range",
-                    self.topic,
+                    "[saturated] stream '{}': field '{}' clamped to {:?} range",
+                    self.name,
                     field.name,
                     field.dtype
                 );
@@ -323,9 +316,7 @@ mod tests {
         assert_eq!((ts, reply), (10, Some(7)));
         assert_eq!(decoded, first.wire_values);
 
-        let state = DataPublisher::new(&schema, DataStream::State);
-        assert_eq!(state.topic(), STATE_TOPIC);
-        let mut state = state;
+        let mut state = DataPublisher::new(&schema, DataStream::State);
         let out = state
             .send_map(SendMap { values: &values, timestamp_us: 3, in_reply_to_ts_us: None })
             .unwrap();

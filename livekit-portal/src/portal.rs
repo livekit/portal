@@ -13,8 +13,13 @@
 // limitations under the License.
 
 //! The native driver. Every decision lives in `PortalCore`; this module
-//! connects the room, feeds the core LiveKit events and local time, and
-//! carries out the calls it returns.
+//! connects the room, maps LiveKit events to core inputs (see `wire` for
+//! the mapping) with the local time, and carries out the outputs as
+//! LiveKit calls.
+//!
+//! The core trusts the identities it is handed. Here they are LiveKit
+//! participant identities, which the SFU takes from each peer's JWT, so a
+//! peer cannot speak for another.
 //!
 //! The core sits behind a mutex shared by the room event actor
 //! (`driver.rs`), the video receive tasks and the synchronous send API.
@@ -31,12 +36,12 @@ use parking_lot::Mutex;
 use portal_core::config::{FieldSpec, PortalConfig};
 use portal_core::error::{PortalError, PortalResult};
 use portal_core::frame_video::FrameVideoTracks;
-use portal_core::keypoint::{KEYPOINT_TOPIC, Keypoint};
+use portal_core::keypoint::Keypoint;
 use portal_core::metrics::{MetricsRegistry, PortalMetrics};
-use portal_core::presence::{classify_role, role_attributes};
+use portal_core::transport::{Delivery, Presence, Stream};
 use portal_core::types::*;
 use portal_core::{
-    Connected, Input, OpId, Output, ParticipantInfo, PortalCore, RpcId, RpcRequest, SendAction,
+    Connect, CoreInit, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
     SendKeypoint, SendState, SendVideoFrame, SetActiveOperator, Step, VideoTransport,
 };
 use tokio::sync::{oneshot, watch};
@@ -49,11 +54,11 @@ use crate::frame_video::{FrameVideoPublisher, FrameVideoPublisherOptions};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
 use crate::sinks::Sinks;
 use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver};
+use crate::wire;
 
+pub use crate::wire::{ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY};
 pub use portal_core::SET_ACTIVE_OPERATOR_RPC;
-pub use portal_core::presence::{
-    ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY,
-};
+pub use portal_core::transport::PROTOCOL_VERSION;
 
 /// State shared by `Portal`, the room event actor and the media tasks.
 pub(crate) struct Shared {
@@ -86,8 +91,8 @@ impl Shared {
         self.clock.now_us()
     }
 
-    pub fn accepts_byte_stream(&self, topic: &str) -> bool {
-        self.core.lock().accepts_byte_stream(topic)
+    pub fn receives_frame_bytes(&self) -> bool {
+        self.core.lock().receives_frame_bytes()
     }
 
     /// Step the core and carry out what it returns, outside the lock.
@@ -99,19 +104,20 @@ impl Shared {
     pub fn execute(&self, out: Vec<Output<VideoFrameData>>) {
         for output in out {
             match output {
-                Output::PublishData { topic, payload, reliable, destinations } => {
+                Output::Publish { stream, payload, delivery, to } => {
+                    let Some(publish) = publish(Outgoing { stream, payload, delivery, to }) else {
+                        continue;
+                    };
                     if let Some(lanes) = self.lanes.lock().as_ref() {
-                        lanes.send(Publish { topic, payload, reliable, destinations });
+                        lanes.send(stream, publish);
                     }
                 }
-                Output::SetAttributes { id, attributes } => {
-                    self.spawn_set_attributes(id, attributes)
-                }
+                Output::SetPresence { id, presence } => self.spawn_set_presence(id, presence),
                 // Only `Portal::set_active_operator` starts one, and it
                 // performs the call itself.
-                Output::PerformRpc { id, .. } => {
+                Output::Rpc { id, .. } => {
                     let result = Err(RpcError::new(1500, "unexpected rpc", None));
-                    self.step(Input::RpcResult { id, result });
+                    self.step(Input::RpcResponse { id, result });
                 }
                 Output::RpcReply { id, result } => {
                     if let Some(tx) = self.rpc_waiters.lock().remove(&id) {
@@ -126,22 +132,23 @@ impl Shared {
         }
     }
 
-    /// Attribute writes the core starts on its own (an RPC-requested
-    /// handoff) report back once LiveKit confirms them.
-    fn spawn_set_attributes(&self, id: Option<OpId>, attributes: HashMap<String, String>) {
+    /// Presence updates the core starts on its own (an RPC-requested
+    /// handoff) report back once LiveKit confirms the attribute write.
+    fn spawn_set_presence(&self, id: Option<OpId>, presence: Presence) {
         let lp = self.local_participant.lock().clone();
         let runtime = self.runtime_handle.lock().clone();
         let (Some(lp), Some(runtime)) = (lp, runtime) else {
             if let Some(id) = id {
-                self.step(Input::AttributesSet { id, result: Err("not connected".into()) });
+                self.step(Input::PresenceSet { id, result: Err("not connected".into()) });
             }
             return;
         };
         let shared = self.this.clone();
+        let attributes = wire::active_operator_attributes(&presence);
         runtime.spawn(async move {
             let result = lp.set_attributes(attributes).await.map_err(|e| e.to_string());
             if let (Some(id), Some(shared)) = (id, shared.upgrade()) {
-                shared.step(Input::AttributesSet { id, result });
+                shared.step(Input::PresenceSet { id, result });
             }
         });
     }
@@ -178,7 +185,7 @@ pub struct Portal {
 
 impl Portal {
     pub fn new(config: PortalConfig) -> Self {
-        let core = PortalCore::new(config.clone());
+        let core = PortalCore::new(CoreInit { config: config.clone(), caps: wire::CAPS });
         let metrics = core.metrics_registry().clone();
         let (wake, _) = watch::channel(None);
         let shared = Arc::new_cyclic(|this| Shared {
@@ -273,7 +280,7 @@ impl Portal {
         // Self-set the role attribute so other participants can discover us.
         // Token-mint may also have set this key; in that case `set_attributes`
         // is effectively a no-op for the same value.
-        if let Err(e) = local_participant.set_attributes(role_attributes(role)).await {
+        if let Err(e) = local_participant.set_attributes(wire::role_attributes(role)).await {
             // Most common cause: the token grant did not include
             // `canUpdateOwnMetadata`. Surface a clear error so callers fix
             // their token-mint script rather than silently leaving the
@@ -286,19 +293,28 @@ impl Portal {
             )));
         }
 
-        let participants = room
+        let peers = room
             .remote_participants()
             .into_values()
-            .map(|p| ParticipantInfo {
-                identity: p.identity().as_str().to_string(),
-                attributes: p.attributes(),
-            })
+            .map(|p| (p.identity().as_str().to_string(), wire::presence(&p.attributes())))
             .collect();
-        self.shared.step(Input::Connected(Connected {
-            local_identity: local_participant.identity().as_str().to_string(),
-            local_attributes: local_participant.attributes(),
-            participants,
-        }));
+        let connected = self.shared.core.lock().connect(Connect {
+            local_peer: local_participant.identity().as_str().to_string(),
+            // A token can seed the pointer, so the gate holds before anyone
+            // calls `set_active_operator`.
+            active_operator: wire::active_operator(&local_participant.attributes()),
+            peers,
+            now_us: self.shared.now_us(),
+        });
+        let out = match connected {
+            Ok(out) => out,
+            Err(e) => {
+                self.teardown();
+                let _ = room.close().await;
+                return Err(e);
+            }
+        };
+        self.shared.execute(out);
 
         if role == Role::Robot
             && let Err(e) = self.setup_robot(&local_participant).await
@@ -344,12 +360,12 @@ impl Portal {
         // nowhere to go.
         let unknown = || PortalError::UnknownVideoTrack { name: track_name.to_string() };
         match route.transport {
-            VideoTransport::WebRtc => {
+            VideoTransport::TransportEncoded => {
                 let publisher =
                     self.video_publishers.lock().get(track_name).cloned().ok_or_else(unknown)?;
                 publisher.send_frame(rgb_data, width, height, route.timestamp_us)
             }
-            VideoTransport::ByteStream { .. } => {
+            VideoTransport::ByteFrames { .. } => {
                 let publisher = self
                     .frame_video_publishers
                     .lock()
@@ -358,6 +374,11 @@ impl Portal {
                     .ok_or_else(unknown)?;
                 publisher.send_frame(rgb_data, width, height, route.timestamp_us)
             }
+            // LiveKit encodes video itself (`wire::CAPS`), so the core never
+            // routes a frame to a driver encoder here.
+            VideoTransport::DriverEncoded { codec } => Err(PortalError::Unsupported(format!(
+                "no driver-side {codec:?} encoder on LiveKit"
+            ))),
         }
     }
 
@@ -441,28 +462,32 @@ impl Portal {
             // it rather than forcing every caller to.
             self.resolve_robot_identity().await?;
         }
-        let out = self.shared.core.lock().set_active_operator(SetActiveOperator { identity })?;
+        let now_us = self.shared.now_us();
+        let (_, out) =
+            self.shared.core.lock().set_active_operator(SetActiveOperator { identity, now_us })?;
         for output in out {
             match output {
-                Output::SetAttributes { id: Some(id), attributes } => {
+                Output::SetPresence { id: Some(id), presence } => {
                     let lp = self
                         .shared
                         .local_participant
                         .lock()
                         .clone()
                         .ok_or(PortalError::NotConnected)?;
+                    let attributes = wire::active_operator_attributes(&presence);
                     let result = lp.set_attributes(attributes).await.map_err(|e| e.to_string());
-                    self.shared.step(Input::AttributesSet { id, result: result.clone() });
+                    self.shared.step(Input::PresenceSet { id, result: result.clone() });
                     result.map_err(PortalError::Room)?;
                 }
-                Output::PerformRpc { id, destination, method, payload, .. } => {
-                    let result = self.perform_rpc(Some(&destination), method, payload, None).await;
+                Output::Rpc { id, to, method, payload, timeout_ms } => {
+                    let timeout = timeout_ms.map(|ms| Duration::from_millis(ms.into()));
+                    let result = self.perform_rpc(Some(&to), &method, payload, timeout).await;
                     let core_result = match &result {
                         Ok(s) => Ok(s.clone()),
                         Err(PortalError::Rpc(e)) => Err(e.clone()),
                         Err(e) => Err(RpcError::new(1500, e.to_string(), None)),
                     };
-                    self.shared.step(Input::RpcResult { id, result: core_result });
+                    self.shared.step(Input::RpcResponse { id, result: core_result });
                     result?;
                 }
                 other => self.shared.execute(vec![other]),
@@ -582,16 +607,16 @@ impl Portal {
     /// declare `role=robot`, and tell the core about it so later calls take
     /// the fast path.
     fn find_robot_in_room(&self) -> Option<String> {
-        let (identity, attributes) = {
+        let (identity, presence) = {
             let conn = self.conn.lock();
             let room = conn.room.as_ref()?;
             room.remote_participants().into_values().find_map(|p| {
-                let attributes = p.attributes();
-                (classify_role(&attributes) == Some(Role::Robot))
-                    .then(|| (p.identity().as_str().to_string(), attributes))
+                let presence = wire::presence(&p.attributes());
+                (presence.compatible_role() == Some(Role::Robot))
+                    .then(|| (p.identity().as_str().to_string(), presence))
             })?
         };
-        self.shared.step(Input::AttributesChanged { identity: &identity, attributes });
+        self.shared.step(Input::PresenceChanged { peer: &identity, presence });
         Some(identity)
     }
 
@@ -650,7 +675,8 @@ impl Portal {
         *self.shared.local_participant.lock() = None;
         // Rosters, the active-operator mirror, publishers and the sync
         // buffer are per-connection, so the next connect starts clean.
-        self.shared.step(Input::Disconnected);
+        let out = self.shared.core.lock().disconnect();
+        self.shared.execute(out);
         *self.shared.lanes.lock() = None;
         {
             let mut receivers = self.video_receivers.lock();
@@ -850,9 +876,11 @@ impl Portal {
         })?;
         for output in out {
             match output {
-                Output::PublishData { topic: KEYPOINT_TOPIC, payload, reliable, destinations } => {
-                    let publish =
-                        Publish { topic: KEYPOINT_TOPIC, payload, reliable, destinations };
+                Output::Publish { stream: Stream::Keypoint, payload, delivery, to } => {
+                    let stream = Stream::Keypoint;
+                    let Some(publish) = publish(Outgoing { stream, payload, delivery, to }) else {
+                        continue;
+                    };
                     lp.publish_data(packet(publish))
                         .await
                         .map_err(|e| PortalError::Room(e.to_string()))?;
@@ -874,6 +902,27 @@ impl Portal {
     pub fn on_time_synced(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.shared.sinks.time_synced_cb.lock() = Some(Box::new(callback));
     }
+}
+
+/// The fields of an `Output::Publish`.
+struct Outgoing {
+    stream: Stream,
+    payload: Vec<u8>,
+    delivery: Delivery,
+    to: Option<String>,
+}
+
+/// A core publish as a LiveKit data packet: the stream's topic, reliable
+/// only for `Delivery::Reliable` (`LatestOnly` and `BestEffort` both ride
+/// the lossy channel), and LiveKit's own addressing for a hinted peer.
+fn publish(outgoing: Outgoing) -> Option<Publish> {
+    let Outgoing { stream, payload, delivery, to } = outgoing;
+    let Some(topic) = wire::topic(stream) else {
+        log::warn!("[publish-failed] stream '{}' has no LiveKit topic", stream.name());
+        return None;
+    };
+    let reliable = delivery == Delivery::Reliable;
+    Some(Publish { topic, payload, reliable, destinations: to.into_iter().collect() })
 }
 
 /// Wrap a Portal `RpcHandler` in the signature the SDK expects and install
@@ -907,7 +956,7 @@ async fn set_active_operator_rpc(
         shared.step(Input::RpcRequest(RpcRequest {
             id,
             method: SET_ACTIVE_OPERATOR_RPC,
-            caller: &data.caller_identity,
+            from: &data.caller_identity,
             payload: &data.payload,
         }));
         rx

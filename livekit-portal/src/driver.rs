@@ -23,15 +23,16 @@ use std::time::Duration;
 use livekit::prelude::*;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use parking_lot::Mutex;
+use portal_core::Input;
 use portal_core::config::PortalConfig;
 use portal_core::types::Role;
-use portal_core::{DataReceived, Input, ParticipantInfo};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
 use crate::frame_video::spawn_receive;
 use crate::portal::Shared;
 use crate::video::{VideoReceiver, VideoReceiverOptions};
+use crate::wire;
 
 /// Floor on a wake-up's delay. The core's times are on the raw local clock
 /// and the timer on tokio's; this keeps a rounding gap between the two
@@ -85,17 +86,21 @@ impl EventLoop {
                 self.track_subscribed(track, publication)
             }
             RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. } => {
-                let sender = participant.as_ref().map(|p| p.identity());
-                self.shared.step(Input::DataReceived(DataReceived {
-                    topic: &topic,
+                // Other applications' topics are theirs.
+                let Some(stream) = wire::stream(&topic) else {
+                    return;
+                };
+                let from = participant.as_ref().map(|p| p.identity());
+                self.shared.step(Input::Data {
+                    stream,
+                    from: from.as_ref().map(|id| id.as_str()),
                     payload: &payload,
-                    sender: sender.as_ref().map(|id| id.as_str()),
-                }));
+                });
             }
             RoomEvent::ByteStreamOpened { reader, topic, .. } => {
                 // Take only Portal's streams, so other applications using
                 // byte streams on unrelated topics are left untouched.
-                if !self.shared.accepts_byte_stream(&topic) {
+                if topic != wire::FRAME_VIDEO_TOPIC || !self.shared.receives_frame_bytes() {
                     return;
                 }
                 if let Some(reader) = reader.take() {
@@ -106,28 +111,28 @@ impl EventLoop {
             // not finished its own `set_attributes`; the attributes event
             // that follows reclassifies it.
             RoomEvent::ParticipantConnected(participant) => {
-                self.shared.step(Input::ParticipantConnected(ParticipantInfo {
-                    identity: participant.identity().as_str().to_string(),
-                    attributes: participant.attributes(),
-                }));
+                let identity = participant.identity();
+                let peer = identity.as_str();
+                self.shared.step(Input::PeerJoined { peer });
+                let presence = wire::presence(&participant.attributes());
+                self.shared.step(Input::PresenceChanged { peer, presence });
             }
+            // Includes this peer's own updates, which the core ignores.
             RoomEvent::ParticipantAttributesChanged { participant, .. } => {
                 let identity = participant.identity();
-                self.shared.step(Input::AttributesChanged {
-                    identity: identity.as_str(),
-                    attributes: participant.attributes(),
-                });
+                let presence = wire::presence(&participant.attributes());
+                self.shared.step(Input::PresenceChanged { peer: identity.as_str(), presence });
             }
             RoomEvent::ParticipantDisconnected(participant) => {
                 let identity = participant.identity();
-                self.shared.step(Input::ParticipantDisconnected { identity: identity.as_str() });
+                self.shared.step(Input::PeerLeft { peer: identity.as_str() });
             }
             RoomEvent::Reconnected => {
                 // Pre-reconnect data is stale by definition: getters read
                 // `None` until fresh packets arrive, matching the core's
                 // cleared sync buffer.
                 self.shared.sinks.clear_latest();
-                self.shared.step(Input::Reconnected);
+                self.shared.step(Input::LinkRestored);
             }
             _ => {}
         }

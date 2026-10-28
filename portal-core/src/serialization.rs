@@ -66,6 +66,16 @@ pub fn action_fingerprint(schema: &[FieldSpec]) -> u32 {
     schema_fingerprint(schema) ^ ACTION_STREAM_TAG
 }
 
+/// Size of a `serialize_values` packet for `schema`.
+pub fn state_packet_len(schema: &[FieldSpec]) -> usize {
+    HEADER_LEN + schema.iter().map(|f| f.dtype.size_bytes()).sum::<usize>()
+}
+
+/// Size of a `serialize_action` packet for `schema`.
+pub fn action_packet_len(schema: &[FieldSpec]) -> usize {
+    CORRELATED_HEADER_LEN + schema.iter().map(|f| f.dtype.size_bytes()).sum::<usize>()
+}
+
 /// Stable on-wire/hash tag for a dtype. Never renumber — changes break
 /// cross-peer fingerprint agreement.
 fn dtype_tag(d: DType) -> u8 {

@@ -22,7 +22,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub(crate) const KEYPOINT_TOPIC: &str = "portal_keypoint";
+#[doc(hidden)]
+pub const KEYPOINT_TOPIC: &str = "portal_keypoint";
 
 /// An annotation. `kind` is the keypoint's `type`, renamed because `type`
 /// is a Rust keyword.
@@ -45,7 +46,8 @@ struct Wire {
     timestamp_us: u64,
 }
 
-pub(crate) fn encode(kind: &str, payload: &Map<String, Value>, timestamp_us: u64) -> Vec<u8> {
+#[doc(hidden)]
+pub fn encode(kind: &str, payload: &Map<String, Value>, timestamp_us: u64) -> Vec<u8> {
     #[derive(Serialize)]
     struct WireRef<'a> {
         #[serde(rename = "type")]
@@ -57,7 +59,8 @@ pub(crate) fn encode(kind: &str, payload: &Map<String, Value>, timestamp_us: u64
         .expect("a JSON map with string keys always serializes")
 }
 
-pub(crate) fn decode(bytes: &[u8], sender: String) -> Result<Keypoint, serde_json::Error> {
+#[doc(hidden)]
+pub fn decode(bytes: &[u8], sender: String) -> Result<Keypoint, serde_json::Error> {
     let Wire { kind, payload, timestamp_us } = serde_json::from_slice(bytes)?;
     Ok(Keypoint { kind, payload, timestamp_us, sender })
 }
@@ -65,11 +68,18 @@ pub(crate) fn decode(bytes: &[u8], sender: String) -> Result<Keypoint, serde_jso
 type KeypointCb = Box<dyn Fn(&Keypoint) + Send + Sync>;
 
 /// Push-only delivery for keypoints, shared with the room event loop.
-pub(crate) struct KeypointSlot {
+#[doc(hidden)]
+pub struct KeypointSlot {
     cb: Mutex<Option<KeypointCb>>,
     /// Senders already warned about for a malformed packet, so a broken peer
     /// logs once instead of on every packet.
     warned: Mutex<HashSet<String>>,
+}
+
+impl Default for KeypointSlot {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KeypointSlot {

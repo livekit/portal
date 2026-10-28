@@ -23,22 +23,22 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::clock::{CLOCK_TOPIC, ClockActor, ClockOptions, ClockService, SyncedClock};
-use crate::config::{FieldSpec, PortalConfig};
 use crate::data::{
     ACTION_TOPIC, ActionOrigin, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot,
     handle_data_received,
 };
-use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{
     FRAME_VIDEO_TOPIC, FrameVideoPublisher, FrameVideoTrackEntry, dispatch_frame_payload,
 };
-use crate::keypoint::{KEYPOINT_TOPIC, Keypoint, KeypointSlot};
-use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
-use crate::serialization::{action_fingerprint, schema_fingerprint};
-use crate::sync_buffer::{SyncBuffer, SyncOutput};
-use crate::types::*;
 use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver, VideoTrackSlots};
+use portal_core::config::{FieldSpec, PortalConfig};
+use portal_core::error::{PortalError, PortalResult};
+use portal_core::keypoint::{KEYPOINT_TOPIC, Keypoint, KeypointSlot};
+use portal_core::metrics::{DataStream, MetricsRegistry, PortalMetrics};
+use portal_core::serialization::{action_fingerprint, schema_fingerprint};
+use portal_core::sync_buffer::{SyncBuffer, SyncOutput};
+use portal_core::types::*;
 
 /// Participant attribute keys used by Portal for role discovery and the
 /// multi-controller pointer. Namespaced to avoid colliding with any
@@ -408,15 +408,15 @@ impl Portal {
         if !ignored.is_empty() {
             log::warn!(
                 "[{}] observation sync is off, so these options do nothing: {}",
-                config.session,
+                config.session(),
                 ignored.join(", ")
             );
         }
 
         let clock = Arc::new(SyncedClock::new(ClockOptions {
-            is_reference: config.role == Role::Robot,
-            source: config.time_sync_source,
-            skew_us: config.clock_skew_us,
+            is_reference: config.role() == Role::Robot,
+            source: config.time_sync_source(),
+            skew_us: config.clock_skew_us(),
         }));
 
         Self {
@@ -459,19 +459,19 @@ impl Portal {
         let mut options = RoomOptions::default();
         options.sdk_options.other_sdks = Some(OTHER_SDKS_VALUE.to_string());
         options.auto_subscribe = true;
-        if let Some(key) = &self.config.shared_key {
+        if let Some(key) = &self.config.e2ee_key() {
             use livekit::E2eeOptions;
             use livekit::e2ee::{
                 EncryptionType,
                 key_provider::{KeyProvider, KeyProviderOptions},
             };
             let key_provider =
-                KeyProvider::with_shared_key(KeyProviderOptions::default(), key.clone());
+                KeyProvider::with_shared_key(KeyProviderOptions::default(), key.to_vec());
             options.encryption =
                 Some(E2eeOptions { key_provider, encryption_type: EncryptionType::Gcm });
         }
 
-        log::info!("[{}] connecting as {:?} to {}", self.config.session, self.config.role, url);
+        log::info!("[{}] connecting as {:?} to {}", self.config.session(), self.config.role(), url);
 
         // Hand decoded frames over as soon as they are ready instead of
         // holding them for smooth playback. Process-wide, and only possible
@@ -496,7 +496,7 @@ impl Portal {
         // handler clones the LP slot and the controller Arc so the closure
         // can update both the attribute and the local mirror without holding
         // any Portal-level lock.
-        if self.config.role == Role::Robot {
+        if self.config.role() == Role::Robot {
             let lp_slot = self.local_participant.clone();
             let controller = self.controller.clone();
             let handler: RpcHandler = Arc::new(move |data: RpcInvocationData| {
@@ -514,7 +514,7 @@ impl Portal {
         // Self-set the role attribute so other participants can discover us.
         // Token-mint may also have set this key; in that case `set_attributes`
         // is effectively a no-op for the same value.
-        let role_value = match self.config.role {
+        let role_value = match self.config.role() {
             Role::Robot => ROLE_VALUE_ROBOT,
             Role::Operator => ROLE_VALUE_OPERATOR,
             Role::Observer => ROLE_VALUE_OBSERVER,
@@ -539,7 +539,7 @@ impl Portal {
         // Robot-side: if the token seeded `lk.portal.active_operator`,
         // mirror it locally so the action gate sees the configured pointer
         // before anyone calls `set_active_operator`.
-        if self.config.role == Role::Robot {
+        if self.config.role() == Role::Robot {
             let attrs = local_participant.attributes();
             if let Some(seed) = attrs.get(ACTIVE_OPERATOR_ATTR_KEY) {
                 let value = if seed.is_empty() { None } else { Some(seed.clone()) };
@@ -553,13 +553,13 @@ impl Portal {
         for (_sid, participant) in room.remote_participants() {
             classify_and_update(
                 &self.controller,
-                self.config.role,
+                self.config.role(),
                 &participant.identity(),
                 &participant.attributes(),
             );
         }
 
-        let setup_result = match self.config.role {
+        let setup_result = match self.config.role() {
             Role::Robot => self.setup_robot(&room).await,
             Role::Operator | Role::Observer => {
                 self.setup_operator(&room);
@@ -577,19 +577,19 @@ impl Portal {
         }
 
         let clock = Arc::new(ClockService::spawn(ClockActor {
-            role: self.config.role,
+            role: self.config.role(),
             local_participant: local_participant.clone(),
             controller: self.controller.clone(),
             clock: self.clock.clone(),
             metrics: self.metrics.clone(),
         }));
 
-        log::info!("[{}] connected as {:?}", self.config.session, self.config.role);
+        log::info!("[{}] connected as {:?}", self.config.session(), self.config.role());
 
         // Event dispatch runs off a snapshot of the fields it touches, not the
         // whole Portal, so it doesn't need any outer lock.
-        let action_schema_fp = action_fingerprint(&self.config.action_schema);
-        let state_schema_fp = schema_fingerprint(&self.config.state_schema);
+        let action_schema_fp = action_fingerprint(self.config.action_schema());
+        let state_schema_fp = schema_fingerprint(self.config.state_schema());
         let local_identity = local_participant.identity().as_str().to_string();
         let ctx = EventContext {
             config: self.config.clone(),
@@ -647,10 +647,10 @@ impl Portal {
         // because send is operator-side) from genuinely unknown-track. The
         // operator never spawns video publishers, so a declared name with
         // no publisher means "wrong role" — same shape as `send_state`.
-        if self.config.role != Role::Robot
-            && self.config.video_tracks.iter().any(|s| s.name == track_name)
+        if self.config.role() != Role::Robot
+            && self.config.video_tracks().iter().any(|s| s.name == track_name)
         {
-            return Err(PortalError::WrongRole(self.config.role));
+            return Err(PortalError::WrongRole(self.config.role()));
         }
         Err(PortalError::UnknownVideoTrack { name: track_name.to_string() })
     }
@@ -665,8 +665,11 @@ impl Portal {
         values: &HashMap<String, TypedValue>,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
-        let publisher =
-            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
+        let publisher = self
+            .state_publisher
+            .lock()
+            .clone()
+            .ok_or(PortalError::WrongRole(self.config.role()))?;
         let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         // State has no echo path; drop the wire-values vector that
         // `send_map` returns for action callers.
@@ -686,8 +689,11 @@ impl Portal {
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
-        let publisher =
-            self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
+        let publisher = self
+            .action_publisher
+            .lock()
+            .clone()
+            .ok_or(PortalError::WrongRole(self.config.role()))?;
         // Resolve the actual send timestamp the publisher will stamp onto
         // the wire so the local echo (if any) sees the same value the
         // robot sees.
@@ -705,7 +711,7 @@ impl Portal {
         // caller's input map directly would silently diverge whenever a
         // partial update or saturating value is involved.
         let active = self.is_self_active();
-        let echo = match self.config.action_subscription {
+        let echo = match self.config.action_subscription() {
             ActionSubscription::None => false,
             ActionSubscription::Active => active,
             ActionSubscription::All => true,
@@ -716,7 +722,7 @@ impl Portal {
         let action = crate::data::build_action(
             send_ts,
             in_reply_to_ts_us,
-            &self.config.action_schema,
+            self.config.action_schema(),
             &wire_values,
             ActionOrigin { sender, active },
         );
@@ -772,7 +778,7 @@ impl Portal {
     ///
     /// Pass `None` to clear and drop all incoming actions.
     pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
-        match self.config.role {
+        match self.config.role() {
             Role::Robot => {
                 let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
                 let prev = self.controller.active_operator.lock().clone();
@@ -920,7 +926,7 @@ impl Portal {
             data.response_timeout = t;
         }
 
-        lp.perform_rpc(data).await.map_err(|e| PortalError::Rpc(e.into()))
+        lp.perform_rpc(data).await.map_err(|e| PortalError::Rpc(crate::rpc::rpc_error_from_sdk(e)))
     }
 
     /// Walk `room.remote_participants()` looking for one whose attributes
@@ -973,7 +979,7 @@ impl Portal {
     /// active operator), then falls back to a single-remote-participant
     /// snapshot for setups that haven't designated control yet.
     fn resolve_peer(&self) -> PortalResult<String> {
-        match self.config.role {
+        match self.config.role() {
             Role::Operator | Role::Observer => {
                 if let Some(id) = self.controller.robot_identity.lock().clone() {
                     return Ok(id);
@@ -1105,7 +1111,7 @@ impl Portal {
     }
 
     fn require_observation_sync(&self) -> PortalResult<()> {
-        match self.config.observation_sync {
+        match self.config.observation_sync() {
             true => Ok(()),
             false => Err(PortalError::ObservationSyncDisabled),
         }
@@ -1150,7 +1156,7 @@ impl Portal {
     /// Whether this peer bundles observations. See
     /// `PortalConfig::set_observation_sync`.
     pub fn observation_sync(&self) -> bool {
-        self.config.observation_sync
+        self.config.observation_sync()
     }
 
     /// Fire on every received state. Semantics mirror `on_action`.
@@ -1186,14 +1192,14 @@ impl Portal {
     async fn setup_robot(&self, room: &Room) -> PortalResult<()> {
         let lp = room.local_participant();
 
-        for spec in self.config.video_tracks.iter().filter(|s| s.is_webrtc()) {
+        for spec in self.config.video_tracks().iter().filter(|s| s.is_webrtc()) {
             let track_name = &spec.name;
             let track_metrics =
                 self.metrics.track(track_name).expect("track metrics registered at construction");
             let publisher = VideoPublisher::new(VideoPublisherOptions {
                 spec,
                 metrics: track_metrics,
-                fps: self.config.fps,
+                fps: self.config.fps(),
             });
             if let Err(e) = publisher.publish(&lp).await {
                 // Roll back any earlier publishers so their send tasks stop
@@ -1201,7 +1207,7 @@ impl Portal {
                 self.video_publishers.lock().clear();
                 return Err(e);
             }
-            log::info!("[{}] published video track '{track_name}'", self.config.session);
+            log::info!("[{}] published video track '{track_name}'", self.config.session());
             self.video_publishers.lock().insert(track_name.clone(), Arc::new(publisher));
         }
 
@@ -1214,7 +1220,7 @@ impl Portal {
             let publisher = FrameVideoPublisher::new(spec.clone(), lp.clone(), track_metrics);
             log::info!(
                 "[{}] ready to publish frame-video track '{}' via byte stream (codec={:?}, quality={})",
-                self.config.session,
+                self.config.session(),
                 spec.name,
                 spec.codec,
                 spec.quality
@@ -1222,20 +1228,20 @@ impl Portal {
             self.frame_video_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
         }
 
-        if !self.config.state_schema.is_empty() {
+        if !self.config.state_schema().is_empty() {
             let publisher = DataPublisher::new(
-                &self.config.state_schema,
+                self.config.state_schema(),
                 STATE_TOPIC,
-                self.config.state_reliable,
+                self.config.state_reliable(),
                 lp.clone(),
                 self.metrics.clone(),
                 DataStream::State,
             );
-            let mode = if self.config.state_reliable { "reliable" } else { "unreliable" };
+            let mode = if self.config.state_reliable() { "reliable" } else { "unreliable" };
             log::info!(
                 "[{}] ready to publish state via {mode} data ({} fields)",
-                self.config.session,
-                self.config.state_schema.len()
+                self.config.session(),
+                self.config.state_schema().len()
             );
             *self.state_publisher.lock() = Some(Arc::new(publisher));
         }
@@ -1250,10 +1256,10 @@ impl Portal {
         // arrivals by name, regardless of whether they came from a WebRTC
         // RTP track or a frame-video byte stream. `all_track_names` was
         // computed once at construction.
-        if self.config.observation_sync {
+        if self.config.observation_sync() {
             let sync_buffer = Arc::new(Mutex::new(SyncBuffer::new(
                 &self.all_track_names,
-                self.config.state_schema.clone(),
+                self.config.state_schema().to_vec(),
                 self.config.sync_config(),
                 self.config.stall_configs(&self.all_track_names),
                 self.metrics.clone(),
@@ -1261,17 +1267,17 @@ impl Portal {
             *self.sync_buffer.lock() = Some(sync_buffer);
         }
 
-        if self.config.role == Role::Operator && !self.config.action_schema.is_empty() {
-            let mode = if self.config.action_reliable { "reliable" } else { "unreliable" };
+        if self.config.role() == Role::Operator && !self.config.action_schema().is_empty() {
+            let mode = if self.config.action_reliable() { "reliable" } else { "unreliable" };
             log::info!(
                 "[{}] ready to publish action via {mode} data ({} fields)",
-                self.config.session,
-                self.config.action_schema.len()
+                self.config.session(),
+                self.config.action_schema().len()
             );
             let publisher = DataPublisher::new(
-                &self.config.action_schema,
+                self.config.action_schema(),
                 ACTION_TOPIC,
-                self.config.action_reliable,
+                self.config.action_reliable(),
                 lp.clone(),
                 self.metrics.clone(),
                 DataStream::Action,
@@ -1325,7 +1331,7 @@ impl Portal {
         let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
         let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
         let packet = DataPacket {
-            payload: crate::keypoint::encode(kind, &payload, timestamp_us),
+            payload: portal_core::keypoint::encode(kind, &payload, timestamp_us),
             topic: Some(KEYPOINT_TOPIC.to_string()),
             reliable: true,
             destination_identities: Vec::new(),
@@ -1357,8 +1363,8 @@ fn register_handler_on(lp: &LocalParticipant, method: String, handler: RpcHandle
     lp.register_rpc_method(method, move |data| {
         let handler = handler.clone();
         Box::pin(async move {
-            let core_data: crate::rpc::RpcInvocationData = data.into();
-            handler(core_data).await.map_err(Into::into)
+            let core_data = crate::rpc::invocation_from_sdk(data);
+            handler(core_data).await.map_err(crate::rpc::rpc_error_to_sdk)
         })
     });
 }
@@ -1524,9 +1530,9 @@ fn gate_action(
     ctx: &EventContext,
     participant: Option<&RemoteParticipant>,
 ) -> Option<ActionOrigin> {
-    let subscription = match ctx.config.role {
+    let subscription = match ctx.config.role() {
         Role::Robot => ActionSubscription::Active,
-        Role::Operator | Role::Observer => ctx.config.action_subscription,
+        Role::Operator | Role::Observer => ctx.config.action_subscription(),
     };
     if subscription == ActionSubscription::None {
         return None;
@@ -1545,13 +1551,16 @@ fn gate_action(
 fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
     match event {
         RoomEvent::TrackSubscribed { track, publication, .. } => {
-            if ctx.config.role == Role::Robot {
+            if ctx.config.role() == Role::Robot {
                 return;
             }
             if let RemoteTrack::Video(video_track) = track {
                 let track_name = publication.name();
-                if ctx.config.video_tracks.iter().any(|s| s.name == track_name) {
-                    log::info!("[{}] subscribed to video track '{track_name}'", ctx.config.session);
+                if ctx.config.video_tracks().iter().any(|s| s.name == track_name) {
+                    log::info!(
+                        "[{}] subscribed to video track '{track_name}'",
+                        ctx.config.session()
+                    );
                     let slots = ctx
                         .video_tracks
                         .get(track_name.as_str())
@@ -1605,10 +1614,10 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             let output = handle_data_received(
                 &payload,
                 &topic,
-                ctx.config.role,
-                &ctx.config.action_schema,
+                ctx.config.role(),
+                ctx.config.action_schema(),
                 ctx.action_schema_fp,
-                &ctx.config.state_schema,
+                ctx.config.state_schema(),
                 ctx.state_schema_fp,
                 &ctx.action,
                 &ctx.state,
@@ -1629,7 +1638,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // are left untouched. The header in each payload routes it to
             // the right entry (spec + slots + metrics fused; one HashMap
             // lookup at dispatch).
-            if ctx.config.role == Role::Robot
+            if ctx.config.role() == Role::Robot
                 || topic != FRAME_VIDEO_TOPIC
                 || ctx.frame_video_entries.is_empty()
             {
@@ -1667,7 +1676,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // the role attribute lands.
             let identity = participant.identity();
             let attrs = participant.attributes();
-            classify_and_update(&ctx.controller, ctx.config.role, &identity, &attrs);
+            classify_and_update(&ctx.controller, ctx.config.role(), &identity, &attrs);
         }
         RoomEvent::ParticipantAttributesChanged { participant, .. } => {
             let identity = participant.identity();
@@ -1678,7 +1687,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
                 return;
             }
             let attrs = participant.attributes();
-            classify_and_update(&ctx.controller, ctx.config.role, &identity, &attrs);
+            classify_and_update(&ctx.controller, ctx.config.role(), &identity, &attrs);
         }
         RoomEvent::ParticipantDisconnected(participant) => {
             // Multi-controller bookkeeping. The `active_operator` pointer
@@ -1687,7 +1696,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
             // claims explicitly via `set_active_operator`.
             let identity = participant.identity();
             let id_str = identity.as_str().to_string();
-            log::info!("[{}] participant '{}' disconnected", ctx.config.session, id_str);
+            log::info!("[{}] participant '{}' disconnected", ctx.config.session(), id_str);
             if ctx.controller.operators.lock().remove(&id_str) {
                 ctx.controller.fire_op_left(&id_str);
             }
@@ -1701,7 +1710,7 @@ fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
         RoomEvent::Reconnected => {
             log::info!(
                 "[{}] reconnected, clearing sync buffers and latest slots",
-                ctx.config.session
+                ctx.config.session()
             );
             if let Some(sb) = &ctx.sync_buffer {
                 sb.lock().clear();

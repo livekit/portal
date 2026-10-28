@@ -71,13 +71,13 @@ use tokio::task::JoinHandle;
 
 use crate::clock::anchored_now_us;
 use crate::codec::{Codec, decode_frame, encode_frame_into, estimated_encoded_size};
-use crate::config::VideoTrackSpec;
-use crate::error::{PortalError, PortalResult};
-use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
-use crate::sync_buffer::SyncBuffer;
-use crate::types::{FrameSource, VideoFrameData};
 use crate::video::{VideoTrackSlots, now_us};
+use portal_core::config::VideoTrackSpec;
+use portal_core::error::{PortalError, PortalResult};
+use portal_core::metrics::TrackMetrics;
+use portal_core::sync_buffer::SyncBuffer;
+use portal_core::types::{FrameSource, VideoFrameData};
 
 /// Reserved Portal topic for frame-video byte streams. A single topic
 /// multiplexes all frame-video tracks; the per-frame header carries the
@@ -100,7 +100,6 @@ const WIRE_VERSION: u8 = 1;
 /// by the trailing `u16` of this prefix.
 ///   1 (version) + 1 (codec) + 2 (w) + 2 (h) + 8 (ts) + 2 (name_len) = 16
 const HEADER_FIXED_LEN: usize = 16;
-
 
 /// Cap on track-name length on the wire. The framing header allots a `u16`
 /// (65535 bytes), but a name longer than this is almost certainly malformed

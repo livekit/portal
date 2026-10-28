@@ -21,20 +21,20 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::config::FieldSpec;
-use crate::error::{PortalError, PortalResult};
+use portal_core::config::FieldSpec;
+use portal_core::error::{PortalError, PortalResult};
 
 use crate::clock::anchored_now_us;
+use crate::video::now_us;
 #[cfg(test)]
-use crate::dtype::DType;
-use crate::metrics::{DataStream, MetricsRegistry};
-use crate::serialization::{
+use portal_core::dtype::DType;
+use portal_core::metrics::{DataStream, MetricsRegistry};
+use portal_core::serialization::{
     DecodeError, action_fingerprint, deserialize_action, deserialize_values, schema_fingerprint,
     serialize_action, serialize_values,
 };
-use crate::sync_buffer::{SyncBuffer, SyncOutput};
-use crate::types::{Action, Role, State, TypedValue, to_value_maps};
-use crate::video::now_us;
+use portal_core::sync_buffer::{SyncBuffer, SyncOutput};
+use portal_core::types::{Action, Role, State, TypedValue, to_value_maps};
 
 /// Reserved Portal topics. State and action travel as data packets.
 pub(crate) const STATE_TOPIC: &str = "portal_state";

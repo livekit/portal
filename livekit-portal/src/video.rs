@@ -35,12 +35,12 @@ use tokio::task::JoinHandle;
 
 use crate::clock::anchored_now_us;
 use crate::codec::Codec;
-use crate::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
-use crate::error::{PortalError, PortalResult};
-use crate::metrics::TrackMetrics;
 use crate::portal::ObservationSink;
-use crate::sync_buffer::SyncBuffer;
-use crate::types::{FrameSource, VideoFrameData};
+use portal_core::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
+use portal_core::error::{PortalError, PortalResult};
+use portal_core::metrics::TrackMetrics;
+use portal_core::sync_buffer::SyncBuffer;
+use portal_core::types::{FrameSource, VideoFrameData};
 
 const DEFAULT_WIDTH: u32 = 640;
 const DEFAULT_HEIGHT: u32 = 480;

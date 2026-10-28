@@ -1,0 +1,19 @@
+[package]
+name = "portal-core"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "Transport-free core of LiveKit Portal: config, wire format, sync and clock math"
+
+[dependencies]
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+log = { workspace = true }
+bytes = "1"
+# Frame-video codec encode/decode (PNG, MJPEG). Default features pull in
+# every supported format and would bloat link time and binary size; we only
+# need PNG and JPEG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "2"
+serde_json = "1"

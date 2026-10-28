@@ -513,7 +513,7 @@ Paths are relative to the repository root.
 
 | File | What is in it |
 |---|---|
-| `livekit-portal/src/sync_buffer.rs` | `SyncBuffer`, `SyncOutput`, the match algorithm, all cursor and blocker bookkeeping. |
+| `portal-core/src/sync_buffer.rs` | `SyncBuffer`, `SyncOutput`, the match algorithm, all cursor and blocker bookkeeping. |
 | `livekit-portal/src/portal.rs` | `ObservationSink`, the `EventContext` handed to the room event loop, Portal lifecycle. |
 | `livekit-portal/src/video.rs` | `VideoReceiver`. Converts a `VideoFrame` into `Arc<VideoFrameData>`, then calls `push_frame` and dispatches. |
 | `livekit-portal/src/data.rs` | `DataPublisher` and `handle_data_received`, which calls `push_state` and returns the `SyncOutput`. |

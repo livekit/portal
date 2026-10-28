@@ -332,5 +332,7 @@ For anything not in that table, see [Troubleshooting](../10-troubleshooting.md).
 - [Portal API](../05-portal-api.md). What they are built on, and what to drop down
   to when you need more control.
 - [Tuning](../06-tuning.md). The knobs the config fields forward to.
+- [Data recording](../03-data-recording.md#convert-recordings-into-training-datasets).
+  `livekit-portal convert` turns recorded sessions into a LeRobot v3 dataset.
 - [`examples/python/so101/`](../../examples/python/so101). A working two-arm setup
   on real hardware.

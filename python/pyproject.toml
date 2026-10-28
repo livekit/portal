@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 # `uv sync` at python/ installs everything for dev. Consumers of individual
 # packages should depend on them directly (e.g. livekit-portal, not this root).
 dependencies = [
-    "livekit-portal",
+    "livekit-portal[lerobot]",
     "lerobot-robot-livekit",
     "lerobot-teleoperator-livekit",
 ]

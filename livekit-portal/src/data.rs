@@ -12,81 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+//! Data packets out. Each Portal topic gets its own bounded queue and send
+//! task, so the synchronous send path never blocks on the network and a
+//! backlog on one topic can't delay another (a clock pong stuck behind
+//! state packets would skew the round trip).
 
 use livekit::prelude::*;
-use parking_lot::Mutex;
+use portal_core::clock::CLOCK_TOPIC;
+use portal_core::data::{ACTION_TOPIC, STATE_TOPIC};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-use portal_core::config::FieldSpec;
-use portal_core::error::{PortalError, PortalResult};
-
-use crate::clock::anchored_now_us;
-use crate::video::now_us;
-#[cfg(test)]
-use portal_core::dtype::DType;
-use portal_core::metrics::{DataStream, MetricsRegistry};
-use portal_core::serialization::{
-    DecodeError, action_fingerprint, deserialize_action, deserialize_values, schema_fingerprint,
-    serialize_action, serialize_values,
-};
-use portal_core::sync_buffer::{SyncBuffer, SyncOutput};
-use portal_core::types::{Action, Role, State, TypedValue, to_value_maps};
-
-/// Reserved Portal topics. State and action travel as data packets.
-pub(crate) const STATE_TOPIC: &str = "portal_state";
-pub(crate) const ACTION_TOPIC: &str = "portal_action";
-
-// --- Publisher ---
 
 /// Bound on the in-flight publish queue. Sized for ~10s at 100Hz so normal
 /// operation never hits it. The bound exists so a stalled publish loop
 /// (slow SFU, lossy link) cannot grow memory without limit; on overflow we
 /// drop and warn rather than block the synchronous send path.
 const PUBLISH_QUEUE_CAP: usize = 1024;
+/// Clock packets are periodic; a lost one only delays the estimate.
+const CLOCK_QUEUE_CAP: usize = 64;
 
-/// Publishes serialized state/action packets. Spawns a single background task
-/// at construction; `send` enqueues onto an mpsc channel, preserving ordering
-/// for reliable publishes and avoiding a task allocation per packet.
-pub(crate) struct DataPublisher {
-    /// Owned schema. Referenced by every `send_map` call; never mutated after
-    /// construction.
-    schema: Vec<FieldSpec>,
-    /// Precomputed schema fingerprint, embedded in every outgoing packet.
-    fingerprint: u32,
-    topic: String,
-    reliable: bool,
+struct Lane {
     tx: mpsc::Sender<DataPacket>,
-    task: Option<JoinHandle<()>>,
-    metrics: Arc<MetricsRegistry>,
-    stream: DataStream,
-    // Per-field snapshot of the last sent value, stored as f64 for lossless
-    // carry-forward. `send_map` carries these forward when a caller supplies
-    // only a subset of the declared fields, so partial updates stay
-    // consistent with the robot's actual state. Seeded with 0.0, so fields
-    // never sent resolve to 0.
-    last_values: Mutex<Vec<f64>>,
-    /// Field indices already reported as saturating. Each field warns at
-    /// most once per publisher lifetime to keep the hot path quiet.
-    warned_saturated: Mutex<HashSet<usize>>,
-    /// Keys the caller sent that aren't in the schema. Logged once each so
-    /// typos are visible without spamming per packet.
-    warned_unknown_keys: Mutex<HashSet<String>>,
+    task: JoinHandle<()>,
 }
 
-impl DataPublisher {
-    pub fn new(
-        schema: &[FieldSpec],
-        topic: &str,
-        reliable: bool,
-        local_participant: LocalParticipant,
-        metrics: Arc<MetricsRegistry>,
-        stream: DataStream,
-    ) -> Self {
-        let (tx, mut rx) = mpsc::channel::<DataPacket>(PUBLISH_QUEUE_CAP);
+impl Lane {
+    fn spawn(local_participant: LocalParticipant, capacity: usize) -> Self {
+        let (tx, mut rx) = mpsc::channel::<DataPacket>(capacity);
         let task = tokio::spawn(async move {
             while let Some(packet) = rx.recv().await {
                 if let Err(e) = local_participant.publish_data(packet).await {
@@ -94,424 +46,73 @@ impl DataPublisher {
                 }
             }
         });
-        let schema = schema.to_vec();
-        let fingerprint = match stream {
-            DataStream::State => schema_fingerprint(&schema),
-            DataStream::Action => action_fingerprint(&schema),
-        };
-        let last_values = Mutex::new(vec![0.0; schema.len()]);
-        Self {
-            schema,
-            fingerprint,
-            topic: topic.to_string(),
-            reliable,
-            tx,
-            task: Some(task),
-            metrics,
-            stream,
-            last_values,
-            warned_saturated: Mutex::new(HashSet::new()),
-            warned_unknown_keys: Mutex::new(HashSet::new()),
-        }
-    }
-
-    /// Send from a map of typed values, reordering to declared field
-    /// order. Missing fields inherit their last sent value (0.0 if never
-    /// sent) — partial updates carry forward prior state instead of
-    /// silently zeroing it. Keys absent from the schema are logged once
-    /// per key, then ignored.
-    ///
-    /// Each value's `TypedValue` variant must match the declared dtype
-    /// for its field; a mismatch returns `PortalError::DtypeMismatch`
-    /// and no packet is sent. This rejects at the earliest point so a
-    /// bug in caller code fails loud instead of silently round-tripping
-    /// through an unintended cast.
-    ///
-    /// Typed values are widened to `f64` via `TypedValue::as_f64` before
-    /// carry-forward; the widening is lossless for every supported dtype.
-    ///
-    /// Returns the f64 vector that was actually shipped on the wire — that
-    /// is, the post-carry-forward, post-saturation snapshot the receiver
-    /// will reconstruct after decode. The active-operator self-echo path
-    /// uses this to record exactly what the robot will execute, even when
-    /// the caller passed a partial update or an out-of-range value.
-    pub fn send_map(
-        &self,
-        map: &HashMap<String, TypedValue>,
-        timestamp_us: Option<u64>,
-        in_reply_to_ts_us: Option<u64>,
-    ) -> PortalResult<Vec<f64>> {
-        self.check_dtypes(map)?;
-        self.warn_unknown_keys(map);
-        let ts = timestamp_us.unwrap_or_else(now_us);
-        let (payload, saturated_indices, wire_values) = {
-            let mut last = self.last_values.lock();
-            apply_carry_forward(&self.schema, &mut last, map);
-            let out = match self.stream {
-                DataStream::State => serialize_values(self.fingerprint, ts, &last, &self.schema),
-                DataStream::Action => {
-                    serialize_action(self.fingerprint, ts, in_reply_to_ts_us, &last, &self.schema)
-                }
-            };
-            // Compute the f64 view a receiver would reconstruct: each value
-            // round-tripped through its declared dtype so out-of-range
-            // inputs reflect the saturated wire bytes, matching what
-            // `deserialize_action` plus `to_value_maps` produce on the
-            // other side. Cheap (one match per field, no allocation
-            // beyond the result vec).
-            let wire_values: Vec<f64> = last
-                .iter()
-                .zip(self.schema.iter())
-                .map(|(v, f)| TypedValue::from_f64(*v, f.dtype).as_f64())
-                .collect();
-            (out.payload, out.saturated_indices, wire_values)
-        };
-        if !saturated_indices.is_empty() {
-            self.warn_saturated(&saturated_indices);
-        }
-        let packet = DataPacket {
-            payload,
-            topic: Some(self.topic.clone()),
-            reliable: self.reliable,
-            destination_identities: Vec::new(),
-        };
-        match self.tx.try_send(packet) {
-            Ok(()) => {
-                self.metrics.bump_sent(self.stream);
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                log::warn!(
-                    "[publish-full] topic '{}' queue full (cap={}), dropping packet",
-                    self.topic,
-                    PUBLISH_QUEUE_CAP
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                // Send task is gone (disconnect / drop). Silent — caller is
-                // already in teardown.
-            }
-        }
-        Ok(wire_values)
-    }
-
-    /// Reject on the first field whose `TypedValue` variant does not
-    /// match the declared dtype. Keys absent from the schema are ignored
-    /// here — they're already reported via `warn_unknown_keys`.
-    fn check_dtypes(&self, map: &HashMap<String, TypedValue>) -> PortalResult<()> {
-        for field in &self.schema {
-            if let Some(v) = map.get(&field.name)
-                && v.dtype() != field.dtype
-            {
-                return Err(PortalError::DtypeMismatch {
-                    field: field.name.clone(),
-                    expected: field.dtype,
-                    got: v.variant_name(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn warn_unknown_keys(&self, map: &HashMap<String, TypedValue>) {
-        // Small schemas make a linear scan faster than a HashSet lookup.
-        for key in map.keys() {
-            if self.schema.iter().any(|f| &f.name == key) {
-                continue;
-            }
-            let mut warned = self.warned_unknown_keys.lock();
-            if warned.insert(key.clone()) {
-                log::warn!(
-                    "[unknown-field] topic '{}': field '{}' not in schema, ignored",
-                    self.topic,
-                    key
-                );
-            }
-        }
-    }
-
-    fn warn_saturated(&self, indices: &[usize]) {
-        let mut warned = self.warned_saturated.lock();
-        for &i in indices {
-            if warned.insert(i) {
-                let field = &self.schema[i];
-                log::warn!(
-                    "[saturated] topic '{}': field '{}' clamped to {:?} range",
-                    self.topic,
-                    field.name,
-                    field.dtype
-                );
-            }
-        }
+        Self { tx, task }
     }
 }
 
-/// Update `last` in place with values from `map` for each declared field,
-/// leaving other slots untouched (carry-forward). Typed values are
-/// lossless-widened to `f64` on the way in.
-fn apply_carry_forward(schema: &[FieldSpec], last: &mut [f64], map: &HashMap<String, TypedValue>) {
-    for (i, field) in schema.iter().enumerate() {
-        if let Some(v) = map.get(&field.name) {
-            last[i] = v.as_f64();
-        }
-    }
-}
-
-impl Drop for DataPublisher {
+impl Drop for Lane {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.task.abort();
     }
 }
 
-// --- Receiver (dispatches DataReceived events) ---
-
-/// Push-callback + latest-wins slot for a single typed record (Action or
-/// State). Paired so receivers and getters share one allocation.
-pub(crate) struct DataSlot<R: Clone> {
-    #[allow(clippy::type_complexity)]
-    pub cb: Mutex<Option<Box<dyn Fn(&R) + Send + Sync>>>,
-    pub latest: Mutex<Option<R>>,
-    /// Peer fingerprints already reported as mismatched. Logged once per
-    /// unique offender to surface schema drift without spamming.
-    warned_mismatches: Mutex<HashSet<u32>>,
+/// Per-connection publish queues.
+pub(crate) struct Lanes {
+    state: Lane,
+    action: Lane,
+    clock: Lane,
 }
 
-impl<R: Clone> DataSlot<R> {
-    pub fn new() -> Self {
+pub(crate) struct Publish {
+    pub topic: &'static str,
+    pub payload: Vec<u8>,
+    pub reliable: bool,
+    pub destinations: Vec<String>,
+}
+
+impl Lanes {
+    pub fn new(local_participant: &LocalParticipant) -> Self {
         Self {
-            cb: Mutex::new(None),
-            latest: Mutex::new(None),
-            warned_mismatches: Mutex::new(HashSet::new()),
+            state: Lane::spawn(local_participant.clone(), PUBLISH_QUEUE_CAP),
+            action: Lane::spawn(local_participant.clone(), PUBLISH_QUEUE_CAP),
+            clock: Lane::spawn(local_participant.clone(), CLOCK_QUEUE_CAP),
         }
     }
 
-    /// Fire the callback by reference, then hand ownership to the
-    /// latest-wins slot.
-    ///
-    /// Callbacks run on a tokio worker thread; a panic inside user code
-    /// would abort that worker and kill the receive loop. Catching here
-    /// keeps the stream alive; the panic is logged and the latest slot
-    /// is still updated so pull-based getters continue to work.
-    pub(crate) fn deliver(&self, record: R) {
-        if let Some(cb) = self.cb.lock().as_ref() {
-            let result = catch_unwind(AssertUnwindSafe(|| cb(&record)));
-            if result.is_err() {
-                log::error!("[callback-panic] user callback panicked, receive loop continues");
+    /// Queue a packet without blocking. Topics without a lane (keypoints)
+    /// are published by their caller, which awaits the result.
+    pub fn send(&self, publish: Publish) {
+        let lane = match publish.topic {
+            STATE_TOPIC => &self.state,
+            ACTION_TOPIC => &self.action,
+            CLOCK_TOPIC => &self.clock,
+            topic => {
+                log::warn!("[publish-failed] no queue for topic '{topic}'");
+                return;
             }
-        }
-        *self.latest.lock() = Some(record);
-    }
-
-    pub fn get(&self) -> Option<R> {
-        self.latest.lock().clone()
-    }
-
-    pub fn clear(&self) {
-        *self.latest.lock() = None;
-    }
-
-    pub(crate) fn warn_mismatch(&self, topic: &str, expected: u32, got: u32) {
-        let mut warned = self.warned_mismatches.lock();
-        if warned.insert(got) {
-            log::warn!(
-                "[schema-mismatch] topic '{topic}': peer schema 0x{got:08x} != ours 0x{expected:08x}, dropping packet"
-            );
+        };
+        let topic = publish.topic;
+        match lane.tx.try_send(packet(publish)) {
+            Ok(()) => {}
+            // Clock packets are dropped quietly: the next ping replaces them.
+            Err(mpsc::error::TrySendError::Full(_)) if topic != CLOCK_TOPIC => {
+                log::warn!(
+                    "[publish-full] topic '{topic}' queue full (cap={PUBLISH_QUEUE_CAP}), dropping packet"
+                );
+            }
+            // Full clock lane, or the send task is gone (disconnect): the
+            // caller is already in teardown.
+            Err(_) => {}
         }
     }
 }
 
-pub(crate) type ActionSlot = DataSlot<Action>;
-pub(crate) type StateSlot = DataSlot<State>;
-
-/// Build an `Action` from the schema and the decoded f64 values. Kept
-/// here so `handle_data_received` and any test helpers share the same
-/// path. `sender` is the identity of the operator that produced this
-/// action (set at gate time, or to the publisher's identity on the
-/// local echo path).
-/// Who sent an action and whether the gate counted it as active, both
-/// decided when the packet passed the gate.
-pub(crate) struct ActionOrigin {
-    pub sender: String,
-    pub active: bool,
-}
-
-pub(crate) fn build_action(
-    timestamp_us: u64,
-    in_reply_to_ts_us: Option<u64>,
-    schema: &[FieldSpec],
-    values: &[f64],
-    origin: ActionOrigin,
-) -> Action {
-    let (typed, raw) = to_value_maps(schema, values);
-    let ActionOrigin { sender, active } = origin;
-    Action { values: typed, raw_values: raw, timestamp_us, in_reply_to_ts_us, sender, active }
-}
-
-fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State {
-    let (typed, raw) = to_value_maps(schema, values);
-    State { values: typed, raw_values: raw, timestamp_us }
-}
-
-/// Handle a `DataReceived` event. Pushes into the sync buffer if applicable and
-/// returns any observations/drops that resulted, for the caller to dispatch
-/// outside any locks.
-///
-/// `origin` is the publisher's identity and its active flag at gate time,
-/// stamped into the `Action` so recorders can label rows without consulting
-/// room state that may have moved on. Unused on the state path.
-///
-/// `received_at_us` is on the same clock as `Portal::now_us()`, so the robot's
-/// end-to-end latency compares its own frame timestamps against its own clock.
-/// Jitter uses the local arrival clock instead, which never steps with a sync
-/// correction.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_data_received(
-    payload: &[u8],
-    topic: &str,
-    config_role: Role,
-    action_schema: &[FieldSpec],
-    action_fp: u32,
-    state_schema: &[FieldSpec],
-    state_fp: u32,
-    action: &ActionSlot,
-    state: &StateSlot,
-    sync_buffer: Option<&Arc<Mutex<SyncBuffer>>>,
-    metrics: &MetricsRegistry,
-    origin: ActionOrigin,
-    received_at_us: u64,
-) -> SyncOutput {
-    match (config_role, topic) {
-        (_, ACTION_TOPIC) => match deserialize_action(payload, action_fp, action_schema) {
-            Ok((send_ts, in_reply_to_ts_us, values)) => {
-                metrics.record_received(DataStream::Action, send_ts, anchored_now_us());
-                metrics.record_e2e(in_reply_to_ts_us, received_at_us);
-                action.deliver(build_action(
-                    send_ts,
-                    in_reply_to_ts_us,
-                    action_schema,
-                    &values,
-                    origin,
-                ));
-            }
-            Err(DecodeError::SchemaMismatch { expected, got }) => {
-                action.warn_mismatch(topic, expected, got);
-            }
-            Err(DecodeError::Malformed(e)) => {
-                log::warn!("[bad-payload] action deserialize failed: {e}");
-            }
-        },
-        (Role::Operator | Role::Observer, STATE_TOPIC) => {
-            match deserialize_values(payload, state_fp, state_schema) {
-                Ok((timestamp_us, values)) => {
-                    metrics.record_received(DataStream::State, timestamp_us, anchored_now_us());
-                    state.deliver(build_state(timestamp_us, state_schema, &values));
-                    if let Some(sb) = sync_buffer {
-                        return sb.lock().push_state(timestamp_us, values);
-                    }
-                }
-                Err(DecodeError::SchemaMismatch { expected, got }) => {
-                    state.warn_mismatch(topic, expected, got);
-                }
-                Err(DecodeError::Malformed(e)) => {
-                    log::warn!("[bad-payload] state deserialize failed: {e}");
-                }
-            }
-        }
-        _ => {}
-    }
-    SyncOutput::empty()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn carry_forward_fills_missing_fields() {
-        let schema = vec![
-            FieldSpec::new("j1", DType::F64),
-            FieldSpec::new("j2", DType::F64),
-            FieldSpec::new("j3", DType::F64),
-        ];
-        let mut last = vec![0.0; 3];
-
-        let m: HashMap<String, TypedValue> =
-            [("j1".to_string(), TypedValue::F64(1.0))].into_iter().collect();
-        apply_carry_forward(&schema, &mut last, &m);
-        assert_eq!(last, vec![1.0, 0.0, 0.0], "unsent fields start at seed (0.0)");
-
-        let m: HashMap<String, TypedValue> =
-            [("j2".to_string(), TypedValue::F64(2.5))].into_iter().collect();
-        apply_carry_forward(&schema, &mut last, &m);
-        assert_eq!(last, vec![1.0, 2.5, 0.0], "j1 carries forward; j2 updates; j3 still at seed");
-
-        let m: HashMap<String, TypedValue> =
-            [("j1".to_string(), TypedValue::F64(-1.0)), ("j3".to_string(), TypedValue::F64(7.0))]
-                .into_iter()
-                .collect();
-        apply_carry_forward(&schema, &mut last, &m);
-        assert_eq!(last, vec![-1.0, 2.5, 7.0], "j2 carries forward when omitted; others update");
-    }
-
-    #[test]
-    fn check_dtypes_rejects_variant_mismatch() {
-        // A publisher is heavy to spin up (needs a live LocalParticipant),
-        // but the core logic of `check_dtypes` only needs the schema and
-        // the input map. Exercise the free function directly on a fake
-        // publisher-like setup.
-        fn check(
-            schema: &[FieldSpec],
-            map: &HashMap<String, TypedValue>,
-        ) -> Result<(), (String, DType, &'static str)> {
-            for field in schema {
-                if let Some(v) = map.get(&field.name)
-                    && v.dtype() != field.dtype
-                {
-                    return Err((field.name.clone(), field.dtype, v.variant_name()));
-                }
-            }
-            Ok(())
-        }
-
-        let schema =
-            vec![FieldSpec::new("gripper", DType::Bool), FieldSpec::new("mode", DType::I8)];
-
-        // Correct variants pass.
-        let m: HashMap<String, TypedValue> = [
-            ("gripper".to_string(), TypedValue::Bool(true)),
-            ("mode".to_string(), TypedValue::I8(3)),
-        ]
-        .into_iter()
-        .collect();
-        assert!(check(&schema, &m).is_ok());
-
-        // Wrong variant for gripper.
-        let m: HashMap<String, TypedValue> =
-            [("gripper".to_string(), TypedValue::F32(1.0))].into_iter().collect();
-        let err = check(&schema, &m).unwrap_err();
-        assert_eq!(err.0, "gripper");
-        assert_eq!(err.1, DType::Bool);
-        assert_eq!(err.2, "F32");
-    }
-
-    #[test]
-    fn typed_inputs_widen_to_f64_losslessly() {
-        let schema = vec![
-            FieldSpec::new("joint", DType::F32),
-            FieldSpec::new("gripper", DType::Bool),
-            FieldSpec::new("mode", DType::I8),
-        ];
-        let mut last = vec![0.0; 3];
-
-        let m: HashMap<String, TypedValue> = [
-            ("joint".to_string(), 0.5f32.into()),
-            ("gripper".to_string(), true.into()),
-            ("mode".to_string(), 3i8.into()),
-        ]
-        .into_iter()
-        .collect();
-        apply_carry_forward(&schema, &mut last, &m);
-        assert_eq!(last, vec![0.5, 1.0, 3.0]);
+pub(crate) fn packet(publish: Publish) -> DataPacket {
+    let Publish { topic, payload, reliable, destinations } = publish;
+    DataPacket {
+        payload,
+        topic: Some(topic.to_string()),
+        reliable,
+        destination_identities: destinations.into_iter().map(Into::into).collect(),
     }
 }

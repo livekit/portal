@@ -24,6 +24,9 @@
 
 use std::collections::VecDeque;
 
+use crate::metrics::TimeSyncMetrics;
+use crate::types::TimeSyncSource;
+
 pub const CLOCK_TOPIC: &str = "portal_clock";
 
 const PING_KIND: u8 = 0;
@@ -315,6 +318,153 @@ impl MonotonicClock {
         self.applied_offset_us
     }
 }
+// --- Synced clock ---
+
+const UNSYNCED_PING_INTERVAL_US: u64 = 250_000;
+const SYNCED_PING_INTERVAL_US: u64 = 1_000_000;
+
+pub struct ClockOptions {
+    /// True on the robot: its own clock is the timeline, so it is synced
+    /// from the start.
+    pub is_reference: bool,
+    pub source: TimeSyncSource,
+}
+
+/// The clock a peer reads, plus the ping schedule that feeds it. Raw local
+/// time comes in from the driver; nothing here reads a clock. Outlives
+/// connections so `now` stays continuous across a reconnect.
+pub struct ClockSync {
+    options: ClockOptions,
+    clock: MonotonicClock,
+    estimator: OffsetEstimator,
+    /// Robot the estimator's samples came from. A different robot means a
+    /// different timeline, so the estimator starts over.
+    robot_identity: Option<String>,
+    /// Next ping, while connected as a non-robot peer.
+    next_ping_us: Option<u64>,
+    seq: u32,
+}
+
+impl ClockSync {
+    pub fn new(options: ClockOptions) -> Self {
+        let estimator = match options.is_reference {
+            true => OffsetEstimator::reference(),
+            false => OffsetEstimator::default(),
+        };
+        Self {
+            options,
+            clock: MonotonicClock::default(),
+            estimator,
+            robot_identity: None,
+            next_ping_us: None,
+            seq: 0,
+        }
+    }
+
+    pub fn now(&mut self, raw_us: u64) -> u64 {
+        self.clock.now(raw_us)
+    }
+
+    /// See `MonotonicClock::estimate`.
+    pub fn estimate(&mut self, raw_us: u64) -> u64 {
+        self.clock.estimate(raw_us)
+    }
+
+    /// Whether the exchange has produced an estimate yet, applied or not.
+    /// Drives the ping rate.
+    pub fn has_estimate(&self) -> bool {
+        self.estimator.is_synced()
+    }
+
+    pub fn metrics(&self) -> TimeSyncMetrics {
+        let trusted = self.options.is_reference || self.options.source == TimeSyncSource::System;
+        TimeSyncMetrics {
+            source: self.options.source,
+            synced: trusted || self.estimator.is_synced(),
+            offset_us: self.clock.applied_offset_us(),
+            uncertainty_us: match (self.options.is_reference, self.options.source) {
+                (true, _) => Some(0),
+                // Nothing is applied, so Portal can't bound the host clock's error.
+                (false, TimeSyncSource::System) => None,
+                (false, TimeSyncSource::Portal) => self.estimator.uncertainty_us(),
+            },
+            measured_offset_us: match self.options.is_reference {
+                true => None,
+                false => self.estimator.offset_us(),
+            },
+            resyncs: self.estimator.resyncs(),
+            samples_rejected: self.estimator.samples_rejected(),
+        }
+    }
+
+    pub fn reset_counters(&mut self) {
+        self.estimator.reset_counters();
+    }
+
+    /// Drops the estimate but keeps the applied offset, so `now` stays
+    /// continuous until a new estimate arrives. Called when the robot
+    /// leaves: whoever answers next may be a restarted robot with a new
+    /// clock, so the estimate starts over instead of rejecting the jump.
+    pub fn restart(&mut self) {
+        self.estimator = OffsetEstimator::default();
+        self.robot_identity = None;
+    }
+
+    /// Start pinging at `now_us` (non-robot peers, on connect).
+    pub fn start_pinging(&mut self, now_us: u64) {
+        if self.options.is_reference {
+            return;
+        }
+        self.restart();
+        self.seq = 0;
+        self.next_ping_us = Some(now_us);
+    }
+
+    pub fn stop_pinging(&mut self) {
+        self.next_ping_us = None;
+    }
+
+    pub fn next_ping_us(&self) -> Option<u64> {
+        self.next_ping_us
+    }
+
+    /// The ping due at `now_us`, if any. Advances the schedule whether or
+    /// not a robot is known to receive it; `None` for the packet means
+    /// there was no one to ping.
+    pub fn poll_ping(&mut self, now_us: u64, robot: Option<&str>) -> Option<(ClockPacket, String)> {
+        let next = self.next_ping_us.filter(|next| now_us >= *next)?;
+        let seq = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        let interval = match self.has_estimate() {
+            true => SYNCED_PING_INTERVAL_US,
+            false => UNSYNCED_PING_INTERVAL_US,
+        };
+        self.next_ping_us = Some(next + interval);
+        robot.map(|r| (ClockPacket::Ping { seq, t1: now_us }, r.to_string()))
+    }
+
+    pub fn record(&mut self, robot_identity: &str, sample: Sample) -> EstimatorEvent {
+        if self.robot_identity.as_deref() != Some(robot_identity) {
+            self.estimator = OffsetEstimator::default();
+            self.robot_identity = Some(robot_identity.to_string());
+        }
+        let event = self.estimator.push(sample);
+        // In system mode the estimate is only measured, never applied.
+        if self.options.source == TimeSyncSource::Portal
+            && let Some(offset) = self.estimator.offset_us()
+        {
+            self.clock.set_target(offset);
+        }
+        event
+    }
+
+    /// Whether a sync is surfaced to the user. In system mode the host
+    /// clock is already trusted, so there is nothing to announce.
+    pub fn announces_sync(&self) -> bool {
+        self.options.source != TimeSyncSource::System
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +706,94 @@ mod tests {
         // ~19.8 s at half speed down to 100 ms, then ~2 s at 95%.
         let elapsed = absorb(10 * S, 50);
         assert!((21 * S..=23 * S).contains(&elapsed), "{elapsed}");
+    }
+
+    fn clock(is_reference: bool, source: TimeSyncSource) -> ClockSync {
+        ClockSync::new(ClockOptions { is_reference, source })
+    }
+
+    #[test]
+    fn reference_clock_starts_synced() {
+        let robot = clock(true, TimeSyncSource::Portal);
+        assert!(robot.metrics().synced);
+        assert_eq!(robot.metrics().uncertainty_us, Some(0));
+        let operator = clock(false, TimeSyncSource::Portal);
+        assert!(!operator.metrics().synced);
+        assert_eq!(operator.metrics().uncertainty_us, None);
+    }
+
+    #[test]
+    fn new_robot_restarts_estimate() {
+        let mut clock = clock(false, TimeSyncSource::Portal);
+        for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
+            clock.record("robot-a", exchange(i * 250 * MS, 2 * S as i64, MS, MS, 0));
+        }
+        assert!(clock.has_estimate());
+        let event = clock.record("robot-b", exchange(2 * S, 7 * S as i64, MS, MS, 0));
+        assert_eq!(event, EstimatorEvent::Pending);
+        assert!(!clock.has_estimate());
+    }
+
+    #[test]
+    fn system_mode_measures_but_does_not_apply() {
+        let mut clock = clock(false, TimeSyncSource::System);
+        let m = clock.metrics();
+        assert!(m.synced, "system mode trusts the host clock from the start");
+        assert_eq!((m.uncertainty_us, m.measured_offset_us), (None, None));
+
+        for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
+            clock.record("robot", exchange(i * 250 * MS, 3 * S as i64, MS, MS, 0));
+        }
+        let m = clock.metrics();
+        assert_eq!(m.offset_us, 0);
+        assert_eq!(m.measured_offset_us, Some(3 * S as i64));
+        assert_eq!(clock.now(50 * S), 50 * S, "system mode reads the host clock unshifted");
+        assert!(!clock.announces_sync());
+    }
+
+    #[test]
+    fn portal_mode_applies_the_estimate() {
+        let mut clock = clock(false, TimeSyncSource::Portal);
+        for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
+            clock.record("robot", exchange(i * 250 * MS, 3 * S as i64, MS, MS, 0));
+        }
+        let m = clock.metrics();
+        assert_eq!((m.offset_us, m.measured_offset_us), (3 * S as i64, Some(3 * S as i64)));
+    }
+
+    #[test]
+    fn pings_four_times_a_second_until_synced_then_once_a_second() {
+        let mut clock = clock(false, TimeSyncSource::Portal);
+        let start = 10 * S;
+        clock.start_pinging(start);
+        assert_eq!(
+            clock.poll_ping(start, Some("robot")),
+            Some((ClockPacket::Ping { seq: 0, t1: start }, "robot".into()))
+        );
+        assert_eq!(clock.poll_ping(start + 249 * MS, Some("robot")), None);
+        assert_eq!(clock.next_ping_us(), Some(start + 250 * MS));
+        for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
+            clock.record("robot", exchange(start + i * MS, 0, MS, MS, 0));
+        }
+        assert!(clock.poll_ping(start + 250 * MS, Some("robot")).is_some());
+        assert_eq!(clock.next_ping_us(), Some(start + 1_250 * MS));
+    }
+
+    #[test]
+    fn schedule_advances_without_a_robot() {
+        let mut clock = clock(false, TimeSyncSource::Portal);
+        clock.start_pinging(0);
+        assert_eq!(clock.poll_ping(0, None), None);
+        assert_eq!(clock.next_ping_us(), Some(250 * MS));
+        let (packet, _) = clock.poll_ping(250 * MS, Some("robot")).expect("ping");
+        assert_eq!(packet, ClockPacket::Ping { seq: 1, t1: 250 * MS });
+    }
+
+    #[test]
+    fn the_robot_never_pings() {
+        let mut clock = clock(true, TimeSyncSource::Portal);
+        clock.start_pinging(0);
+        assert_eq!(clock.next_ping_us(), None);
+        assert_eq!(clock.poll_ping(S, Some("robot")), None);
     }
 }

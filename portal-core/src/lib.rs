@@ -22,13 +22,18 @@ pub mod clock;
 pub mod codec;
 pub mod config;
 pub mod config_file;
+mod core;
+pub mod data;
 pub mod dtype;
 pub mod error;
+pub mod frame;
+pub mod frame_video;
 #[doc(hidden)]
 pub mod keypoint;
 pub mod metrics;
 #[doc(hidden)]
 pub mod placeholder;
+pub mod presence;
 pub mod rpc;
 #[doc(hidden)]
 pub mod serialization;
@@ -36,6 +41,12 @@ pub mod serialization;
 pub mod sync_buffer;
 pub mod types;
 
+pub use crate::core::{
+    Connected, DataReceived, Event, Input, OpId, Output, ParticipantInfo, PortalCore,
+    RPC_CALLER_ROSTER_WAIT_US, RPC_NOT_AUTHORIZED, RPC_NOT_CONNECTED, RPC_SET_ATTRIBUTES_FAILED,
+    RpcId, RpcRequest, SET_ACTIVE_OPERATOR_RPC, SendAction, SendKeypoint, SendState,
+    SendVideoFrame, SetActiveOperator, Step, VideoRoute, VideoTransport,
+};
 pub use codec::Codec;
 pub use config::{
     DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, Resolution, VideoOptions,
@@ -44,10 +55,15 @@ pub use config::{
 pub use config_file::ConfigFileError;
 pub use dtype::DType;
 pub use error::{PortalError, PortalResult};
+pub use frame::FramePayload;
+pub use frame_video::{BYTE_STREAM_CHUNK_SIZE, FRAME_VIDEO_TOPIC};
 pub use keypoint::Keypoint;
 pub use metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
     TransportMetrics,
+};
+pub use presence::{
+    ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY,
 };
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
 pub use types::{

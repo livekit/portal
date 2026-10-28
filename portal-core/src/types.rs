@@ -165,14 +165,15 @@ pub struct State {
 }
 
 /// A synchronized observation: one state matched with one frame from every
-/// registered video track.
+/// registered video track. `F` is the frame payload: decoded RGB natively,
+/// or whatever handle a driver feeds the core (see `FramePayload`).
 #[derive(Debug, Clone)]
-pub struct Observation {
+pub struct Observation<F = VideoFrameData> {
     /// Typed per the declared state schema.
     pub state: HashMap<String, TypedValue>,
     /// Same payload as `state`, widened to `f64` (lossless).
     pub raw_state: HashMap<String, f64>,
-    pub frames: HashMap<String, VideoFrameData>,
+    pub frames: HashMap<String, F>,
     pub timestamp_us: u64,
 }
 

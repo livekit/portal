@@ -368,14 +368,15 @@ video stall.
 `try_sync` never calls user code. It returns a `SyncOutput`:
 
 ```rust
-pub(crate) struct SyncOutput {
-    pub observations: Vec<Observation>,
+pub struct SyncOutput<F> {
+    pub observations: Vec<Observation<F>>,
     pub drops: Vec<HashMap<String, TypedValue>>,
 }
 ```
 
-The caller releases the `SyncBuffer` mutex and **then** hands the output to
-`ObservationSink::dispatch`, which fires callbacks and updates a latest-wins slot.
+`PortalCore` turns it into `Event::Observation` and `Event::Drops` outputs. The
+driver releases the core's lock and **then** hands them to its sinks, which fire
+callbacks and update a latest-wins slot.
 
 Two reasons this matters.
 
@@ -514,9 +515,10 @@ Paths are relative to the repository root.
 | File | What is in it |
 |---|---|
 | `portal-core/src/sync_buffer.rs` | `SyncBuffer`, `SyncOutput`, the match algorithm, all cursor and blocker bookkeeping. |
-| `livekit-portal/src/portal.rs` | `ObservationSink`, the `EventContext` handed to the room event loop, Portal lifecycle. |
-| `livekit-portal/src/video.rs` | `VideoReceiver`. Converts a `VideoFrame` into `Arc<VideoFrameData>`, then calls `push_frame` and dispatches. |
-| `livekit-portal/src/data.rs` | `DataPublisher` and `handle_data_received`, which calls `push_state` and returns the `SyncOutput`. |
+| `portal-core/src/core.rs` | `PortalCore`: topic routing, the action gate, and the calls to `push_state` / `push_frame`. |
+| `portal-core/src/frame.rs` | `FramePayload`, the frame type the buffer is generic over, and the `omit` placeholder. |
+| `livekit-portal/src/video.rs` | `VideoReceiver`. Converts a decoded frame into `VideoFrameData` and feeds it to the core. |
+| `livekit-portal/src/sinks.rs` | Callbacks and latest-wins slots the core's events land in. |
 
 Tests for every edge case above are in the `tests` module at the bottom of
 `sync_buffer.rs`.

@@ -15,10 +15,12 @@
 mod clock;
 pub mod codec;
 mod data;
+mod driver;
 mod frame_video;
 mod jpeg;
 mod portal;
 pub mod rpc;
+mod sinks;
 mod video;
 
 pub use portal_core::{config, config_file, dtype, error, metrics, types};

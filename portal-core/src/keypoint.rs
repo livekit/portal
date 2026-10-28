@@ -15,10 +15,6 @@
 //! Keypoints: free-form `{type, payload}` annotations on the robot's clock.
 //! Portal delivers and records them but never interprets either field.
 
-use std::collections::HashSet;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -65,56 +61,8 @@ pub fn decode(bytes: &[u8], sender: String) -> Result<Keypoint, serde_json::Erro
     Ok(Keypoint { kind, payload, timestamp_us, sender })
 }
 
-type KeypointCb = Box<dyn Fn(&Keypoint) + Send + Sync>;
-
-/// Push-only delivery for keypoints, shared with the room event loop.
-#[doc(hidden)]
-pub struct KeypointSlot {
-    cb: Mutex<Option<KeypointCb>>,
-    /// Senders already warned about for a malformed packet, so a broken peer
-    /// logs once instead of on every packet.
-    warned: Mutex<HashSet<String>>,
-}
-
-impl Default for KeypointSlot {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl KeypointSlot {
-    pub fn new() -> Self {
-        Self { cb: Mutex::new(None), warned: Mutex::new(HashSet::new()) }
-    }
-
-    pub fn set_callback(&self, cb: KeypointCb) {
-        *self.cb.lock() = Some(cb);
-    }
-
-    pub fn deliver(&self, keypoint: &Keypoint) {
-        if let Some(cb) = self.cb.lock().as_ref()
-            && catch_unwind(AssertUnwindSafe(|| cb(keypoint))).is_err()
-        {
-            log::error!("[callback-panic] keypoint callback panicked, event loop continues");
-        }
-    }
-
-    pub fn handle_packet(&self, bytes: &[u8], sender: String) {
-        match decode(bytes, sender.clone()) {
-            Ok(keypoint) => self.deliver(&keypoint),
-            Err(e) => {
-                if self.warned.lock().insert(sender.clone()) {
-                    log::warn!("[bad-payload] keypoint from '{sender}' is not valid: {e}");
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
 
     fn map(value: Value) -> Map<String, Value> {
@@ -166,27 +114,5 @@ mod tests {
         ] {
             assert!(decode(bad, "x".into()).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
-    }
-
-    #[test]
-    fn slot_warns_once_per_sender_and_keeps_delivering() {
-        let slot = KeypointSlot::new();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink = seen.clone();
-        slot.set_callback(Box::new(move |kp| sink.lock().push(kp.kind.clone())));
-
-        slot.handle_packet(b"garbage", "broken".into());
-        slot.handle_packet(b"garbage", "broken".into());
-        slot.handle_packet(&encode("idle", &Map::new(), 1), "teleop".into());
-
-        assert_eq!(*seen.lock(), vec!["idle".to_string()]);
-        assert_eq!(slot.warned.lock().len(), 1);
-    }
-
-    #[test]
-    fn a_panicking_callback_does_not_propagate() {
-        let slot = KeypointSlot::new();
-        slot.set_callback(Box::new(|_| panic!("boom")));
-        slot.handle_packet(&encode("idle", &Map::new(), 1), "teleop".into());
     }
 }

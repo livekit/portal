@@ -14,13 +14,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use bytes::Bytes;
 
 use crate::config::FieldSpec;
+use crate::frame::FramePayload;
 use crate::metrics::MetricsRegistry;
-use crate::placeholder;
 use crate::types::*;
 
 #[cfg(test)]
@@ -30,7 +27,7 @@ use crate::dtype::DType;
 /// first drop in a burst logs immediately; further drops fold into a single
 /// summary emitted at most this often. Every drop is still counted in the
 /// `states_dropped` metric regardless of logging.
-const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
+const DROP_WARN_INTERVAL_US: u64 = 5_000_000;
 
 /// Rate-limiter state for the unsyncable-state drop warning. Wall-clock is
 /// used **only** to throttle the log line so a stalled video track doesn't
@@ -45,27 +42,26 @@ struct DropWarn {
     // warning, in microseconds. `newest_frame_ts - state_ts` at drop time.
     worst_ahead_us: u64,
     // When the last warning was emitted. `None` until the first drop.
-    last_log: Option<Instant>,
+    last_log_us: Option<u64>,
 }
 
 /// Holds a recurring warning to one line per `DROP_WARN_INTERVAL`. Logging
 /// only, like `DropWarn`.
 #[derive(Default)]
 struct LogThrottle {
-    last_log: Option<Instant>,
+    last_log_us: Option<u64>,
     held_back: u64,
 }
 
 impl LogThrottle {
     /// `Some(n)` when a warning is due, `n` being how many were held back
     /// since the last one.
-    fn due(&mut self) -> Option<u64> {
-        let now = Instant::now();
-        if self.last_log.is_some_and(|t| now.duration_since(t) < DROP_WARN_INTERVAL) {
+    fn due(&mut self, now_us: u64) -> Option<u64> {
+        if self.last_log_us.is_some_and(|t| now_us.saturating_sub(t) < DROP_WARN_INTERVAL_US) {
             self.held_back += 1;
             return None;
         }
-        self.last_log = Some(now);
+        self.last_log_us = Some(now_us);
         Some(std::mem::take(&mut self.held_back))
     }
 }
@@ -74,8 +70,8 @@ impl LogThrottle {
 /// (invoke callbacks, enqueue into the pull-based buffer) *after* releasing
 /// the SyncBuffer lock so slow consumers don't stall the hot path.
 #[doc(hidden)]
-pub struct SyncOutput {
-    pub observations: Vec<Observation>,
+pub struct SyncOutput<F> {
+    pub observations: Vec<Observation<F>>,
     /// State samples that could not be matched to a video frame. Typed
     /// per the declared state schema, same shape as `Observation.state`.
     /// Populated by sync-fail and state-buffer overflow. Under the default
@@ -87,7 +83,7 @@ pub struct SyncOutput {
     pub drops: Vec<HashMap<String, TypedValue>>,
 }
 
-impl SyncOutput {
+impl<F> SyncOutput<F> {
     pub fn empty() -> Self {
         Self { observations: Vec::new(), drops: Vec::new() }
     }
@@ -102,8 +98,8 @@ impl SyncOutput {
 /// `stale_observations_emitted` metric. The two are independent: a
 /// below-horizon frame is both drained (so it can't clog the buffer) and
 /// stale (the state is outside its tolerance).
-struct MatchSlot {
-    frame: Arc<VideoFrameData>,
+struct MatchSlot<F> {
+    frame: F,
     // If `Some(idx)`, drain `video_buffers[track][0..=idx]` on emit and
     // set `last_emitted_frames[track] = frame`. If `None`, the frame is
     // the stored last-emitted fallback — buffer and pointer stay put.
@@ -116,23 +112,21 @@ struct MatchSlot {
 }
 
 #[doc(hidden)]
-pub struct SyncBuffer {
+pub struct SyncBuffer<F> {
     track_names: Vec<String>,
     track_index: HashMap<String, usize>,
     // Parallel to `track_names`; indexed by track position.
-    video_buffers: Vec<VecDeque<Arc<VideoFrameData>>>,
+    video_buffers: Vec<VecDeque<F>>,
     state_buffer: VecDeque<(u64, Vec<f64>)>, // (timestamp_us, values)
     /// State schema — field names and their declared dtypes. Used to
     /// reconstruct typed values into each `Observation` emitted.
     state_schema: Vec<FieldSpec>,
     config: SyncConfig,
 
-    // Per-track cached placeholder pixels for `stall_behavior: omit`, with the
-    // geometry they were rendered for. Rebuilt only when a track's frame
-    // size changes, so a silent track costs one render rather than one per
-    // observation — the buffer is `W*H*3` and would otherwise be re-synthesized
-    // at the state rate for as long as the track stays down.
-    placeholders: Vec<Option<(u32, u32, Bytes)>>,
+    // Per-track last placeholder for `stall_behavior: omit`, handed back to
+    // `FramePayload::placeholder` so a silent track costs one render rather
+    // than one per observation.
+    placeholders: Vec<Option<F>>,
 
     // Per-track stall handling, parallel to `track_names`: how long to wait
     // for a silent track and how to resolve the moment when the wait ends.
@@ -153,14 +147,14 @@ pub struct SyncBuffer {
     blocker: Option<usize>,
 
     // Reused across try_sync calls to avoid allocating a match map per iteration.
-    matched_scratch: Vec<Option<MatchSlot>>,
+    matched_scratch: Vec<Option<MatchSlot<F>>>,
 
     // Per-track: the most recent frame emitted in an observation. Used as a
     // stale fallback when the current state has no in-range match, so no
     // observation is ever dropped due to missing video — the video "freezes"
     // on the last good frame instead. None until the track emits its first
     // frame.
-    last_emitted_frames: Vec<Option<Arc<VideoFrameData>>>,
+    last_emitted_frames: Vec<Option<F>>,
 
     // Overflow happens at the state or frame rate whenever one outpaces the
     // other, so its warnings are throttled. Metrics still count every drop.
@@ -172,9 +166,13 @@ pub struct SyncBuffer {
     drop_warn: DropWarn,
 
     metrics: Arc<MetricsRegistry>,
+
+    // Local time of the push being handled, for log throttling only. Set
+    // by the caller via `set_now`; never read by a sync decision.
+    now_us: u64,
 }
 
-impl SyncBuffer {
+impl<F: FramePayload> SyncBuffer<F> {
     /// `stall` is the per-track stall configuration, parallel to
     /// `video_track_names`. A length mismatch (or an empty vec) falls back to
     /// `config.default_stall` for every track, so test and embedding callers
@@ -192,16 +190,16 @@ impl SyncBuffer {
         let video_buffers = (0..track_names.len()).map(|_| VecDeque::new()).collect();
         let cursors = vec![0; track_names.len()];
         let video_overflow_warn = (0..track_names.len()).map(|_| LogThrottle::default()).collect();
-        let matched_scratch: Vec<Option<MatchSlot>> =
+        let matched_scratch: Vec<Option<MatchSlot<F>>> =
             (0..track_names.len()).map(|_| None).collect();
-        let last_emitted_frames = vec![None; track_names.len()];
+        let last_emitted_frames = (0..track_names.len()).map(|_| None).collect();
         let stall = if stall.len() == track_names.len() {
             stall
         } else {
             vec![config.default_stall; track_names.len()]
         };
         let any_max_lag = stall.iter().any(|s| s.max_lag_us.is_some());
-        let placeholders = vec![None; track_names.len()];
+        let placeholders = (0..track_names.len()).map(|_| None).collect();
         Self {
             track_names,
             track_index,
@@ -220,7 +218,13 @@ impl SyncBuffer {
             video_overflow_warn,
             drop_warn: DropWarn::default(),
             metrics,
+            now_us: 0,
         }
+    }
+
+    /// Local time of the push about to be handled. Only throttles warnings.
+    pub fn set_now(&mut self, now_us: u64) {
+        self.now_us = now_us;
     }
 
     /// Count one unsyncable-state drop and emit a throttled, self-explanatory
@@ -232,11 +236,11 @@ impl SyncBuffer {
         self.drop_warn.count += 1;
         self.drop_warn.worst_ahead_us = self.drop_warn.worst_ahead_us.max(ahead_us);
 
-        let now = Instant::now();
-        let elapsed = self.drop_warn.last_log.map(|t| now.duration_since(t));
+        let now = self.now_us;
+        let elapsed = self.drop_warn.last_log_us.map(|t| now.saturating_sub(t));
         let should_log = match elapsed {
             None => true,
-            Some(d) => d >= DROP_WARN_INTERVAL,
+            Some(d) => d >= DROP_WARN_INTERVAL_US,
         };
         if !should_log {
             return;
@@ -250,17 +254,17 @@ impl SyncBuffer {
                 "[sync-drop] dropping states: no frame within ±{range_ms:.0}ms of \
                  the state timestamp (video {ahead_ms:.0}ms ahead). Throttling \
                  further [sync-drop] warnings to once per {}s.",
-                DROP_WARN_INTERVAL.as_secs(),
+                DROP_WARN_INTERVAL_US / 1_000_000,
             ),
             // Sustained burst: one rolled-up summary per interval.
             Some(d) => log::warn!(
                 "[sync-drop] dropped {} more states in {:.0}s: no frame within \
                  ±{range_ms:.0}ms (video up to {ahead_ms:.0}ms ahead).",
                 self.drop_warn.count,
-                d.as_secs_f64(),
+                d as f64 / 1_000_000.0,
             ),
         }
-        self.drop_warn.last_log = Some(now);
+        self.drop_warn.last_log_us = Some(now);
         self.drop_warn.count = 0;
         self.drop_warn.worst_ahead_us = 0;
     }
@@ -284,33 +288,10 @@ impl SyncBuffer {
         let mut now = self.state_buffer.back().map(|(ts, _)| *ts).unwrap_or(0);
         for buf in &self.video_buffers {
             if let Some(frame) = buf.back() {
-                now = now.max(frame.timestamp_us);
+                now = now.max(frame.timestamp_us());
             }
         }
         now
-    }
-
-    /// Cached placeholder pixels for one track at one geometry.
-    ///
-    /// Free function over the cache slot rather than a `&mut self` method so
-    /// it can be called while the track's frame buffer is borrowed. Rendering
-    /// is deterministic, so caching on `(width, height)` is sound; a track
-    /// that renegotiates resolution simply re-renders once.
-    fn placeholder_pixels(
-        slot: &mut Option<(u32, u32, Bytes)>,
-        track_name: &str,
-        width: u32,
-        height: u32,
-    ) -> Bytes {
-        if let Some((w, h, data)) = slot
-            && *w == width
-            && *h == height
-        {
-            return data.clone();
-        }
-        let data = placeholder::render(width, height, track_name);
-        *slot = Some((width, height, data.clone()));
-        data
     }
 
     /// Build the typed state map once per emission. Separate so the two
@@ -321,7 +302,7 @@ impl SyncBuffer {
         to_value_maps(&self.state_schema, values).0
     }
 
-    pub fn push_frame(&mut self, track_name: &str, frame: Arc<VideoFrameData>) -> SyncOutput {
+    pub fn push_frame(&mut self, track_name: &str, frame: F) -> SyncOutput<F> {
         let idx = match self.track_index.get(track_name) {
             Some(&i) => i,
             None => return SyncOutput::empty(),
@@ -342,7 +323,7 @@ impl SyncBuffer {
             if let Some(tm) = self.metrics.track(track_name) {
                 tm.record_evictions(evicted as u64);
             }
-            if let Some(held_back) = self.video_overflow_warn[idx].due() {
+            if let Some(held_back) = self.video_overflow_warn[idx].due(self.now_us) {
                 log::warn!(
                     "[video-overflow] '{track_name}' buffer full, evicted {evicted} frame(s) \
                      ({held_back} more evictions since the last warning)"
@@ -372,7 +353,7 @@ impl SyncBuffer {
         if should_run { self.try_sync() } else { SyncOutput::empty() }
     }
 
-    pub fn push_state(&mut self, timestamp_us: u64, values: Vec<f64>) -> SyncOutput {
+    pub fn push_state(&mut self, timestamp_us: u64, values: Vec<f64>) -> SyncOutput<F> {
         let old_head_ts = self.state_buffer.front().map(|(ts, _)| *ts);
         self.state_buffer.push_back((timestamp_us, values));
 
@@ -383,7 +364,7 @@ impl SyncBuffer {
         }
         if !overflow_drops.is_empty() {
             self.metrics.record_state_dropped(overflow_drops.len() as u64);
-            if let Some(held_back) = self.state_overflow_warn.due() {
+            if let Some(held_back) = self.state_overflow_warn.due(self.now_us) {
                 log::warn!(
                     "[state-overflow] state buffer full ({}), dropped {} oldest \
                      ({held_back} more overflows since the last warning)",
@@ -424,7 +405,7 @@ impl SyncBuffer {
         self.drop_warn = DropWarn::default();
     }
 
-    fn try_sync(&mut self) -> SyncOutput {
+    fn try_sync(&mut self) -> SyncOutput<F> {
         let mut output = SyncOutput::empty();
         let range = self.config.search_range_us;
 
@@ -484,12 +465,12 @@ impl SyncBuffer {
                     }
                     // Rewind if the cursor is already past state_ts (can happen if
                     // states arrive out of order on unreliable delivery).
-                    while *cursor > 0 && frame_buf[*cursor].timestamp_us > state_ts {
+                    while *cursor > 0 && frame_buf[*cursor].timestamp_us() > state_ts {
                         *cursor -= 1;
                     }
                     // Advance while the next frame is still at or before state_ts.
                     while *cursor + 1 < frame_buf.len()
-                        && frame_buf[*cursor + 1].timestamp_us <= state_ts
+                        && frame_buf[*cursor + 1].timestamp_us() <= state_ts
                     {
                         *cursor += 1;
                     }
@@ -500,7 +481,7 @@ impl SyncBuffer {
                         [Some(cursor_val), cursor_val.checked_add(1)].into_iter().flatten()
                     {
                         if let Some(f) = frame_buf.get(candidate) {
-                            let d = state_ts.abs_diff(f.timestamp_us);
+                            let d = state_ts.abs_diff(f.timestamp_us());
                             if d >= range || d >= best_delta {
                                 continue;
                             }
@@ -509,7 +490,7 @@ impl SyncBuffer {
                             // greedy head-state from stealing its neighbor's frame
                             // when tolerance > 1 tick.
                             if let Some(nts) = next_state_ts
-                                && nts.abs_diff(f.timestamp_us) < d
+                                && nts.abs_diff(f.timestamp_us()) < d
                             {
                                 continue;
                             }
@@ -542,7 +523,7 @@ impl SyncBuffer {
                 // `video_buffer_size` frames.) `>=` matches the strict
                 // `d < range` match rule: a frame at exactly `state_ts +
                 // range` is not a match, so the state cannot match it either.
-                let newest_ts = frame_buf.back().map(|f| f.timestamp_us);
+                let newest_ts = frame_buf.back().map(|f| f.timestamp_us());
                 let unmatchable = newest_ts.is_some_and(|n| n >= state_ts.saturating_add(range));
 
                 // Otherwise a future frame could still land in range, so we
@@ -578,8 +559,8 @@ impl SyncBuffer {
                         if !frame_buf.is_empty() {
                             let c = self.cursors[track_i];
                             let cand = &frame_buf[c];
-                            if cand.timestamp_us <= state_ts
-                                && state_ts - cand.timestamp_us >= range
+                            if cand.timestamp_us() <= state_ts
+                                && state_ts - cand.timestamp_us() >= range
                             {
                                 self.matched_scratch[track_i] = Some(MatchSlot {
                                     frame: cand.clone(),
@@ -606,21 +587,13 @@ impl SyncBuffer {
                     // reporting the true age of the newest real pixels rather
                     // than a flattering zero.
                     StallBehavior::Omit => {
-                        if let Some(last) = self.last_emitted_frames[track_i].clone() {
-                            let data = Self::placeholder_pixels(
-                                &mut self.placeholders[track_i],
-                                &self.track_names[track_i],
-                                last.width,
-                                last.height,
-                            );
+                        if let Some(last) = &self.last_emitted_frames[track_i] {
+                            let cached = &mut self.placeholders[track_i];
+                            let frame =
+                                last.placeholder(&self.track_names[track_i], cached.as_ref());
+                            *cached = Some(frame.clone());
                             self.matched_scratch[track_i] = Some(MatchSlot {
-                                frame: Arc::new(VideoFrameData {
-                                    width: last.width,
-                                    height: last.height,
-                                    data,
-                                    timestamp_us: last.timestamp_us,
-                                    source: FrameSource::Omitted,
-                                }),
+                                frame,
                                 drain_to: None,
                                 source: FrameSource::Omitted,
                             });
@@ -676,7 +649,7 @@ impl SyncBuffer {
             let mut any_stale = false;
             for slot in &self.matched_scratch {
                 if let Some(s) = slot.as_ref() {
-                    worst_delta = worst_delta.max(state_ts.abs_diff(s.frame.timestamp_us));
+                    worst_delta = worst_delta.max(state_ts.abs_diff(s.frame.timestamp_us()));
                     if s.source == FrameSource::Stale {
                         any_stale = true;
                     }
@@ -689,8 +662,7 @@ impl SyncBuffer {
 
             let (ts, values) = self.state_buffer.pop_front().unwrap();
 
-            let mut frames_map: HashMap<String, VideoFrameData> =
-                HashMap::with_capacity(self.track_names.len());
+            let mut frames_map: HashMap<String, F> = HashMap::with_capacity(self.track_names.len());
             for track_i in 0..self.track_names.len() {
                 if let Some(slot) = self.matched_scratch[track_i].take() {
                     if let Some(idx) = slot.drain_to {
@@ -709,11 +681,10 @@ impl SyncBuffer {
                     // last-emitted untouched so a future in-range frame can
                     // still be claimed by a later state.
                     //
-                    // Cheap clone: VideoFrameData carries Arc<[u8]>. The
-                    // buffered frame is always stored as `Live`; stamp how it
-                    // was actually used on the copy handed to the consumer.
-                    let mut frame = (*slot.frame).clone();
-                    frame.source = slot.source;
+                    // The buffered frame is always stored as `Live`; stamp
+                    // how it was actually used on the copy handed out.
+                    let mut frame = slot.frame;
+                    frame.set_source(slot.source);
                     frames_map.insert(self.track_names[track_i].clone(), frame);
                 }
             }
@@ -748,33 +719,37 @@ mod tests {
     #[test]
     fn overflow_warnings_log_once_per_interval_with_a_count() {
         let mut t = LogThrottle::default();
-        assert_eq!(t.due(), Some(0));
-        assert_eq!(t.due(), None);
-        assert_eq!(t.due(), None);
-        t.last_log = Some(Instant::now() - DROP_WARN_INTERVAL);
-        assert_eq!(t.due(), Some(2));
-        assert_eq!(t.due(), None);
+        let start = 1_000_000;
+        assert_eq!(t.due(start), Some(0));
+        assert_eq!(t.due(start + 1), None);
+        assert_eq!(t.due(start + DROP_WARN_INTERVAL_US - 1), None);
+        assert_eq!(t.due(start + DROP_WARN_INTERVAL_US), Some(2));
+        assert_eq!(t.due(start + DROP_WARN_INTERVAL_US + 1), None);
     }
 
-    fn make_frame(track: &str, ts: u64) -> (String, Arc<VideoFrameData>) {
+    fn make_frame(track: &str, ts: u64) -> (String, VideoFrameData) {
         (
             track.to_string(),
-            Arc::new(VideoFrameData {
+            VideoFrameData {
                 width: 2,
                 height: 2,
                 data: bytes::Bytes::from(vec![0u8; 12]),
                 timestamp_us: ts,
                 source: FrameSource::Live,
-            }),
+            },
         )
     }
 
-    fn push_f(buf: &mut SyncBuffer, track: &str, ts: u64) -> SyncOutput {
+    fn push_f(
+        buf: &mut SyncBuffer<VideoFrameData>,
+        track: &str,
+        ts: u64,
+    ) -> SyncOutput<VideoFrameData> {
         let (name, frame) = make_frame(track, ts);
         buf.push_frame(&name, frame)
     }
 
-    fn mk(names: &[String], fields: Vec<String>, config: SyncConfig) -> SyncBuffer {
+    fn mk(names: &[String], fields: Vec<String>, config: SyncConfig) -> SyncBuffer<VideoFrameData> {
         let metrics = Arc::new(MetricsRegistry::new(names));
         // Tests were written before typed fields — default every name to F64
         // so the internal observation builder has a dtype per position.
@@ -1413,26 +1388,26 @@ mod tests {
         // Fresh emission #1.
         let _ = buf.push_frame(
             "cam1",
-            Arc::new(VideoFrameData {
+            VideoFrameData {
                 width: 2,
                 height: 2,
                 data: bytes::Bytes::from(vec![0u8; 12]),
                 timestamp_us: 1_000,
                 source: FrameSource::Live,
-            }),
+            },
         );
         let _ = buf.push_state(1_050, vec![1.0]);
 
         // Fresh emission #2.
         let _ = buf.push_frame(
             "cam1",
-            Arc::new(VideoFrameData {
+            VideoFrameData {
                 width: 2,
                 height: 2,
                 data: bytes::Bytes::from(vec![0u8; 12]),
                 timestamp_us: 2_000,
                 source: FrameSource::Live,
-            }),
+            },
         );
         let _ = buf.push_state(2_050, vec![2.0]);
 

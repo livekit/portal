@@ -97,7 +97,10 @@ impl Shared {
 
     /// Step the core and carry out what it returns, outside the lock.
     pub fn step(&self, input: Input<'_, VideoFrameData>) {
-        let out = self.core.lock().handle(Step { input, now_us: self.now_us() });
+        // Read before locking: a clock packet's arrival time must not
+        // include the wait for the lock.
+        let now_us = self.now_us();
+        let out = self.core.lock().handle(Step { input, now_us });
         self.execute(out);
     }
 
@@ -298,13 +301,14 @@ impl Portal {
             .into_values()
             .map(|p| (p.identity().as_str().to_string(), wire::presence(&p.attributes())))
             .collect();
+        let now_us = self.shared.now_us();
         let connected = self.shared.core.lock().connect(Connect {
             local_peer: local_participant.identity().as_str().to_string(),
             // A token can seed the pointer, so the gate holds before anyone
             // calls `set_active_operator`.
             active_operator: wire::active_operator(&local_participant.attributes()),
             peers,
-            now_us: self.shared.now_us(),
+            now_us,
         });
         let out = match connected {
             Ok(out) => out,
@@ -351,10 +355,11 @@ impl Portal {
         height: u32,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
+        let now_us = self.shared.now_us();
         let route = self.shared.core.lock().send_video_frame(SendVideoFrame {
             track: track_name,
             timestamp_us,
-            now_us: self.shared.now_us(),
+            now_us,
         })?;
         // Publishers exist only while connected; before that the track has
         // nowhere to go.

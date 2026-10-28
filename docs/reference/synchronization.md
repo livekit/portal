@@ -514,9 +514,9 @@ Paths are relative to the repository root.
 
 | File | What is in it |
 |---|---|
-| `portal-core/src/sync_buffer.rs` | `SyncBuffer`, `SyncOutput`, the match algorithm, all cursor and blocker bookkeeping. |
-| `portal-core/src/core.rs` | `PortalCore`: topic routing, the action gate, and the calls to `push_state` / `push_frame`. |
-| `portal-core/src/frame.rs` | `FramePayload`, the frame type the buffer is generic over, and the `omit` placeholder. |
+| `livekit-portal-core/src/sync_buffer.rs` | `SyncBuffer`, `SyncOutput`, the match algorithm, all cursor and blocker bookkeeping. |
+| `livekit-portal-core/src/core.rs` | `PortalCore`: stream routing, the action gate, and the calls to `push_state` / `push_frame`. |
+| `livekit-portal-core/src/frame.rs` | `FramePayload`, the frame type the buffer is generic over, and the `omit` placeholder. |
 | `livekit-portal/src/video.rs` | `VideoReceiver`. Converts a decoded frame into `VideoFrameData` and feeds it to the core. |
 | `livekit-portal/src/sinks.rs` | Callbacks and latest-wins slots the core's events land in. |
 

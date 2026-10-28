@@ -30,10 +30,10 @@ env:
     libva-dev
 
 jobs:
-  # portal-core has no LiveKit, WebRTC or system deps, so it builds and tests
+  # livekit-portal-core has no LiveKit, WebRTC or system deps, so it builds and tests
   # in seconds and must keep building for the browser.
-  portal-core:
-    name: portal-core (native + wasm)
+  livekit-portal-core:
+    name: livekit-portal-core (native + wasm)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -46,11 +46,11 @@ jobs:
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
-      - name: cargo test -p portal-core
-        run: cargo test -p portal-core --locked
+      - name: cargo test -p livekit-portal-core
+        run: cargo test -p livekit-portal-core --locked
 
-      - name: cargo build -p portal-core (wasm32)
-        run: cargo build -p portal-core --locked --target wasm32-unknown-unknown
+      - name: cargo build -p livekit-portal-core (wasm32)
+        run: cargo build -p livekit-portal-core --locked --target wasm32-unknown-unknown
 
   rust:
     name: cargo test

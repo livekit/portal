@@ -5,7 +5,7 @@ edition = { workspace = true }
 license = { workspace = true }
 
 [dependencies]
-portal-core = { path = "../portal-core" }
+livekit-portal-core = { path = "../livekit-portal-core" }
 # `rustls-tls-native-roots`: livekit's default feature set doesn't enable any
 # TLS backend (its comment: "By default ws TLS is not enabled"). Without this
 # the signal client's HTTPS requests (/settings/regions, the WSS upgrade) fail

@@ -22,10 +22,10 @@ use std::time::Duration;
 
 use livekit::prelude::*;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
+use livekit_portal_core::Input;
+use livekit_portal_core::config::PortalConfig;
+use livekit_portal_core::types::Role;
 use parking_lot::Mutex;
-use portal_core::Input;
-use portal_core::config::PortalConfig;
-use portal_core::types::Role;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 

@@ -19,17 +19,17 @@
 
 use std::collections::HashMap;
 
-use portal_core::loopback::{
+use livekit_portal_core::loopback::{
     LinkConfig, Loopback, LoopbackOptions, PeerSpec, VideoSend, pubsub_caps, room_caps,
 };
-use portal_core::{
+use livekit_portal_core::{
     ActionSubscription, Codec, DType, Event, FrameSource, Input, Output, PRESENCE_TIMEOUT_US,
     PerformRpc, PortalConfig, PortalError, RPC_CALLER_ROSTER_WAIT_US, RPC_NOT_AUTHORIZED, Role,
     RpcError, RpcId, RpcRequest, SET_ACTIVE_OPERATOR_RPC, SendAction, SendKeypoint, SendState,
     SetActiveOperator, StallBehavior, Stream, TransportCaps, TypedValue, VideoFrameData,
     VideoOptions,
 };
-use portal_core::{Connect, CoreInit, PortalCore};
+use livekit_portal_core::{Connect, CoreInit, PortalCore};
 
 const MS: u64 = 1_000;
 const S: u64 = 1_000_000;
@@ -113,7 +113,7 @@ fn actions(events: &[Event<VideoFrameData>]) -> Vec<(String, f64, bool)> {
         .collect()
 }
 
-fn observations(events: &[Event<VideoFrameData>]) -> Vec<&portal_core::Observation> {
+fn observations(events: &[Event<VideoFrameData>]) -> Vec<&livekit_portal_core::Observation> {
     events
         .iter()
         .filter_map(|e| match e {
@@ -400,7 +400,7 @@ fn stall_omit_substitutes_a_placeholder() {
     let cam2 = &last.frames["cam2"];
     assert_eq!(cam2.source, FrameSource::Omitted);
     assert_eq!((cam2.width, cam2.height), (SIDE, SIDE));
-    assert_eq!(cam2.data, portal_core::placeholder::render(SIDE, SIDE, "cam2"));
+    assert_eq!(cam2.data, livekit_portal_core::placeholder::render(SIDE, SIDE, "cam2"));
     assert!(lb.core("op").metrics().sync.frames_omitted["cam2"] > 0);
 }
 
@@ -620,7 +620,7 @@ fn waiting_strangers_do_not_hold_up_other_callers() {
 
     // A caller whose role shows up during the wait is let in.
     lb.advance_clock(500 * MS);
-    let presence = portal_core::Presence::local(Role::Operator);
+    let presence = livekit_portal_core::Presence::local(Role::Operator);
     let out = lb.handle("robot", Input::PresenceChanged { peer: "late", presence });
     let admitted = replies(&mut lb, out);
     assert!(matches!(&admitted[..], [(RpcId(100), Ok(_))]));

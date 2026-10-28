@@ -21,10 +21,10 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use livekit_portal_core::Event;
+use livekit_portal_core::keypoint::Keypoint;
+use livekit_portal_core::types::{Action, Observation, State, TypedValue, VideoFrameData};
 use parking_lot::Mutex;
-use portal_core::Event;
-use portal_core::keypoint::Keypoint;
-use portal_core::types::{Action, Observation, State, TypedValue, VideoFrameData};
 
 type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
 type IdentityCb = Box<dyn Fn(&str) + Send + Sync>;

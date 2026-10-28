@@ -15,7 +15,7 @@
 //! Frame-video transport over LiveKit byte streams: one stream per frame on
 //! `portal_frame_video`, bypassing the WebRTC media path so the receiver
 //! gets exactly the bytes the publisher fed the codec. The wire format
-//! lives in `portal_core::frame_video`.
+//! lives in `livekit_portal_core::frame_video`.
 //!
 //! ## Latency floor
 //!
@@ -35,12 +35,12 @@ use std::sync::Arc;
 
 use livekit::StreamByteOptions;
 use livekit::prelude::*;
+use livekit_portal_core::Input;
+use livekit_portal_core::config::VideoTrackSpec;
+use livekit_portal_core::error::PortalResult;
+use livekit_portal_core::frame_video::{RgbFrame, build_frame_payload_with};
+use livekit_portal_core::metrics::TrackMetrics;
 use parking_lot::Mutex;
-use portal_core::Input;
-use portal_core::config::VideoTrackSpec;
-use portal_core::error::PortalResult;
-use portal_core::frame_video::{RgbFrame, build_frame_payload_with};
-use portal_core::metrics::TrackMetrics;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -174,7 +174,7 @@ pub(crate) fn spawn_receive(reader: livekit::ByteStreamReader, shared: Arc<Share
 
 #[cfg(test)]
 mod tests {
-    use portal_core::frame_video::{build_frame_payload, deserialize_frame};
+    use livekit_portal_core::frame_video::{build_frame_payload, deserialize_frame};
 
     use super::*;
 

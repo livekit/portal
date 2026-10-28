@@ -15,18 +15,18 @@
 //! Golden wire vectors. `fixtures/golden.json` pins the exact bytes Portal
 //! puts on the wire for known inputs, so any other implementation (the
 //! browser shell) can check itself against the same file. Regenerate with
-//! `PORTAL_UPDATE_GOLDEN=1 cargo test -p portal-core --test golden` only
+//! `PORTAL_UPDATE_GOLDEN=1 cargo test -p livekit-portal-core --test golden` only
 //! when the wire format is meant to change, which also means bumping
 //! `PROTOCOL_VERSION`.
 
 use std::path::PathBuf;
 
-use portal_core::clock::ClockPacket;
-use portal_core::serialization::{
+use livekit_portal_core::clock::ClockPacket;
+use livekit_portal_core::serialization::{
     action_fingerprint, deserialize_action, deserialize_values, schema_fingerprint,
     serialize_action, serialize_values,
 };
-use portal_core::{DType, FieldSpec, keypoint};
+use livekit_portal_core::{DType, FieldSpec, keypoint};
 use serde_json::{Value, json};
 
 const ALL_DTYPES: [DType; 9] = [

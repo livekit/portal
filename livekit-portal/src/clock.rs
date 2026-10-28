@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Local time sources. The sync math lives in `portal_core::clock`; the core
+//! Local time sources. The sync math lives in `livekit_portal_core::clock`; the core
 //! is handed raw local time from here on every step.
 
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use portal_core::types::TimeSyncSource;
+use livekit_portal_core::types::TimeSyncSource;
 
 /// Local time for the clock in `portal` mode: wall time at first use,
 /// advanced by a monotonic `Instant` so host clock steps (NTP) never reach

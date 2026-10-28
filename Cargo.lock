@@ -1676,13 +1676,27 @@ dependencies = [
  "cc",
  "futures-util",
  "livekit",
+ "livekit-portal-core",
  "log",
  "parking_lot",
- "portal-core",
  "serde_json",
  "tokio",
  "webrtc-sys-build",
  "yuv-sys",
+]
+
+[[package]]
+name = "livekit-portal-core"
+version = "0.2.8"
+dependencies = [
+ "bytes",
+ "image",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2185,20 +2199,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
 dependencies = [
  "portable-atomic",
-]
-
-[[package]]
-name = "portal-core"
-version = "0.2.8"
-dependencies = [
- "bytes",
- "image",
- "log",
- "parking_lot",
- "serde",
- "serde-saphyr",
- "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]

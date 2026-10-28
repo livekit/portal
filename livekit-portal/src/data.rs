@@ -18,7 +18,7 @@
 //! state packets would skew the round trip).
 
 use livekit::prelude::*;
-use portal_core::transport::Stream;
+use livekit_portal_core::transport::Stream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 

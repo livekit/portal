@@ -20,10 +20,10 @@
 
 use std::collections::HashMap;
 
-use portal_core::transport::{
+use livekit_portal_core::transport::{
     PROTOCOL_VERSION, Presence, Stream, TransportCaps, VideoCaps, parse_role, role_name,
 };
-use portal_core::types::Role;
+use livekit_portal_core::types::Role;
 
 /// Participant attribute keys used by Portal for role discovery and the
 /// multi-controller pointer. Namespaced to avoid colliding with any
@@ -179,9 +179,10 @@ mod tests {
     /// LiveKit topics too; they must agree with what this driver sends.
     #[test]
     fn topics_match_the_golden_fixtures() {
-        let fixtures: serde_json::Value =
-            serde_json::from_str(include_str!("../../portal-core/tests/fixtures/golden.json"))
-                .expect("fixtures parse");
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../livekit-portal-core/tests/fixtures/golden.json"
+        ))
+        .expect("fixtures parse");
         for s in [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint] {
             assert_eq!(fixtures["topics"][s.name()].as_str(), topic(s), "{}", s.name());
         }

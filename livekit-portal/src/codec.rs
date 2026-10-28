@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Frame-video codecs. Same as `portal_core::codec`, except MJPEG encodes
+//! Frame-video codecs. Same as `livekit_portal_core::codec`, except MJPEG encodes
 //! through the libjpeg-turbo inside libwebrtc (see `jpeg.rs`) rather than the
 //! pure-Rust encoder the core uses.
 
-pub use portal_core::codec::{
+pub use livekit_portal_core::codec::{
     Codec, CodecError, CodecResult, DecodedFrame, decode_frame, estimated_encoded_size,
 };
 
-/// See `portal_core::codec::encode_frame`.
+/// See `livekit_portal_core::codec::encode_frame`.
 pub fn encode_frame(
     rgb: &[u8],
     width: u32,
@@ -33,7 +33,7 @@ pub fn encode_frame(
     Ok(out)
 }
 
-/// See `portal_core::codec::encode_frame_into`.
+/// See `livekit_portal_core::codec::encode_frame_into`.
 pub fn encode_frame_into(
     out: &mut Vec<u8>,
     rgb: &[u8],
@@ -43,9 +43,11 @@ pub fn encode_frame_into(
     quality: u8,
 ) -> CodecResult<()> {
     if codec != Codec::Mjpeg {
-        return portal_core::codec::encode_frame_into(out, rgb, width, height, codec, quality);
+        return livekit_portal_core::codec::encode_frame_into(
+            out, rgb, width, height, codec, quality,
+        );
     }
-    portal_core::codec::check_rgb(rgb, width, height)?;
+    livekit_portal_core::codec::check_rgb(rgb, width, height)?;
     crate::jpeg::encode_rgb_into(out, rgb, width, height, quality)
         .ok_or_else(|| CodecError::EncodeFailed("libjpeg rejected the frame".into()))
 }
@@ -131,7 +133,7 @@ mod tests {
         for codec in [Codec::Raw, Codec::Png] {
             assert_eq!(
                 encode_frame(&rgb, 16, 8, codec, 0).unwrap(),
-                portal_core::codec::encode_frame(&rgb, 16, 8, codec, 0).unwrap()
+                livekit_portal_core::codec::encode_frame(&rgb, 16, 8, codec, 0).unwrap()
             );
         }
     }

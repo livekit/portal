@@ -32,11 +32,11 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use portal_core::Input;
-use portal_core::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
-use portal_core::error::{PortalError, PortalResult};
-use portal_core::metrics::TrackMetrics;
-use portal_core::types::{FrameSource, VideoFrameData};
+use livekit_portal_core::Input;
+use livekit_portal_core::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
+use livekit_portal_core::error::{PortalError, PortalResult};
+use livekit_portal_core::metrics::TrackMetrics;
+use livekit_portal_core::types::{FrameSource, VideoFrameData};
 
 use crate::clock::anchored_now_us;
 use crate::codec::Codec;

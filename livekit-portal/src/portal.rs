@@ -32,18 +32,18 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use livekit::prelude::*;
-use parking_lot::Mutex;
-use portal_core::config::{FieldSpec, PortalConfig};
-use portal_core::error::{PortalError, PortalResult};
-use portal_core::frame_video::FrameVideoTracks;
-use portal_core::keypoint::Keypoint;
-use portal_core::metrics::{MetricsRegistry, PortalMetrics};
-use portal_core::transport::{Delivery, Presence, Stream};
-use portal_core::types::*;
-use portal_core::{
+use livekit_portal_core::config::{FieldSpec, PortalConfig};
+use livekit_portal_core::error::{PortalError, PortalResult};
+use livekit_portal_core::frame_video::FrameVideoTracks;
+use livekit_portal_core::keypoint::Keypoint;
+use livekit_portal_core::metrics::{MetricsRegistry, PortalMetrics};
+use livekit_portal_core::transport::{Delivery, Presence, Stream};
+use livekit_portal_core::types::*;
+use livekit_portal_core::{
     Connect, CoreInit, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
     SendKeypoint, SendState, SendVideoFrame, SetActiveOperator, Step, VideoTransport,
 };
+use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -57,8 +57,8 @@ use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver};
 use crate::wire;
 
 pub use crate::wire::{ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY};
-pub use portal_core::SET_ACTIVE_OPERATOR_RPC;
-pub use portal_core::transport::PROTOCOL_VERSION;
+pub use livekit_portal_core::SET_ACTIVE_OPERATOR_RPC;
+pub use livekit_portal_core::transport::PROTOCOL_VERSION;
 
 /// State shared by `Portal`, the room event actor and the media tasks.
 pub(crate) struct Shared {
@@ -952,7 +952,7 @@ async fn set_active_operator_rpc(
     data: RpcInvocationData,
 ) -> Result<String, RpcError> {
     let not_connected =
-        || RpcError::new(portal_core::RPC_NOT_CONNECTED, "robot not connected", None);
+        || RpcError::new(livekit_portal_core::RPC_NOT_CONNECTED, "robot not connected", None);
     let rx = {
         let shared = shared.upgrade().ok_or_else(not_connected)?;
         let id = RpcId(shared.next_rpc.fetch_add(1, Ordering::Relaxed));

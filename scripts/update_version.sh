@@ -26,9 +26,9 @@ for file in "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/python/pyproject.toml"; do
     echo "updated $file"
 done
 
-# Every crate (portal-core, livekit-portal, livekit-portal-ffi) inherits the
+# Every crate (livekit-portal-core, livekit-portal, livekit-portal-ffi) inherits the
 # workspace version; fail loudly if one stops doing so and would be skipped.
-for crate in portal-core livekit-portal livekit-portal-ffi; do
+for crate in livekit-portal-core livekit-portal livekit-portal-ffi; do
     if ! grep -q '^version = { workspace = true }' "$REPO_ROOT/$crate/Cargo.toml"; then
         echo "error: $crate/Cargo.toml does not inherit the workspace version" >&2
         exit 1

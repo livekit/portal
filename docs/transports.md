@@ -1,6 +1,6 @@
 # Transports
 
-Portal's logic lives in `portal-core`, a sans-IO state machine that builds for
+Portal's logic lives in `livekit-portal-core`, a sans-IO state machine that builds for
 native and `wasm32-unknown-unknown`. It never touches a socket, a task or a
 clock. A **driver** feeds it transport events plus the local time and carries
 out what it returns. This page describes the transport model the core speaks and
@@ -9,7 +9,7 @@ how each transport maps onto it.
 | Transport | Status | Driver |
 |---|---|---|
 | LiveKit | implemented | `livekit-portal` (`src/wire.rs` holds the whole mapping) |
-| Loopback | implemented | `portal_core::loopback`, in-process, for tests |
+| Loopback | implemented | `livekit_portal_core::loopback`, in-process, for tests |
 | Media over QUIC | design only | — |
 
 ## The model
@@ -52,7 +52,7 @@ core polyfills the rest:
 `VideoCaps`:
 
 - `ByteFramesOnly`: only RAW/PNG/MJPEG, each frame as a Portal frame envelope
-  (`portal_core::frame_video`) carrying its own timestamp. Declaring a WebRTC
+  (`livekit_portal_core::frame_video`) carrying its own timestamp. Declaring a WebRTC
   codec (H264/VP8/VP9/AV1/H265) fails `connect` with a pointer to RAW, PNG or
   MJPEG.
 - `TransportEncoded`: the transport takes raw frames, encodes them and carries
@@ -107,9 +107,9 @@ before the split.
 
 ## Loopback (implemented)
 
-An in-process transport on a fake clock (`portal_core::loopback`), with per-link
+An in-process transport on a fake clock (`livekit_portal_core::loopback`), with per-link
 latency, jitter, loss and reordering, and per-peer clock skew. Scenario tests
-(`portal-core/tests/loopback.rs`) run whole sessions in plain `cargo test`.
+(`livekit-portal-core/tests/loopback.rs`) run whole sessions in plain `cargo test`.
 
 Its default caps (`pubsub_caps`) are deliberately MoQ-shaped, so a LiveKit-ism
 leaking into the core fails a test: broadcast only, no native RPC or presence,

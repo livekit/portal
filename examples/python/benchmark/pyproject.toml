@@ -1,7 +1,7 @@
 [project]
-name = "livekit-portal-inference-example"
+name = "livekit-portal-benchmark-example"
 version = "0.1.0"
-description = "VLA-style remote inference: observation-correlated actions over LiveKit Portal"
+description = "Measure Portal's latency and jitter per stream, plus the full capture-to-action loop"
 requires-python = ">=3.12"
 dependencies = [
     "livekit-portal",

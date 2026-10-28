@@ -397,18 +397,16 @@ Read [Concepts](02-concepts.md) for how participants exchange data and control.
 
 ## Try the shipped examples
 
-The examples include `.env` loading and periodic metrics output:
+Each example has one file per role, with helpers in `_common.py`:
 
 - [`examples/python/basic/`](../examples/python/basic). What you just built,
-  plus a YAML-config variant. No hardware.
-- [`examples/python/inference/`](../examples/python/inference). A VLA-shaped
-  loop that streams a planned horizon one action per tick, with end-to-end
-  latency metrics.
-- [`examples/python/modal-mock-inference/`](../examples/python/modal-mock-inference).
-  Runs the policy on [Modal](https://modal.com) and measures true
-  glass-to-glass latency.
+  with all three roles loading one `portal.yaml`. No hardware.
 - [`examples/python/so101/`](../examples/python/so101). Real hardware. A
-  physical SO-101 follower driven by a remote SO-101 leader.
+  physical SO-101 follower driven by a remote SO-101 leader, through the
+  LeRobot plugins.
+- [`examples/python/benchmark/`](../examples/python/benchmark). Measures
+  latency and jitter per stream, and for the full capture-to-action loop, on
+  your network.
 
 ## Build from source
 

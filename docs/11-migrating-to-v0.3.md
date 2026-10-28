@@ -32,9 +32,6 @@ for row in plan:
     await asyncio.sleep(1 / fps)
 ```
 
-[`examples/python/inference`](../examples/python/inference) does this with a
-fresh plan replacing the old one as it arrives.
-
 ## `action_subscription` names a mode
 
 The bool is gone. `set_action_subscription` and the yaml key take `none`,

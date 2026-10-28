@@ -1,11 +1,5 @@
-# Example portal config matching the basic/ robot.py + teleoperator.py
-# scripts. Loaded via `RobotConfig.from_yaml_file(...)`,
-# `OperatorConfig.from_yaml_file(...)` and `ObserverConfig.from_yaml_file(...)`
-# in robot_yaml.py, teleoperator_yaml.py, recorder.py and orchestrator.py.
-#
-# The file describes the shareable wire contract only: schemas, video
-# tracks, sync knobs. Identity (session, role, E2EE key) is supplied at
-# load time so the same file is reusable across robot and operator.
+# The wire contract every role loads: tracks, schemas and fps. Identity and
+# room are set in code, so one file serves the robot, teleoperator and observer.
 
 version: 1
 

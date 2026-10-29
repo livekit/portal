@@ -439,6 +439,10 @@ impl PortalConfig {
     ///   at the cost of occasional ±1-tick misalignment. A fair-share check
     ///   prevents an earlier state from stealing a frame closer to a later
     ///   state already in the buffer.
+    ///
+    /// A late frame is not a lost one: the state waits for its own frame
+    /// until a newer frame proves it lost, or the track's `max_lag` elapses.
+    /// Tolerance bounds how wrong a match may be, never how early it fires.
     /// - `> 2.0`: state may match T±2 frames. Higher recovery, higher
     ///   misalignment risk. Rarely worth it.
     ///
@@ -732,10 +736,12 @@ impl PortalConfig {
     #[doc(hidden)]
     pub fn sync_config(&self) -> SyncConfig {
         let search_range_us = (self.tolerance * 1_000_000.0 / self.fps as f32) as u64;
+        let native_range_us = search_range_us.min(500_000 / self.fps as u64);
         SyncConfig {
             video_buffer_size: self.slack,
             state_buffer_size: self.slack,
             search_range_us,
+            native_range_us,
             default_stall: self.default_stall(),
         }
     }

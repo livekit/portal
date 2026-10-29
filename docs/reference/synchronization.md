@@ -81,6 +81,13 @@ For a state at timestamp `S`, a frame at `F` on track *k* is a **candidate** if
 `|S - F| < search_range_us`. Among candidates, Portal picks the **nearest**,
 subject to the [fair-share check](#5-fair-share).
 
+A candidate within half a tick (`native_range_us`) is the state's **own** frame.
+A farther candidate is a neighbor, and stands in only once the own frame is
+**lost**. Over a real network the state often lands before its frame, so a
+neighbor already in the buffer does not prove anything. The own frame is lost
+once a frame past `S + native_range_us` is buffered, since frames arrive in
+timestamp order. Until then, or until `max_lag` elapses, the state waits.
+
 A state produces an observation only when **every** registered track has a
 candidate. If any track does not, one of three things happens.
 
@@ -89,7 +96,8 @@ candidate. If any track does not, one of three things happens.
 | Newest frame has `ts >= S + R` | **Drop** the state. Frame timestamps are monotonic, so every future frame is at least as late. No match is ever possible. |
 | No in-range frame yet, the newest is still below `S + R` or the buffer is empty, and the stream clock is less than `max_lag` past `S` | **Wait.** Newer frames may still land in range. |
 | No in-range frame, and the stream clock has run `max_lag` past `S` | **Resolve** the track by its stall behavior: drop the state, freeze, or omit. |
-| At least one in-range frame exists | **Match** that track, then check the others. |
+| Only a neighbor is in range, no frame is past `S + native_range_us` yet, and the stream clock is less than `max_lag` past `S` | **Wait.** The state's own frame may be late, not lost. |
+| At least one in-range frame exists otherwise | **Match** that track, then check the others. |
 
 The drop rule looks at the **newest** frame, not the oldest. Checking the front
 would miss the case where an old frame sits below the window while the rest of the
@@ -292,6 +300,7 @@ loop:
 
     S         = state_buffer.front().ts
     S_next    = state_buffer.get(1).ts        # for fair-share
+    R, N      = search_range_us, native_range_us
     iter_blocker = None
     should_drop  = false
 
@@ -307,16 +316,22 @@ loop:
                 if d >= best_delta: continue   # already have a closer one
                 if S_next and |S_next - buf[candidate].ts| < d:
                     continue                   # fair-share: leave it
-                best = candidate
+                best, best_delta = candidate, d
+
+        lagged = logical_now() - S >= max_lag[track_i]
 
         if best:
+            # A neighbor stands in only once the own frame is lost.
+            own_pending = best_delta >= N and buf.back().ts < S + N
+            if own_pending and not lagged:
+                iter_blocker = iter_blocker or track_i   # own frame may be late
+                continue
             matched[track_i] = best
             continue
 
         # Waiting cannot help once the newest buffered frame is past the
         # horizon; otherwise wait until the stream clock passes max_lag.
         unmatchable = buf and buf.back().ts >= S + R
-        lagged = logical_now() - S >= max_lag[track_i]
         if not unmatchable and not lagged:
             iter_blocker ??= track_i
             continue
@@ -500,6 +515,7 @@ user-facing knobs.
 | `video_buffer_size` | `slack` | 5 | Frames buffered per track. Larger tolerates more jitter and longer stalls, at the cost of staleness. |
 | `state_buffer_size` | `slack` | 5 | States buffered awaiting a match. Larger tolerates longer video stalls before eviction. |
 | `search_range_us` | `tolerance / fps` | 50 000 | Match window half-width. Wider means fewer drops under jitter and looser alignment. |
+| `native_range_us` | `min(tolerance, 0.5) / fps` | 16 666 | A state's own frame. A farther match waits until the own frame is lost. |
 | `default_stall.max_lag_us` | `slack / fps` | 166 666 | How far the stream clock may run past a moment before it resolves without a silent track. |
 | `default_stall.behavior` | `stall_behavior` | `drop` | How that moment resolves: `drop`, `freeze`, or `omit`. |
 

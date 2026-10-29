@@ -298,6 +298,9 @@ pub struct SyncConfig {
     pub video_buffer_size: u32,
     pub state_buffer_size: u32,
     pub search_range_us: u64,
+    /// Half a tick: a frame this close to a state is that state's own. A
+    /// farther match is a fallback, taken only once the own frame is lost.
+    pub native_range_us: u64,
     /// Stall handling for tracks with no per-track override. Defaults to
     /// the historical strict behavior: wait for capacity, then drop.
     pub default_stall: StallConfig,
@@ -309,6 +312,7 @@ impl Default for SyncConfig {
             video_buffer_size: 5,    // ~83ms at 60fps
             state_buffer_size: 5,    // ~83ms at 60fps
             search_range_us: 10_000, // 10ms — half a frame interval at 60fps
+            native_range_us: 10_000,
             default_stall: StallConfig { max_lag_us: None, behavior: StallBehavior::Drop },
         }
     }

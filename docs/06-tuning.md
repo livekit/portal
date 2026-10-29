@@ -50,6 +50,11 @@ Choose `tolerance` based on how much capture-time difference your application
 accepts. A wider window can match more observations, including frames from
 neighboring ticks. A narrower window rejects those pairs.
 
+A neighboring frame stands in only when a state's own frame is lost, not when it
+is late. Over a real network state often arrives before its frame, so Portal
+waits for the own frame until a newer one proves it lost or `max_lag` passes.
+Tolerance changes what happens on loss, not latency.
+
 | Your situation | Pick | Why |
 |---|---|---|
 | Real-time inference or control | `0.5` | A misaligned observation is silently wrong. A drop is an explicit signal you can count. |

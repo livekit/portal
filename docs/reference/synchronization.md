@@ -82,34 +82,55 @@ For a state at timestamp `S`, a frame at `F` on track *k* is a **candidate** if
 subject to the [fair-share check](#5-fair-share).
 
 A candidate within half a tick (`native_range_us`) is the state's **own** frame.
-A farther candidate is a neighbor, and stands in only once the own frame is
-**lost**. Over a real network the state often lands before its frame, so a
+A farther candidate is a neighbor. It can stand in once the own frame is
+known to be **lost**, or once the track's `max_lag` budget expires. Over a real network the state often lands before its frame, so a
 neighbor already in the buffer does not prove anything. The own frame is lost
-once a frame past `S + native_range_us` is buffered, since frames arrive in
+once a frame at or beyond `S + native_range_us` is buffered, since frames arrive in
 timestamp order. Until then, or until `max_lag` elapses, the state waits.
+
+A neighbor **ahead** of the state (`F > S`) is **borrowed**: the match leaves it
+in the buffer, so the state it belongs to can still match it as its own. A
+neighbor behind the state is consumed as usual. When video runs ahead of state, this keeps one lost frame from
+shifting every later pairing by a tick. The cost is that one frame can appear in
+two consecutive observations, the borrowed fallback and its own state's match.
+
+For example, at 30 fps with `tolerance = 1.5`, suppose frame 33 ms is lost,
+frame 67 ms is buffered, and state 67 ms has not arrived yet:
+
+| State timestamp | Frame used | What happens to the frame |
+|---|---|---|
+| 33 ms | 67 ms | Borrowed; stays buffered. |
+| 67 ms | 67 ms | Own frame; consumed. |
+| 100 ms | 100 ms | Normal matching resumes. |
+
+Borrowing still obeys `tolerance` and fair-share. It does not reserve a frame
+against buffer eviction or guarantee a match for a later state. Borrowed frames
+are tagged `Live`: they are in-range matches, not stall fallbacks. `Live` does
+not mean the frame and state have identical timestamps.
 
 A state produces an observation only when **every** registered track has a
 candidate. If any track does not, one of three things happens.
 
 | Track state, relative to head state `S` and range `R` | Decision |
 |---|---|
-| Newest frame has `ts >= S + R` | **Drop** the state. Frame timestamps are monotonic, so every future frame is at least as late. No match is ever possible. |
+| No eligible in-range frame, and newest frame has `ts >= S + R` | **Resolve** by stall behavior immediately. No future frame can match; `max_lag` need not expire. |
 | No in-range frame yet, the newest is still below `S + R` or the buffer is empty, and the stream clock is less than `max_lag` past `S` | **Wait.** Newer frames may still land in range. |
 | No in-range frame, and the stream clock has run `max_lag` past `S` | **Resolve** the track by its stall behavior: drop the state, freeze, or omit. |
-| Only a neighbor is in range, no frame is past `S + native_range_us` yet, and the stream clock is less than `max_lag` past `S` | **Wait.** The state's own frame may be late, not lost. |
+| Only a neighbor is in range, newest frame is below `S + native_range_us`, and the stream clock is less than `max_lag` past `S` | **Wait.** The state's own frame may be late, not lost. |
 | At least one in-range frame exists otherwise | **Match** that track, then check the others. |
 
-The drop rule looks at the **newest** frame, not the oldest. Checking the front
+The unmatchable rule looks at the **newest** frame, not the oldest. Checking the front
 would miss the case where an old frame sits below the window while the rest of the
 stream has already moved past it. The state would stall until eviction dragged
 that old frame out.
 
 The `>=` is deliberate. It mirrors the strict `<` in the match rule. A frame
 landing exactly at `S + R` is not a match, and no future frame can be either, so
-the state drops.
+the track resolves by its stall behavior.
 
-Those three outcomes are the state machine the algorithm runs per head state on
-every push.
+These decisions form the state machine the algorithm runs per head state on
+every push. Without a fallback, `freeze` and `omit` have a
+[startup exception](#stalled-tracks) to the lag budget.
 
 ## Naive version, for contrast
 
@@ -159,7 +180,8 @@ insurance.
 
 - On eviction, decrement by the number of evictions, saturating at 0.
 - On a successful match at index `idx`, Portal drains `0..=idx` and the cursor
-  becomes `saturating_sub(idx + 1)`.
+  becomes `saturating_sub(idx + 1)`. A [borrowed](#the-matching-rule) neighbor
+  drains `0..idx` instead, leaving the frame for its own state.
 - On `clear()`, all cursors reset to 0.
 
 ### 2. Blocker-gated sync
@@ -251,12 +273,17 @@ draining.
 This only matters when `tolerance > 1`. At `tolerance = 0.5` the window is
 narrower than a frame interval and two states can never contend for one frame.
 
+Fair-share only protects a state already in the buffer. When video runs ahead,
+the later state may not have arrived yet, so the head can still take its frame as
+a fallback. [Borrowing](#the-matching-rule) covers that case: the head uses the
+frame without consuming it.
+
 The test covering it is `fair_share_prevents_stealing` in `sync_buffer.rs`.
 
 ### Optional: stale-frame reuse
 
-`stall_behavior: freeze` turns the drop outcome into a **reuse** outcome, once a track
-has emitted at least once. Video freezes on a recent frame while state keeps
+`stall_behavior: freeze` substitutes a **stale** frame when no in-range match
+exists and either the match horizon has passed or `max_lag` has expired. Video freezes on a recent frame while state keeps
 flowing.
 
 There are two distinct fallbacks, and Portal prefers the first.
@@ -273,17 +300,17 @@ track last emitted. The buffer, the cursor, and `last_emitted` are all left
 untouched, so a later state can still claim a fresh frame that is sitting past
 the horizon.
 
-| Track state, with reuse on and `last_emitted` set | Decision |
+| Track state, after the wait ends and with `last_emitted` set | Decision |
 |---|---|
 | Fresh in-range match exists | **Match.** Fresh always wins, and `last_emitted` advances. |
 | Cursor frame is at or before `S` and out of range | **Reuse it** and drain. `last_emitted` advances. |
 | Newest frame is past the horizon | **Reuse `last_emitted`.** Buffer untouched. |
-| Buffer empty | **Reuse `last_emitted`** immediately. |
+| Buffer empty | **Reuse `last_emitted`.** |
 
-During startup, before the first emission, `last_emitted` is `None` and there is
-no fallback. The strict drop rule still applies, which keeps the state buffer
-bounded if video never arrives at all. Once the first observation fires, reuse
-takes over and drops stop.
+A below-horizon buffered frame can seed `freeze` even before the first
+emission. If neither fallback exists, the startup exception described under
+[Stalled tracks](#stalled-tracks) applies. Other tracks and state-buffer overflow
+can still cause drops when `freeze` is enabled.
 
 Observations that used any stale frame increment
 `metrics.sync.stale_observations_emitted`. Per frame, `frame.source` says the
@@ -321,12 +348,14 @@ loop:
         lagged = logical_now() - S >= max_lag[track_i]
 
         if best:
-            # A neighbor stands in only once the own frame is lost.
+            # A neighbor waits until the own frame is lost or the lag budget expires.
             own_pending = best_delta >= N and buf.back().ts < S + N
             if own_pending and not lagged:
                 iter_blocker = iter_blocker or track_i   # own frame may be late
                 continue
-            matched[track_i] = best
+            # A neighbor ahead is borrowed: left for its own state.
+            borrowed = best_delta >= N and buf[best].ts > S
+            matched[track_i] = (best, Live, borrowed)
             continue
 
         # Waiting cannot help once the newest buffered frame is past the
@@ -338,7 +367,7 @@ loop:
 
         if stall_behavior[track_i] == freeze:
             if cursor frame is <= S and out of range:
-                matched[track_i] = (cursor, Stale)       # drains
+                matched[track_i] = (cursor, Stale, false)  # drains
                 continue
             if last_emitted[track_i]:
                 matched[track_i] = (last_emitted, Stale) # no drain
@@ -367,8 +396,9 @@ loop:
     # every track matched
     pop state
     for each track with a drainable match:
-        drain buf[0..=idx]
-        cursors[track] -= idx + 1
+        end = idx if borrowed else idx + 1
+        drain buf[0..end]
+        cursors[track] -= end
         last_emitted[track] = frame
     emit observation
     continue loop                              # more states may now match
@@ -412,10 +442,11 @@ is total states received.
 rewind depth is bounded in practice by how far out of order the sender's clock can
 go, typically at most one state.
 
-**Emit latency.** Bounded by `max_lag` on the stream clock. A state at `S` is
-emitted once every track has a frame in `[S - R, S + R]`, dropped once any
-track's newest frame passes `S + R`, or resolved by stall behavior once the
-stream clock passes `S + max_lag`, whichever comes first.
+**Resolution timing.** Each track waits for its own frame, accepts an eligible
+neighbor, or resolves by stall behavior when matching becomes impossible or
+`max_lag` expires. Emission requires every track to resolve without a drop.
+The budget uses stream time, not wall time, and startup without a fallback is
+an exception to it. State-buffer overflow can also drop a pending state.
 
 **Memory.** Bounded by `video_buffer_size × tracks + state_buffer_size`, plus one
 latest-wins observation slot and one last-emitted frame per track.
@@ -424,7 +455,10 @@ latest-wins observation slot and one last-emitted frame per track.
 
 A track that stops sending would otherwise strand the head state. Two per-track
 knobs decide what happens: `max_lag` is how long to wait, `stall_behavior` is what to
-do when the wait is over.
+do when the wait is over. The policy also applies immediately if the newest
+frame is already beyond the match window and no eligible candidate exists.
+A single missing frame can therefore invoke a stall policy; the camera need
+not have stopped entirely.
 
 Both are read by the receiving side, since `SyncBuffer` lives there (it is built
 in `setup_operator` and fed from the receive paths). Nothing about a stall is
@@ -454,13 +488,15 @@ resolves as soon as any other stream advances past the budget.
 declared track, which is why enabling it cannot start raising `KeyError` in code
 that was written before it existed.
 
-Before a track's first frame, `freeze` has nothing to reuse and `omit` has no
-geometry to synthesize from, so both wait through that startup window and then
-fall back to `drop`.
+Without a buffered stale frame or a last-emitted frame, `freeze` has nothing
+to reuse. `omit` needs a last-emitted frame for placeholder geometry. Without
+these fallbacks, both keep waiting even after `max_lag` expires while a future
+frame could still match. They drop once matching becomes impossible; state-buffer
+overflow also bounds the wait when states continue arriving.
 
 **Tell the three apart at the frame.** Every frame in an observation carries a
-`FrameSource` of `Live`, `Stale`, or `Omitted`. Only `Live` is a measurement of
-the observation's timestamp; the other two are substitutes attached to it. Check
+`FrameSource` of `Live`, `Stale`, or `Omitted`. `Live` means an in-range match, including a borrowed neighbor; `Stale` and
+`Omitted` identify stall fallbacks. Check
 it before feeding an observation to a policy or writing it to a dataset. `Stale`
 and `Omitted` frames keep the *real* frame's timestamp, so the true age is
 `observation.timestamp_us - frame.timestamp_us`.
@@ -488,6 +524,14 @@ track rather than interpolating between the two frames that bracket it. Nearest
 neighbour is cheaper and matches what most policies expect. Interpolation, or its
 mirror of interpolating state to a frame timestamp, would be a separate opt-in
 mode.
+
+**No predicted states.** When video runs ahead and the head state takes a
+neighbor, the frame may belong to a state that has not arrived yet. Portal could
+reserve it by predicting that state from the state cadence, but that drops the
+head state, needs a cadence estimate, and costs an extra drop when the predicted
+state is itself lost. Borrowing needs no prediction and can preserve both observations when
+`tolerance` permits the neighbor. If no eligible neighbor exists,
+[stall behavior](#stalled-tracks) decides the outcome once waiting ends.
 
 **No wall clock.** `max_lag` is measured in sender-clock time, never wall-clock,
 so a given packet sequence always produces the same sync decisions regardless of

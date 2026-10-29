@@ -50,10 +50,16 @@ Choose `tolerance` based on how much capture-time difference your application
 accepts. A wider window can match more observations, including frames from
 neighboring ticks. A narrower window rejects those pairs.
 
-A neighboring frame stands in only when a state's own frame is lost, not when it
-is late. Over a real network state often arrives before its frame, so Portal
-waits for the own frame until a newer one proves it lost or `max_lag` passes.
-Tolerance changes what happens on loss, not latency.
+Portal waits for a state's own frame before using a neighbor. A newer frame
+can prove the own frame missing; otherwise, Portal waits until `max_lag` expires.
+`tolerance` bounds the timestamp difference of an accepted match; `max_lag`
+bounds the wait in stream time.
+
+A neighbor newer than the state is only borrowed, so the state it belongs to still
+can still match it if it remains buffered. One lost frame can make one frame
+appear in two consecutive observations without shifting subsequent pairings.
+This is still a `LIVE` match within `tolerance`, not a `FREEZE` fallback. See the
+[timestamp example](reference/synchronization.md#the-matching-rule).
 
 | Your situation | Pick | Why |
 |---|---|---|
@@ -121,7 +127,9 @@ wall-clock** — a statement about stream position, evaluated when a packet
 arrives rather than on a timer. It defaults to `slack / fps`, which is where
 state-buffer capacity would have evicted the moment anyway.
 
-`stall_behavior` picks the outcome:
+If no eligible in-range frame exists, `stall_behavior` picks the outcome once
+`max_lag` expires, or earlier if the track has already advanced beyond the match
+window. This can happen for an isolated missing frame as well as a silent camera:
 
 | | What the consumer sees |
 |---|---|
@@ -178,16 +186,18 @@ cfg.set_track_max_lag_ms("wrist", 40);
 | Data collection or logging | Record raw streams with observation sync disabled. Preserve timestamps and choose alignment later. |
 | Teleop viewer | `OMIT`. One dead camera should not blank the other three, and the operator can see which one died. |
 
-Before a track's first frame, `FREEZE` has nothing to reuse and `OMIT` has no
-geometry to synthesize from, so both wait through that startup window and then
-fall back to `DROP`. That keeps the state buffer bounded if video never starts
-at all.
+At startup, `FREEZE` needs a buffered stale frame or a previously emitted frame;
+`OMIT` needs a previously emitted frame for geometry. Without a fallback, both
+keep waiting beyond `max_lag` while a future frame could still match. They drop
+when matching becomes impossible, and state-buffer overflow bounds memory if
+video never starts. If every stream stops, `max_lag` does not advance or fire a
+wall-clock timer.
 
 `set_reuse_stale_frames(True)` still works, as a deprecated alias for
 `set_stall_behavior(StallBehavior.FREEZE)` with `set_max_lag_ms(0)`.
 
 **Watch `metrics.sync.stale_observations_emitted`.** That counter rising while
-`observations_emitted` holds steady is the signal that a track is silently
+the emission rate stays steady is the signal that a track is silently
 frozen. Per frame, `frame.source` says the same thing: `STALE` for a reused
 frame, `LIVE` for a fresh one.
 

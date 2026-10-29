@@ -433,18 +433,21 @@ impl PortalConfig {
     /// a video frame. `search_range = tolerance / fps`.
     ///
     /// - `0.5` (tight): state only matches a frame within ±half a tick.
-    ///   One lost frame → one dropped observation. Lowest misalignment risk.
+    ///   A missing frame resolves by stall behavior. Lowest misalignment risk.
     /// - `1.5` (default, widened): state matches its own frame, or falls
     ///   back to T±1 if its native frame was lost. Preserves observations
     ///   at the cost of occasional ±1-tick misalignment. A fair-share check
     ///   prevents an earlier state from stealing a frame closer to a later
     ///   state already in the buffer.
     ///
+    /// - `> 2.0`: state may match T±2 frames. Higher recovery, higher
+    ///   misalignment risk. Rarely worth it.
+    ///
     /// A late frame is not a lost one: the state waits for its own frame
     /// until a newer frame proves it lost, or the track's `max_lag` elapses.
     /// Tolerance bounds how wrong a match may be, never how early it fires.
-    /// - `> 2.0`: state may match T±2 frames. Higher recovery, higher
-    ///   misalignment risk. Rarely worth it.
+    /// A newer neighbor is borrowed, not consumed, so a later state can
+    /// still match it while it remains buffered.
     ///
     /// Values must be in `(0, ∞)`. Defaults to `1.5`.
     pub fn set_tolerance(&mut self, ticks: f32) {

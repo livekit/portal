@@ -190,7 +190,7 @@ operator's reply reaches the robot.
 <td width="33%">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-benchmark-sf-dark.svg">
-  <img alt="LiveKit Cloud benchmark between two machines in San Francisco: full loop 25.4 ms round trip at p50, and about 1 to 2 ms added by Portal over plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-sf-light.svg" width="100%">
+  <img alt="LiveKit Cloud benchmark between two machines in San Francisco: full loop 26.0 ms round trip at p50, and under 2 ms added by Portal over plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-sf-light.svg" width="100%">
 </picture>
 </td>
 <td width="33%">
@@ -200,7 +200,7 @@ operator's reply reaches the robot.
 </picture>
 </td>
 </tr>
-<tr><td>Loop RTT: <b>6.84 ms p50</b></td><td>Loop RTT: <b>25.4 ms p50</b></td><td>Loop RTT: <b>264.5 ms p50</b></td></tr>
+<tr><td>Loop RTT: <b>6.84 ms p50</b></td><td>Loop RTT: <b>26.0 ms p50</b></td><td>Loop RTT: <b>264.5 ms p50</b></td></tr>
 </tbody>
 </table>
 
@@ -208,8 +208,8 @@ Each LiveKit Cloud result is the median of three interleaved runs. One-way
 values in the Cloud diagrams are estimates derived from round trips.
 
 To measure what Portal adds over a real network, compare plain LiveKit SDK round
-trips with Portal round trips between the same machines. Portal added about
-1–2 ms on an 18 ms LiveKit route within San Francisco, and stayed within ±3 ms of
+trips with Portal round trips between the same machines. Portal added under
+2 ms on a 19 ms LiveKit route within San Francisco, and stayed within ±3 ms of
 plain LiveKit on a 259 ms route from San Francisco to Hanoi. See
 [Measuring overhead across regions](examples/python/benchmark/README.md#measuring-overhead-across-regions)
 for the method, full results, and delivery gaps observed on the cross-region route.

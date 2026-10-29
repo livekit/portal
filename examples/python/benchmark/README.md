@@ -132,7 +132,7 @@ measurements shown in the sample output above.
 | Case                                                      | Capture-to-action loop, p50 RTT | Portal over plain LiveKit |
 | --------------------------------------------------------- | ------------------------------- | ------------------------- |
 | [Local server](#local-server)                             | 6.84 ms                         | -                         |
-| [Within San Francisco](#within-san-francisco)             | 25.4 ms                         | ≈1–2 ms                   |
+| [Within San Francisco](#within-san-francisco)             | 26.0 ms                         | under 2 ms                |
 | [San Francisco to Hanoi](#san-francisco-to-hanoi-vietnam) | 264.5 ms                        | within ±3 ms              |
 
 ### Local server
@@ -146,7 +146,7 @@ at the top of this page and the sample output in
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-sf-dark.svg">
-  <img alt="Robot and teleoperator on two machines in San Francisco, on LiveKit Cloud, 640x480 H264 at 30 fps. Video about 17 ms and state about 9 ms to the teleoperator, observation at about 17 ms, action about 9 ms back, loop 25.4 ms round trip. Portal adds about 1 to 2 ms over plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-sf-light.svg" width="100%">
+  <img alt="Robot and teleoperator on two machines in San Francisco, on LiveKit Cloud, 640x480 H264 at 30 fps, state and actions lossy. Video about 17 ms and state about 10 ms to the teleoperator, observation at about 17 ms, action about 10 ms back, loop 26.0 ms round trip. Portal adds under 2 ms over plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-sf-light.svg" width="100%">
 </picture>
 
 The robot and operator run on separate machines in San Francisco, connected
@@ -156,14 +156,14 @@ three interleaved runs.
 
 | Round trip (RTT)                  | p50     | p95     | Added                         |
 | --------------------------------- | ------- | ------- | ----------------------------- |
-| LiveKit SDK, data echo            | 17.6 ms | 23.3 ms | LiveKit route                 |
-| Portal, `on_state` → action       | 18.2 ms | 24.9 ms | +0.6 ms Portal                |
-| LiveKit SDK, video echo           | 23.9 ms | 54.6 ms | +6.3 ms video pipeline        |
-| Portal, `on_video_frame` → action | 26.0 ms | 56.5 ms | +2.1 ms Portal                |
-| Portal, `on_observation` → action | 25.4 ms | 57.3 ms | waits for its own video frame |
+| LiveKit SDK, data echo            | 18.6 ms | 25.7 ms | LiveKit route                 |
+| Portal, `on_state` → action       | 19.0 ms | 28.7 ms | +0.4 ms Portal                |
+| LiveKit SDK, video echo           | 24.9 ms | 56.1 ms | +6.3 ms video pipeline        |
+| Portal, `on_video_frame` → action | 26.6 ms | 58.1 ms | +1.7 ms Portal                |
+| Portal, `on_observation` → action | 26.0 ms | 55.8 ms | waits for its own video frame |
 
-The LiveKit data round trip is about 18 ms. Portal adds 0.6 ms on the state path
-and 2.1 ms on the video path at p50. Video is the slower path, so observations
+The LiveKit data round trip is about 19 ms. Portal adds 0.4 ms on the state path
+and 1.7 ms on the video path at p50. Video is the slower path, so observations
 usually complete when their frames arrive.
 
 ### San Francisco to Hanoi, Vietnam

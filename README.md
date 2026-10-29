@@ -195,11 +195,11 @@ from capture on the robot to the operator's reply arriving back.
 <td width="33%">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-benchmark-cloud-dark.svg">
-  <img alt="LiveKit Cloud benchmark with the robot in San Francisco and operator in Hanoi: full loop 235.1 ms round trip at p50, direct UDP ping 184.1 ms, and about 1.5 ms added by Portal over plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-cloud-light.svg" width="100%">
+  <img alt="LiveKit Cloud benchmark with the robot in San Francisco and operator in Hanoi: full loop 264.5 ms round trip at p50, within 3 ms of plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-cloud-light.svg" width="100%">
 </picture>
 </td>
 </tr>
-<tr><td>Loop RTT: <b>6.84 ms p50</b></td><td>Loop RTT: <b>25.4 ms p50</b></td><td>Loop RTT: <b>235.1 ms p50</b></td></tr>
+<tr><td>Loop RTT: <b>6.84 ms p50</b></td><td>Loop RTT: <b>25.4 ms p50</b></td><td>Loop RTT: <b>264.5 ms p50</b></td></tr>
 </tbody>
 </table>
 
@@ -208,8 +208,8 @@ their diagrams are derived from round trips.
 
 To measure what Portal adds over a real network, compare plain LiveKit SDK round
 trips with Portal round trips between the same machines. Portal added about
-1–2 ms in both cloud runs: on an 18 ms LiveKit route within San Francisco, and on
-a 221 ms route from San Francisco to Hanoi. See
+1–2 ms on an 18 ms LiveKit route within San Francisco, and stayed within ±3 ms of
+plain LiveKit on a 259 ms route from San Francisco to Hanoi. See
 [Measuring overhead across regions](examples/python/benchmark/README.md#measuring-overhead-across-regions)
 for the method and full tables.
 

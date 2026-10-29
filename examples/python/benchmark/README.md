@@ -9,6 +9,11 @@ Measure latency, jitter, and gaps between arrivals for video, state, observation
 and actions. The robot streams synthetic data; the operator replies to each
 observation immediately.
 
+State and actions go out lossy (`set_state_reliable(False)`,
+`set_action_reliable(False)`). A late sample is worse than a lost one for
+control, and on long routes reliable delivery can stall for seconds after a
+single lost packet.
+
 Both peers use the robot's clock to measure one-way latency across machines.
 
 ## Requirements
@@ -124,7 +129,7 @@ in the diagrams are derived from those round trips.
 | --------------------------------------------------------- | ------------------------------- | ------------------------- |
 | [Local server](#local-server)                             | 6.84 ms                         | -                         |
 | [Within San Francisco](#within-san-francisco)             | 25.4 ms                         | ≈1–2 ms                   |
-| [San Francisco to Hanoi](#san-francisco-to-hanoi-vietnam) | 235.1 ms                        | ≈1.5 ms                   |
+| [San Francisco to Hanoi](#san-francisco-to-hanoi-vietnam) | 264.5 ms                        | within ±3 ms              |
 
 ### Local server
 
@@ -161,28 +166,30 @@ observation completes when its frame arrives.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-cloud-dark.svg">
-  <img alt="Robot in San Francisco, teleoperator in Hanoi, on LiveKit Cloud, 640x480 H264 at 30 fps. Video about 124 ms and state about 111 ms to the teleoperator, observation at about 124 ms, action about 111 ms back, loop 235.1 ms. The direct ping round trip is 184.1 ms; Portal adds about 1.5 ms over plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-cloud-light.svg" width="100%">
+  <img alt="Robot in San Francisco, teleoperator in Hanoi, on LiveKit Cloud, 640x480 H264 at 30 fps, state and actions lossy. Video about 133 ms and state about 129 ms to the teleoperator, observation at about 135 ms, action about 129 ms back, loop 264.5 ms round trip. Portal is within 3 ms of plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-cloud-light.svg" width="100%">
 </picture>
 
 A hard case: the robot in San Francisco, the operator in Hanoi, Vietnam, both
-on [LiveKit Cloud](https://cloud.livekit.io). 30 s per run. Median round trips
-from the best of three interleaved runs:
+on [LiveKit Cloud](https://cloud.livekit.io). 30 s per run, median of three
+interleaved runs:
 
-| Round trip (RTT)                  | p50      | Added                                          |
-| --------------------------------- | -------- | ---------------------------------------------- |
-| Direct UDP ping                   | 184.1 ms | network floor                                  |
-| LiveKit SDK, data echo            | 221.0 ms | +36.9 ms LiveKit route                         |
-| Portal, `on_state` → action       | 222.4 ms | +1.4 ms Portal                                 |
-| LiveKit SDK, video echo           | 233.9 ms | +12.9 ms video pipeline                        |
-| Portal, `on_video_frame` → action | 235.5 ms | +1.6 ms Portal                                 |
-| Portal, `on_observation` → action | 235.1 ms | fusing frame and state adds nothing measurable |
+| Round trip (RTT)                  | p50      | p95      | Added                         |
+| --------------------------------- | -------- | -------- | ----------------------------- |
+| LiveKit SDK, data echo            | 259.0 ms | 267.8 ms | LiveKit route                 |
+| Portal, `on_state` → action       | 257.3 ms | 270.5 ms | within noise                  |
+| LiveKit SDK, video echo           | 264.3 ms | 293.2 ms | +5.3 ms video pipeline        |
+| Portal, `on_video_frame` → action | 261.7 ms | 298.3 ms | within noise                  |
+| Portal, `on_observation` → action | 264.5 ms | 294.4 ms | waits for its own video frame |
 
-Most of LiveKit's extra time is the route: each machine connects to its nearest
-LiveKit edge (97 ms round trip from Hanoi, 10 ms from San Francisco). Tail
-latency followed the network: p95 ranged from about 320 ms to over 1 s from run
-to run, and the direct ping's p95 moved with it. Portal's share was
-under 5 ms in every run that wasn't hit by a network burst. A shorter path
-shrinks the network and LiveKit terms.
+At this distance the route is nearly everything. Portal stayed within ±3 ms of
+plain LiveKit, below the run-to-run noise.
+
+- **Lossy delivery:** 5–14% of samples or replies did not arrive in each run, in
+  exchange for no stalls. With reliable delivery the same route stalled for 2–3 s
+  after a lost packet, and p95 reached 2.7 s on Portal and the plain SDK alike.
+- **Video gaps:** each run had one gap of about 3.3 s in video, on Portal and the
+  plain SDK alike. Those frames went missing rather than late, so the gap shows
+  in `max_gap`, not p95.
 
 ## Configuration
 

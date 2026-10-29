@@ -171,8 +171,9 @@ latency, jitter, and the full capture-to-action loop on your network. It streams
 synthetic video and state and replies to each observation immediately. No hardware
 required.
 
-Sample results with H264 at 640×480, 30 fps. The loop is a **round trip (RTT)**:
-from capture on the robot to the operator's reply arriving back.
+The sample results below use H264 at 640×480 and 30 fps. The capture-to-action
+loop is a **round trip (RTT)**, measured from capture on the robot until the
+operator's reply reaches the robot.
 
 <table>
 <thead>
@@ -203,15 +204,15 @@ from capture on the robot to the operator's reply arriving back.
 </tbody>
 </table>
 
-Each LiveKit Cloud result comes from three interleaved runs; one-way values in
-their diagrams are derived from round trips.
+Each LiveKit Cloud result is the median of three interleaved runs. One-way
+values in the Cloud diagrams are estimates derived from round trips.
 
 To measure what Portal adds over a real network, compare plain LiveKit SDK round
 trips with Portal round trips between the same machines. Portal added about
 1–2 ms on an 18 ms LiveKit route within San Francisco, and stayed within ±3 ms of
 plain LiveKit on a 259 ms route from San Francisco to Hanoi. See
 [Measuring overhead across regions](examples/python/benchmark/README.md#measuring-overhead-across-regions)
-for the method and full tables.
+for the method, full results, and delivery gaps observed on the cross-region route.
 
 ## License
 

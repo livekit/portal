@@ -9,10 +9,10 @@ Measure latency, jitter, and gaps between arrivals for video, state, observation
 and actions. The robot streams synthetic data; the operator replies to each
 observation immediately.
 
-State and actions go out lossy (`set_state_reliable(False)`,
-`set_action_reliable(False)`). A late sample is worse than a lost one for
-control, and on long routes reliable delivery can stall for seconds after a
-single lost packet.
+The benchmark uses lossy delivery for state and actions
+(`set_state_reliable(False)`, `set_action_reliable(False)`) to avoid waiting for
+retransmissions. This favors fresh samples over guaranteed delivery; read latency
+percentiles alongside sample counts and arrival gaps.
 
 Both peers use the robot's clock to measure one-way latency across machines.
 
@@ -94,36 +94,40 @@ that uncertainty are not reliable.
   processing.
 - High `loop` relative to `rtt` can indicate media pipeline overhead. Try smaller
   frames or `PORTAL_CODEC=mjpeg`.
-- With `mjpeg`, `png`, or `raw`, video and state share a reliable data channel.
-  Large frames can delay state delivery.
+- With `mjpeg`, `png`, or `raw`, video uses reliable data delivery. Large frames
+  can compete with state and actions for bandwidth, even when those use lossy
+  delivery.
 - High `send` latency blocks the robot's control loop. Try a lower resolution.
 
 ## Measuring overhead across regions
 
-Over a real network, most of `loop` is the network itself. To see what LiveKit
-and Portal add, compare three round trips taken at the same time between the
-same two machines:
+Network latency can dominate `loop`, especially across regions. To estimate
+what LiveKit and Portal add, compare three round-trip measurements between the
+same two machines under similar network conditions:
 
 1. **Network floor.** A direct ping between the two machines, outside LiveKit.
    Don't route it through a VPN relay: if both machines are behind NAT, punch a
    direct UDP path rather than measuring the relay.
 2. **LiveKit.** The same round trip on the plain LiveKit SDK (`livekit.rtc`):
-   the robot sends a reliable data packet and a video frame stamped with
+   the robot sends a data packet and a video frame stamped with
    `FrameMetadata.user_timestamp`, and the other side echoes each one back.
 3. **Portal.** The same round trip through Portal: the operator replies with
    `send_action(..., in_reply_to_ts_us=...)` from `on_state`,
-   `on_video_frame` and `on_observation`. This is what `loop` measures.
+   `on_video_frame`, and `on_observation` in separate runs. The included scripts
+   reply from `on_observation`; `loop` measures that capture-to-action round trip.
 
-Time every round trip on the robot's clock, so clock sync can't skew it.
-Interleave the LiveKit and Portal runs, and keep the ping running throughout,
-so all three see the same network.
+Time every round trip on the robot's clock to avoid clock-sync error. Use the
+same delivery mode for data and replies in both SDKs. Interleave the LiveKit and
+Portal runs, and keep the ping running throughout to track changes in network
+latency.
 
 ## Sample results
 
-Three cases, from one machine to opposite sides of the Pacific. All use H264
-640x480 at 30 fps. Every latency below is a **round trip (RTT)**: from capture on
-the robot to the reply arriving back, timed on the robot's clock. One-way values
-in the diagrams are derived from those round trips.
+These three cases range from a single machine to a route across the Pacific.
+All use H264 at 640×480 and 30 fps. Latencies in the tables below are **round
+trips (RTT)**, timed on the robot's clock. One-way values in the Cloud diagrams
+are estimates derived from round trips; the local diagram uses the one-way
+measurements shown in the sample output above.
 
 | Case                                                      | Capture-to-action loop, p50 RTT | Portal over plain LiveKit |
 | --------------------------------------------------------- | ------------------------------- | ------------------------- |
@@ -133,10 +137,10 @@ in the diagrams are derived from those round trips.
 
 ### Local server
 
-Robot and operator on one machine with `livekit-server --dev`: the diagram at the
-top of this page, and the sample output in
-[Reading the results](#reading-the-results). The loop is 6.84 ms RTT at p50, most
-of it video encode and decode.
+The robot, operator, and `livekit-server --dev` run on one machine. The loop
+is 6.84 ms RTT at p50, with most of that time in the video path. See the diagram
+at the top of this page and the sample output in
+[Reading the results](#reading-the-results).
 
 ### Within San Francisco
 
@@ -145,10 +149,10 @@ of it video encode and decode.
   <img alt="Robot and teleoperator on two machines in San Francisco, on LiveKit Cloud, 640x480 H264 at 30 fps. Video about 17 ms and state about 9 ms to the teleoperator, observation at about 17 ms, action about 9 ms back, loop 25.4 ms round trip. Portal adds about 1 to 2 ms over plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-sf-light.svg" width="100%">
 </picture>
 
-Two machines in San Francisco, the robot on one and the operator on the other,
-both on [LiveKit Cloud](https://cloud.livekit.io). Traffic between them goes
-through the LiveKit SFU rather than directly, so this reflects a same-region
-deployment. 30 s per run, median of three interleaved runs:
+The robot and operator run on separate machines in San Francisco, connected
+through [LiveKit Cloud](https://cloud.livekit.io). Traffic passes through the
+LiveKit SFU. Each run lasts 30 s; the table reports the median p50 and p95 across
+three interleaved runs.
 
 | Round trip (RTT)                  | p50     | p95     | Added                         |
 | --------------------------------- | ------- | ------- | ----------------------------- |
@@ -158,9 +162,9 @@ deployment. 30 s per run, median of three interleaved runs:
 | Portal, `on_video_frame` → action | 26.0 ms | 56.5 ms | +2.1 ms Portal                |
 | Portal, `on_observation` → action | 25.4 ms | 57.3 ms | waits for its own video frame |
 
-In the same region the route shrinks to about 18 ms RTT, and Portal still adds
-about 1–2 ms. Video is the slower path, about 6 ms behind state, so an
-observation completes when its frame arrives.
+The LiveKit data round trip is about 18 ms. Portal adds 0.6 ms on the state path
+and 2.1 ms on the video path at p50. Video is the slower path, so observations
+usually complete when their frames arrive.
 
 ### San Francisco to Hanoi, Vietnam
 
@@ -169,9 +173,9 @@ observation completes when its frame arrives.
   <img alt="Robot in San Francisco, teleoperator in Hanoi, on LiveKit Cloud, 640x480 H264 at 30 fps, state and actions lossy. Video about 133 ms and state about 129 ms to the teleoperator, observation at about 135 ms, action about 129 ms back, loop 264.5 ms round trip. Portal is within 3 ms of plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-cloud-light.svg" width="100%">
 </picture>
 
-A hard case: the robot in San Francisco, the operator in Hanoi, Vietnam, both
-on [LiveKit Cloud](https://cloud.livekit.io). 30 s per run, median of three
-interleaved runs:
+The robot runs in San Francisco and the operator in Hanoi, Vietnam, connected
+through [LiveKit Cloud](https://cloud.livekit.io). Each run lasts 30 s; the table
+reports the median p50 and p95 across three interleaved runs.
 
 | Round trip (RTT)                  | p50      | p95      | Added                         |
 | --------------------------------- | -------- | -------- | ----------------------------- |
@@ -181,15 +185,17 @@ interleaved runs:
 | Portal, `on_video_frame` → action | 261.7 ms | 298.3 ms | within noise                  |
 | Portal, `on_observation` → action | 264.5 ms | 294.4 ms | waits for its own video frame |
 
-At this distance the route is nearly everything. Portal stayed within ±3 ms of
-plain LiveKit, below the run-to-run noise.
+Network latency dominates this route. Portal's p50 round trips stayed within
+±3 ms of the corresponding plain LiveKit measurements, below the observed
+run-to-run variation.
 
-- **Lossy delivery:** 5–14% of samples or replies did not arrive in each run, in
-  exchange for no stalls. With reliable delivery the same route stalled for 2–3 s
-  after a lost packet, and p95 reached 2.7 s on Portal and the plain SDK alike.
-- **Video gaps:** each run had one gap of about 3.3 s in video, on Portal and the
-  plain SDK alike. Those frames went missing rather than late, so the gap shows
-  in `max_gap`, not p95.
+- **Lossy delivery:** 5–14% of samples or replies did not arrive in each run.
+  Lossy delivery avoided retransmission stalls. With reliable delivery, the same
+  route stalled for 2–3 s after packet loss, and p95 reached 2.7 s with both
+  Portal and the plain SDK.
+- **Video gaps:** each run had a video gap of about 3.3 s with both Portal and
+  the plain SDK. Missing frames do not contribute latency samples, so these
+  gaps appear in `max_gap` rather than p95.
 
 ## Configuration
 

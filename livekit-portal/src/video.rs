@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -33,14 +32,15 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use livekit_portal_core::Input;
+use livekit_portal_core::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
+use livekit_portal_core::error::{PortalError, PortalResult};
+use livekit_portal_core::metrics::TrackMetrics;
+use livekit_portal_core::types::{FrameSource, VideoFrameData};
+
 use crate::clock::anchored_now_us;
 use crate::codec::Codec;
-use crate::config::{DEFAULT_H264_MAX_BITRATE_KBPS, Resolution, VideoTrackSpec};
-use crate::error::{PortalError, PortalResult};
-use crate::metrics::TrackMetrics;
-use crate::portal::ObservationSink;
-use crate::sync_buffer::SyncBuffer;
-use crate::types::{FrameSource, VideoFrameData};
+use crate::portal::Shared;
 
 const DEFAULT_WIDTH: u32 = 640;
 const DEFAULT_HEIGHT: u32 = 480;
@@ -157,7 +157,7 @@ impl VideoPublisher {
         rgb_data: &[u8],
         width: u32,
         height: u32,
-        timestamp_us: Option<u64>,
+        timestamp_us: u64,
     ) -> PortalResult<()> {
         // I420 packs U and V at half resolution in each axis. Odd dimensions
         // would silently desynchronize plane sizes (width/2 truncates), so
@@ -172,12 +172,14 @@ impl VideoPublisher {
                 got: rgb_data.len(),
             });
         }
-        let ts = timestamp_us.unwrap_or_else(now_us);
         let mut buffer = I420Buffer::new(width, height);
         rgb_to_i420(rgb_data, width, height, &mut buffer);
         let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
-        frame.frame_metadata =
-            Some(FrameMetadata { user_timestamp: Some(ts), frame_id: None, user_data: None });
+        frame.frame_metadata = Some(FrameMetadata {
+            user_timestamp: Some(timestamp_us),
+            frame_id: None,
+            user_data: None,
+        });
         self.source.capture_frame(&frame);
         self.metrics.record_sent();
         Ok(())
@@ -185,25 +187,6 @@ impl VideoPublisher {
 }
 
 // --- Receiver ---
-
-pub(crate) type VideoCb = Box<dyn Fn(&str, &VideoFrameData) + Send + Sync>;
-
-/// Push callback + latest-wins slot for a single video track, paired so the
-/// receiver task and `get_video_frame` share one allocation.
-pub(crate) struct VideoTrackSlots {
-    pub cb: Mutex<Option<VideoCb>>,
-    pub latest: Mutex<Option<VideoFrameData>>,
-}
-
-impl VideoTrackSlots {
-    pub fn new() -> Self {
-        Self { cb: Mutex::new(None), latest: Mutex::new(None) }
-    }
-
-    pub fn clear(&self) {
-        *self.latest.lock() = None;
-    }
-}
 
 /// Frames buffered between the drain task and the processing task. At 60fps
 /// this is ~130ms of slack, enough to ride out bursts and brief callback
@@ -233,7 +216,7 @@ struct FrameChannel {
 }
 
 struct FrameChannelState {
-    queue: VecDeque<Arc<VideoFrameData>>,
+    queue: VecDeque<VideoFrameData>,
     closed: bool,
 }
 
@@ -248,7 +231,7 @@ impl FrameChannel {
 
     /// Enqueue a frame, dropping the oldest if the ring is full. Returns
     /// `true` when a frame was dropped to make room. Never blocks.
-    fn push(&self, frame: Arc<VideoFrameData>) -> bool {
+    fn push(&self, frame: VideoFrameData) -> bool {
         let dropped = {
             let mut st = self.inner.lock();
             let dropped = st.queue.len() >= self.capacity && st.queue.pop_front().is_some();
@@ -267,7 +250,7 @@ impl FrameChannel {
     }
 
     /// Await the next frame, or `None` once the channel is closed and drained.
-    async fn recv(&self) -> Option<Arc<VideoFrameData>> {
+    async fn recv(&self) -> Option<VideoFrameData> {
         loop {
             // Register interest before checking the queue so a `push` racing
             // between the check and the await can't be missed (a permit
@@ -287,20 +270,21 @@ impl FrameChannel {
     }
 }
 
+pub(crate) struct VideoReceiverOptions {
+    pub name: String,
+    pub stream: NativeVideoStream,
+    pub shared: Arc<Shared>,
+    pub metrics: Arc<TrackMetrics>,
+}
+
 pub(crate) struct VideoReceiver {
     drain_handle: JoinHandle<()>,
     process_handle: JoinHandle<()>,
 }
 
 impl VideoReceiver {
-    pub fn spawn(
-        name: String,
-        stream: NativeVideoStream,
-        sync_buffer: Option<Arc<Mutex<SyncBuffer>>>,
-        slots: Arc<VideoTrackSlots>,
-        obs_sink: Arc<ObservationSink>,
-        metrics: Arc<TrackMetrics>,
-    ) -> Self {
+    pub fn spawn(options: VideoReceiverOptions) -> Self {
+        let VideoReceiverOptions { name, stream, shared, metrics } = options;
         let channel = Arc::new(FrameChannel::new(RECV_CHANNEL_CAPACITY));
 
         // Drain task: pull decoded frames off the native stream as fast as
@@ -310,7 +294,7 @@ impl VideoReceiver {
         // overflow and drop frames in bulk. Its only per-frame cost is
         // bounded CPU: colour-convert plus a latest-wins slot update.
         let drain_channel = channel.clone();
-        let drain_slots = slots.clone();
+        let drain_shared = shared.clone();
         let drain_name = name.clone();
         let drain_handle = tokio::spawn(async move {
             let mut stream = stream;
@@ -349,7 +333,6 @@ impl VideoReceiver {
                     continue;
                 };
                 let frame_data = convert_frame(&frame, timestamp_us);
-                let frame_arc = Arc::new(frame_data);
 
                 metrics.record_received(timestamp_us, anchored_now_us());
 
@@ -357,9 +340,9 @@ impl VideoReceiver {
                 // drain so polling consumers see the newest frame even when
                 // per-frame callbacks fall behind. Clone is cheap — pixel
                 // buffer is `Bytes`.
-                *drain_slots.latest.lock() = Some((*frame_arc).clone());
+                drain_shared.sinks.set_latest_frame(&drain_name, &frame_data);
 
-                if drain_channel.push(frame_arc) {
+                if drain_channel.push(frame_data) {
                     dropped_total += 1;
                     let now = Instant::now();
                     let should_warn =
@@ -381,29 +364,12 @@ impl VideoReceiver {
         });
 
         // Processing task: everything that can block on user code or contend
-        // for shared locks — the per-frame callback, sync-buffer push, and
-        // observation dispatch. Falling behind here drops frames at the
-        // channel instead of stalling the drain.
+        // for the core — the per-frame callback, sync and observation
+        // dispatch. Falling behind here drops frames at the channel instead
+        // of stalling the drain.
         let process_handle = tokio::spawn(async move {
-            while let Some(frame_arc) = channel.recv().await {
-                if let Some(cb) = slots.cb.lock().as_ref() {
-                    // User callback runs on this tokio worker; a panic would
-                    // abort the task and silently stop delivering frames.
-                    // Catch and log.
-                    let result = catch_unwind(AssertUnwindSafe(|| cb(&name, &frame_arc)));
-                    if result.is_err() {
-                        log::error!(
-                            "[callback-panic] video frame callback panicked on track '{name}', receive loop continues"
-                        );
-                    }
-                }
-                let Some(sync_buffer) = &sync_buffer else {
-                    continue;
-                };
-                let output = sync_buffer.lock().push_frame(&name, frame_arc);
-                if !output.is_empty() {
-                    obs_sink.dispatch(output);
-                }
+            while let Some(frame) = channel.recv().await {
+                shared.step(Input::VideoFrame { track: &name, frame });
             }
         });
 
@@ -493,10 +459,6 @@ fn rgb_to_i420(src: &[u8], width: u32, height: u32, buffer: &mut I420Buffer) {
     }
 }
 
-pub(crate) fn now_us() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,14 +469,14 @@ mod tests {
         assert_eq!(degradation_preference(true), DegradationPreference::MaintainResolution);
     }
 
-    fn frame(ts: u64) -> Arc<VideoFrameData> {
-        Arc::new(VideoFrameData {
+    fn frame(ts: u64) -> VideoFrameData {
+        VideoFrameData {
             width: 2,
             height: 2,
             data: Bytes::from_static(&[0u8; 12]),
             timestamp_us: ts,
             source: FrameSource::Live,
-        })
+        }
     }
 
     /// Frames flow through in FIFO order when the consumer keeps up.

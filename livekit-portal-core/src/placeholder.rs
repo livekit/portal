@@ -113,7 +113,8 @@ const MAX_NAME: usize = 20;
 /// Always returns exactly `width * height * 3` bytes, including for degenerate
 /// sizes: text that does not fit is skipped rather than clipped mid-glyph, so
 /// a tiny frame comes back as bare stripes.
-pub(crate) fn render(width: u32, height: u32, track_name: &str) -> Bytes {
+#[doc(hidden)]
+pub fn render(width: u32, height: u32, track_name: &str) -> Bytes {
     let w = width as usize;
     let h = height as usize;
     let mut buf = vec![0u8; w * h * 3];

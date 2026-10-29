@@ -639,6 +639,9 @@ impl From<core::PortalError> for PortalError {
             core::PortalError::Rpc(e) => {
                 PortalError::Rpc { code: e.code, message: e.message, data: e.data }
             }
+            // LiveKit supports every option, so the bindings never see this;
+            // mapped rather than given a variant to keep their API unchanged.
+            core::PortalError::Unsupported(s) => PortalError::Room(s),
         }
     }
 }

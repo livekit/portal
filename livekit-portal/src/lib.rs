@@ -14,43 +14,38 @@
 
 mod clock;
 pub mod codec;
-pub mod config;
-pub mod config_file;
 mod data;
-pub mod dtype;
-pub mod error;
+mod driver;
 mod frame_video;
 mod jpeg;
-mod keypoint;
-pub mod metrics;
-mod placeholder;
 mod portal;
 pub mod rpc;
-mod serialization;
-mod sync_buffer;
-pub mod types;
+mod sinks;
 mod video;
+mod wire;
+
+pub use livekit_portal_core::{config, config_file, dtype, error, metrics, types};
 
 pub use codec::Codec;
-pub use config::{
+pub use livekit_portal_core::config::{
     DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, Resolution, VideoOptions,
     VideoTrackSpec,
 };
-pub use config_file::ConfigFileError;
-pub use dtype::DType;
-pub use error::{PortalError, PortalResult};
-pub use frame_video::BYTE_STREAM_CHUNK_SIZE;
-pub use keypoint::Keypoint;
-pub use metrics::{
+pub use livekit_portal_core::config_file::ConfigFileError;
+pub use livekit_portal_core::dtype::DType;
+pub use livekit_portal_core::error::{PortalError, PortalResult};
+pub use livekit_portal_core::keypoint::Keypoint;
+pub use livekit_portal_core::metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
     TransportMetrics,
+};
+pub use livekit_portal_core::types::{
+    Action, ActionSubscription, FrameSource, Observation, Role, StallBehavior, StallConfig, State,
+    SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,
 };
 pub use portal::{
     ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, Portal, ROLE_ATTR_KEY,
     SET_ACTIVE_OPERATOR_RPC,
 };
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
-pub use types::{
-    Action, ActionSubscription, FrameSource, Observation, Role, StallBehavior, StallConfig, State,
-    SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,
-};
+pub use wire::BYTE_STREAM_CHUNK_SIZE;

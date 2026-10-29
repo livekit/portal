@@ -283,7 +283,8 @@ impl PortalConfig {
 
     /// Sync-only options that were set explicitly but do nothing because
     /// observation sync is off. Empty when sync is on.
-    pub(crate) fn ignored_sync_options(&self) -> Vec<&'static str> {
+    #[doc(hidden)]
+    pub fn ignored_sync_options(&self) -> Vec<&'static str> {
         match self.observation_sync {
             true => Vec::new(),
             false => self.sync_options_set.iter().copied().collect(),
@@ -620,7 +621,8 @@ impl PortalConfig {
 
     /// Per-track stall config for every registered track, in the order the
     /// sync buffer indexes them.
-    pub(crate) fn stall_configs(&self, track_names: &[String]) -> Vec<StallConfig> {
+    #[doc(hidden)]
+    pub fn stall_configs(&self, track_names: &[String]) -> Vec<StallConfig> {
         track_names.iter().map(|n| self.stall_for(n)).collect()
     }
 
@@ -716,8 +718,19 @@ impl PortalConfig {
         self.shared_key.is_some()
     }
 
+    #[doc(hidden)]
+    pub fn e2ee_key(&self) -> Option<&[u8]> {
+        self.shared_key.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn clock_skew_us(&self) -> i64 {
+        self.clock_skew_us
+    }
+
     /// Derived sync config used internally by the sync buffer. Not public.
-    pub(crate) fn sync_config(&self) -> SyncConfig {
+    #[doc(hidden)]
+    pub fn sync_config(&self) -> SyncConfig {
         let search_range_us = (self.tolerance * 1_000_000.0 / self.fps as f32) as u64;
         SyncConfig {
             video_buffer_size: self.slack,

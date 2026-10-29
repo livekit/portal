@@ -1675,17 +1675,28 @@ dependencies = [
  "bytes",
  "cc",
  "futures-util",
- "image",
  "livekit",
+ "livekit-portal-core",
+ "log",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "webrtc-sys-build",
+ "yuv-sys",
+]
+
+[[package]]
+name = "livekit-portal-core"
+version = "0.2.8"
+dependencies = [
+ "bytes",
+ "image",
  "log",
  "parking_lot",
  "serde",
  "serde-saphyr",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
- "webrtc-sys-build",
- "yuv-sys",
 ]
 
 [[package]]

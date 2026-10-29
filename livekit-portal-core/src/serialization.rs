@@ -36,7 +36,8 @@ const ACTION_STREAM_TAG: u32 = 0xa1c0_b001;
 /// FNV-1a over `name_bytes, 0xff, dtype_tag, 0xff` per field. Not
 /// cryptographic; collision odds at ~4e9 inputs are negligible for this
 /// use.
-pub(crate) fn schema_fingerprint(schema: &[FieldSpec]) -> u32 {
+#[doc(hidden)]
+pub fn schema_fingerprint(schema: &[FieldSpec]) -> u32 {
     const FNV_OFFSET: u32 = 0x811c9dc5;
     const FNV_PRIME: u32 = 0x01000193;
     let mut h = FNV_OFFSET;
@@ -60,8 +61,19 @@ pub(crate) fn schema_fingerprint(schema: &[FieldSpec]) -> u32 {
 /// includes `in_reply_to_ts_us`) — a peer running an older Portal where
 /// actions had no correlation slot would xor a different tag (or none),
 /// fingerprints disagree, and the receive path drops cleanly.
-pub(crate) fn action_fingerprint(schema: &[FieldSpec]) -> u32 {
+#[doc(hidden)]
+pub fn action_fingerprint(schema: &[FieldSpec]) -> u32 {
     schema_fingerprint(schema) ^ ACTION_STREAM_TAG
+}
+
+/// Size of a `serialize_values` packet for `schema`.
+pub fn state_packet_len(schema: &[FieldSpec]) -> usize {
+    HEADER_LEN + schema.iter().map(|f| f.dtype.size_bytes()).sum::<usize>()
+}
+
+/// Size of a `serialize_action` packet for `schema`.
+pub fn action_packet_len(schema: &[FieldSpec]) -> usize {
+    CORRELATED_HEADER_LEN + schema.iter().map(|f| f.dtype.size_bytes()).sum::<usize>()
 }
 
 /// Stable on-wire/hash tag for a dtype. Never renumber — changes break
@@ -82,7 +94,8 @@ fn dtype_tag(d: DType) -> u8 {
 
 /// Outcome of an encode pass: the packet bytes plus the names of fields
 /// whose value saturated at the dtype boundary. Caller logs the latter.
-pub(crate) struct EncodeResult {
+#[doc(hidden)]
+pub struct EncodeResult {
     pub payload: Vec<u8>,
     pub saturated_indices: Vec<usize>,
 }
@@ -92,7 +105,8 @@ pub(crate) struct EncodeResult {
 /// Wire format: `[u32 fingerprint][u64 timestamp_us][field0 bytes]...`,
 /// all little-endian. Each field's byte width is the declared `DType`'s
 /// `size_bytes()`. Caller must pass `values.len() == schema.len()`.
-pub(crate) fn serialize_values(
+#[doc(hidden)]
+pub fn serialize_values(
     fingerprint: u32,
     timestamp_us: u64,
     values: &[f64],
@@ -117,7 +131,8 @@ pub(crate) fn serialize_values(
 /// encoded as `0_u64` on the wire — bindings turn it back into `None` on
 /// receive. The zero sentinel is fine because timestamps are µs since the
 /// Unix epoch and never zero in practice.
-pub(crate) fn serialize_action(
+#[doc(hidden)]
+pub fn serialize_action(
     fingerprint: u32,
     timestamp_us: u64,
     in_reply_to_ts_us: Option<u64>,
@@ -142,7 +157,8 @@ pub(crate) fn serialize_action(
 /// Deserialize an action wire packet. Returns the timestamp, the optional
 /// correlation, and the ordered values.
 #[allow(clippy::type_complexity)]
-pub(crate) fn deserialize_action(
+#[doc(hidden)]
+pub fn deserialize_action(
     data: &[u8],
     fingerprint: u32,
     schema: &[FieldSpec],
@@ -183,7 +199,8 @@ pub(crate) fn deserialize_action(
 /// tell a schema-mismatch (worth a rate-limited warn) apart from a corrupt
 /// packet (worth dropping silently or noisily).
 #[derive(Debug)]
-pub(crate) enum DecodeError {
+#[doc(hidden)]
+pub enum DecodeError {
     /// Packet's schema fingerprint does not match the local schema. Peers
     /// are out of sync.
     SchemaMismatch { expected: u32, got: u32 },
@@ -200,7 +217,8 @@ impl From<PortalError> for DecodeError {
 /// Deserialize bytes back to a timestamp and ordered values. Returns
 /// `SchemaMismatch` when the embedded fingerprint disagrees with
 /// `fingerprint`; the caller decides whether to warn, count, or drop.
-pub(crate) fn deserialize_values(
+#[doc(hidden)]
+pub fn deserialize_values(
     data: &[u8],
     fingerprint: u32,
     schema: &[FieldSpec],

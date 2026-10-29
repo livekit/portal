@@ -12,275 +12,154 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+//! The native driver. Every decision lives in `PortalCore`; this module
+//! connects the room, maps LiveKit events to core inputs (see `wire` for
+//! the mapping) with the local time, and carries out the outputs as
+//! LiveKit calls.
+//!
+//! The core trusts the identities it is handed. Here they are LiveKit
+//! participant identities, which the SFU takes from each peer's JWT, so a
+//! peer cannot speak for another.
+//!
+//! The core sits behind a mutex shared by the room event actor
+//! (`driver.rs`), the video receive tasks and the synchronous send API.
+//! Each holder takes the lock only to step the core and runs callbacks and
+//! IO after releasing it, so a user callback may call back into `Portal`.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use livekit::prelude::*;
-use livekit::webrtc::video_stream::native::NativeVideoStream;
+use livekit_portal_core::config::{FieldSpec, PortalConfig};
+use livekit_portal_core::error::{PortalError, PortalResult};
+use livekit_portal_core::frame_video::FrameVideoTracks;
+use livekit_portal_core::keypoint::Keypoint;
+use livekit_portal_core::metrics::{MetricsRegistry, PortalMetrics};
+use livekit_portal_core::transport::{Delivery, Presence, Stream};
+use livekit_portal_core::types::*;
+use livekit_portal_core::{
+    Connect, CoreInit, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
+    SendKeypoint, SendState, SendVideoFrame, SetActiveOperator, Step, VideoTransport,
+};
 use parking_lot::Mutex;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::clock::{CLOCK_TOPIC, ClockActor, ClockOptions, ClockService, SyncedClock};
-use crate::config::{FieldSpec, PortalConfig};
-use crate::data::{
-    ACTION_TOPIC, ActionOrigin, ActionSlot, DataPublisher, STATE_TOPIC, StateSlot,
-    handle_data_received,
-};
-use crate::error::{PortalError, PortalResult};
-use crate::frame_video::{
-    FRAME_VIDEO_TOPIC, FrameVideoPublisher, FrameVideoTrackEntry, dispatch_frame_payload,
-};
-use crate::keypoint::{KEYPOINT_TOPIC, Keypoint, KeypointSlot};
-use crate::metrics::{DataStream, MetricsRegistry, PortalMetrics};
+use crate::clock::RawClock;
+use crate::data::{Lanes, Publish, packet};
+use crate::driver::EventLoop;
+use crate::frame_video::{FrameVideoPublisher, FrameVideoPublisherOptions};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
-use crate::serialization::{action_fingerprint, schema_fingerprint};
-use crate::sync_buffer::{SyncBuffer, SyncOutput};
-use crate::types::*;
-use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver, VideoTrackSlots};
+use crate::sinks::Sinks;
+use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver};
+use crate::wire;
 
-/// Participant attribute keys used by Portal for role discovery and the
-/// multi-controller pointer. Namespaced to avoid colliding with any
-/// application-level attributes the user may also be setting.
-pub const ROLE_ATTR_KEY: &str = "lk.portal.role";
-pub const ACTIVE_OPERATOR_ATTR_KEY: &str = "lk.portal.active_operator";
-/// Wire protocol version every peer publishes. Peers only recognise each
-/// other when it matches, so a mixed-version room fails loudly instead of
-/// exchanging packets neither side can read.
-pub const PROTOCOL_VERSION_ATTR_KEY: &str = "lk.portal.version";
-pub const PROTOCOL_VERSION: &str = "3";
-const ROLE_VALUE_ROBOT: &str = "robot";
-const ROLE_VALUE_OPERATOR: &str = "operator";
-const ROLE_VALUE_OBSERVER: &str = "observer";
-/// RPC method registered by Robot-side Portals so any participant can request
-/// a change to the active operator pointer. Payload is the new identity, or
-/// the empty string to clear. Result is the empty string on success.
-pub const SET_ACTIVE_OPERATOR_RPC: &str = "portal.set_active_operator";
+pub use crate::wire::{ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY};
+pub use livekit_portal_core::SET_ACTIVE_OPERATOR_RPC;
+pub use livekit_portal_core::transport::PROTOCOL_VERSION;
 
-/// App-level RPC error code (outside the SDK's 1001-1999 reserved range)
-/// returned when the robot has not yet finished setting up its
-/// LocalParticipant.
-const RPC_NOT_CONNECTED: u32 = 2001;
-/// App-level RPC error code returned when the SDK's `set_attributes` fails
-/// while the robot is processing a `set_active_operator` request.
-const RPC_SET_ATTRIBUTES_FAILED: u32 = 2002;
-/// App-level RPC error code returned when `set_active_operator` comes from
-/// a participant that is neither an operator nor an observer.
-const RPC_NOT_AUTHORIZED: u32 = 2003;
-/// How long the robot waits for an unrecognised RPC caller to appear in the
-/// rosters. The caller's role attribute and its RPC travel separately, so a
-/// peer that calls right after connecting can beat its own attribute here.
-const RPC_CALLER_ROSTER_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
-
-type ObservationCb = Box<dyn Fn(&Observation) + Send + Sync>;
-type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
-type IdentityCb = Box<dyn Fn(&str) + Send + Sync>;
-type OptIdentityCb = Box<dyn Fn(Option<&str>) + Send + Sync>;
-
-/// State for the v0.2 multi-controller layer. Lives in an `Arc` so the room
-/// event handler and the `set_active_operator` RPC handler can share it
-/// without copying.
-pub(crate) struct ControllerState {
-    /// On Robot side: source of truth, mirrored as own `lk.portal.active_operator`
-    /// attribute. On Operator side: a mirror of the robot's attribute, updated
-    /// from `ParticipantAttributesChanged` events.
-    pub(crate) active_operator: Mutex<Option<String>>,
-    /// Identities of currently-connected operators (excluding self), populated
-    /// from `ParticipantConnected` plus the initial remote-participants
-    /// snapshot.
-    pub(crate) operators: Mutex<HashSet<String>>,
-    /// Identities of currently-connected observers (excluding self). Kept
-    /// apart from `operators` so that list only holds peers that can drive.
-    pub(crate) observers: Mutex<HashSet<String>>,
-    /// The robot's identity, discovered by reading the `lk.portal.role`
-    /// attribute. Operators use this to address `set_active_operator` RPCs.
-    pub(crate) robot_identity: Mutex<Option<String>>,
-
-    /// Identities already warned about for a protocol version mismatch, so
-    /// each one is logged once rather than on every attribute change.
-    version_mismatch_warned: Mutex<HashSet<String>>,
-
-    on_operator_joined: Mutex<Option<IdentityCb>>,
-    on_operator_left: Mutex<Option<IdentityCb>>,
-    on_active_operator_changed: Mutex<Option<OptIdentityCb>>,
+/// State shared by `Portal`, the room event actor and the media tasks.
+pub(crate) struct Shared {
+    core: Mutex<PortalCore<VideoFrameData>>,
+    pub sinks: Sinks,
+    pub metrics: Arc<MetricsRegistry>,
+    /// Declared frame-video tracks, to decode received frames off the lock.
+    pub frame_video: FrameVideoTracks,
+    clock: RawClock,
+    /// Per-connection publish queues.
+    lanes: Mutex<Option<Lanes>>,
+    /// The latest `ScheduleWake`, read by the event actor.
+    wake: watch::Sender<Option<u64>>,
+    /// `set_active_operator` RPCs waiting on the core's reply.
+    rpc_waiters: Mutex<HashMap<RpcId, oneshot::Sender<Result<String, RpcError>>>>,
+    next_rpc: AtomicU64,
+    local_participant: Mutex<Option<LocalParticipant>>,
+    // Handle to the tokio runtime `connect()` ran on. Captured because
+    // `register_rpc_method` can be called from a foreign thread with no
+    // runtime context (e.g. a binding's asyncio loop); registering an RPC
+    // method on a live LocalParticipant triggers publisher negotiation,
+    // which `tokio::spawn`s and would otherwise panic with "no reactor
+    // running". `None` before the first connect.
+    runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
+    this: Weak<Shared>,
 }
 
-impl ControllerState {
-    fn new() -> Self {
-        Self {
-            active_operator: Mutex::new(None),
-            operators: Mutex::new(HashSet::new()),
-            observers: Mutex::new(HashSet::new()),
-            robot_identity: Mutex::new(None),
-            version_mismatch_warned: Mutex::new(HashSet::new()),
-            on_operator_joined: Mutex::new(None),
-            on_operator_left: Mutex::new(None),
-            on_active_operator_changed: Mutex::new(None),
-        }
+impl Shared {
+    pub fn now_us(&self) -> u64 {
+        self.clock.now_us()
     }
 
-    fn fire_op_joined(&self, identity: &str) {
-        if let Some(cb) = self.on_operator_joined.lock().as_ref() {
-            let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
-            if result.is_err() {
-                log::error!("[callback-panic] on_operator_joined callback panicked");
-            }
-        }
+    pub fn receives_frame_bytes(&self) -> bool {
+        self.core.lock().receives_frame_bytes()
     }
 
-    fn fire_op_left(&self, identity: &str) {
-        if let Some(cb) = self.on_operator_left.lock().as_ref() {
-            let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
-            if result.is_err() {
-                log::error!("[callback-panic] on_operator_left callback panicked");
-            }
-        }
+    /// Step the core and carry out what it returns, outside the lock.
+    pub fn step(&self, input: Input<'_, VideoFrameData>) {
+        // Read before locking: a clock packet's arrival time must not
+        // include the wait for the lock.
+        let now_us = self.now_us();
+        let out = self.core.lock().handle(Step { input, now_us });
+        self.execute(out);
     }
 
-    fn fire_active_changed(&self, identity: Option<&str>) {
-        if let Some(cb) = self.on_active_operator_changed.lock().as_ref() {
-            let result = catch_unwind(AssertUnwindSafe(|| cb(identity)));
-            if result.is_err() {
-                log::error!("[callback-panic] on_active_operator_changed callback panicked");
-            }
-        }
-    }
-
-    /// Whether `id` is a recognised Portal peer of any role.
-    fn is_known_peer(&self, id: &str) -> bool {
-        self.robot_identity.lock().as_deref() == Some(id)
-            || self.operators.lock().contains(id)
-            || self.observers.lock().contains(id)
-    }
-
-    fn clear(&self) {
-        *self.active_operator.lock() = None;
-        self.operators.lock().clear();
-        self.observers.lock().clear();
-        *self.robot_identity.lock() = None;
-    }
-
-    /// Partial clear used on `RoomEvent::Reconnected`. Drops the per-room
-    /// rosters (`operators`, `robot_identity`) so post-reconnect
-    /// `ParticipantConnected` events can rebuild them from scratch, but
-    /// keeps `active_operator` pinned. Two reasons:
-    ///
-    /// * **Robot side.** The robot's `active_operator` is the source of
-    ///   truth (mirrored as its own `lk.portal.active_operator` attribute).
-    ///   The robot ignores attribute events on its local identity (see
-    ///   `ParticipantAttributesChanged` filter), and the SDK never fires
-    ///   `ParticipantConnected` for self, so a full clear here would leave
-    ///   the gate stuck at `None` until something explicitly re-set it —
-    ///   silently halting control across a transient reconnect.
-    /// * **Operator side.** The mirror is reseeded by the next
-    ///   `ParticipantConnected` for the robot (via `classify_and_update`).
-    ///   `classify_and_update` only fires `on_active_operator_changed` on
-    ///   a value change, so retaining a stale value across the reconnect
-    ///   does not produce a spurious callback when it gets re-read.
-    fn clear_for_reconnect(&self) {
-        self.operators.lock().clear();
-        self.observers.lock().clear();
-        *self.robot_identity.lock() = None;
-    }
-}
-
-/// Classify a participant by their `lk.portal.role` attribute. Returns
-/// `None` if the attribute is absent, has an unknown value, or the
-/// participant speaks a different protocol version.
-fn classify_role(attrs: &HashMap<String, String>) -> Option<Role> {
-    let role = match attrs.get(ROLE_ATTR_KEY).map(String::as_str) {
-        Some(ROLE_VALUE_ROBOT) => Role::Robot,
-        Some(ROLE_VALUE_OPERATOR) => Role::Operator,
-        Some(ROLE_VALUE_OBSERVER) => Role::Observer,
-        _ => return None,
-    };
-    is_compatible(attrs).then_some(role)
-}
-
-fn is_compatible(attrs: &HashMap<String, String>) -> bool {
-    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str) == Some(PROTOCOL_VERSION)
-}
-
-/// Drains the buffers returned by `SyncBuffer::push_*` and dispatches them to
-/// the user — callback first (by reference, no clone), then into the pull-based
-/// observation buffer. Kept separate from `SyncBuffer` so callbacks run with no
-/// sync-buffer lock held.
-pub(crate) struct ObservationSink {
-    observation_cb: Mutex<Option<ObservationCb>>,
-    drop_cb: Mutex<Option<DropCb>>,
-    // Latest-wins slot. Consumers peek via `get()` (clone). Consumers that
-    // want history register `on_observation` and buffer on their own side.
-    latest: Mutex<Option<Observation>>,
-}
-
-impl ObservationSink {
-    pub(crate) fn new() -> Self {
-        Self {
-            observation_cb: Mutex::new(None),
-            drop_cb: Mutex::new(None),
-            latest: Mutex::new(None),
-        }
-    }
-
-    pub(crate) fn dispatch(&self, output: SyncOutput) {
-        let SyncOutput { observations, drops } = output;
-
-        // User callbacks run on the tokio worker dispatching room events.
-        // A panic here would abort the whole event loop, so we catch and
-        // log and keep going.
-        if !observations.is_empty() {
-            {
-                let cb_slot = self.observation_cb.lock();
-                if let Some(cb) = cb_slot.as_ref() {
-                    for obs in &observations {
-                        let result = catch_unwind(AssertUnwindSafe(|| cb(obs)));
-                        if result.is_err() {
-                            log::error!(
-                                "[callback-panic] observation callback panicked, event loop continues"
-                            );
-                        }
+    pub fn execute(&self, out: Vec<Output<VideoFrameData>>) {
+        for output in out {
+            match output {
+                Output::Publish { stream, payload, delivery, to } => {
+                    let Some(publish) = publish(Outgoing { stream, payload, delivery, to }) else {
+                        continue;
+                    };
+                    if let Some(lanes) = self.lanes.lock().as_ref() {
+                        lanes.send(stream, publish);
                     }
                 }
-            }
-            // Latest-wins: only the final observation needs to reach the pull
-            // slot — intermediates are discarded either way.
-            if let Some(last_obs) = observations.into_iter().last() {
-                *self.latest.lock() = Some(last_obs);
+                Output::SetPresence { id, presence } => self.spawn_set_presence(id, presence),
+                // Only `Portal::set_active_operator` starts one, and it
+                // performs the call itself.
+                Output::Rpc { id, .. } => {
+                    let result = Err(RpcError::new(1500, "unexpected rpc", None));
+                    self.step(Input::RpcResponse { id, result });
+                }
+                Output::RpcReply { id, result } => {
+                    if let Some(tx) = self.rpc_waiters.lock().remove(&id) {
+                        let _ = tx.send(result);
+                    }
+                }
+                Output::Emit(event) => self.sinks.dispatch(event),
+                Output::ScheduleWake { at_us } => {
+                    self.wake.send_replace(at_us);
+                }
             }
         }
+    }
 
-        if !drops.is_empty()
-            && let Some(cb) = self.drop_cb.lock().as_ref()
-        {
-            let result = catch_unwind(AssertUnwindSafe(|| cb(drops)));
-            if result.is_err() {
-                log::error!("[callback-panic] drop callback panicked, event loop continues");
+    /// Presence updates the core starts on its own (an RPC-requested
+    /// handoff) report back once LiveKit confirms the attribute write.
+    fn spawn_set_presence(&self, id: Option<OpId>, presence: Presence) {
+        let lp = self.local_participant.lock().clone();
+        let runtime = self.runtime_handle.lock().clone();
+        let (Some(lp), Some(runtime)) = (lp, runtime) else {
+            if let Some(id) = id {
+                self.step(Input::PresenceSet { id, result: Err("not connected".into()) });
             }
-        }
-    }
-
-    pub(crate) fn get(&self) -> Option<Observation> {
-        self.latest.lock().clone()
-    }
-
-    pub(crate) fn clear(&self) {
-        *self.latest.lock() = None;
-    }
-
-    pub(crate) fn set_observation_cb(&self, cb: ObservationCb) {
-        *self.observation_cb.lock() = Some(cb);
-    }
-
-    pub(crate) fn set_drop_cb(&self, cb: DropCb) {
-        *self.drop_cb.lock() = Some(cb);
+            return;
+        };
+        let shared = self.this.clone();
+        let attributes = wire::active_operator_attributes(&presence);
+        runtime.spawn(async move {
+            let result = lp.set_attributes(attributes).await.map_err(|e| e.to_string());
+            if let (Some(id), Some(shared)) = (id, shared.upgrade()) {
+                shared.step(Input::PresenceSet { id, result });
+            }
+        });
     }
 }
 
 struct ConnectionState {
     room: Option<Room>,
     event_task: Option<JoinHandle<()>>,
-    clock: Option<Arc<ClockService>>,
 }
 
 pub struct Portal {
@@ -292,156 +171,49 @@ pub struct Portal {
     // disconnect's cleanup path.
     lifecycle: tokio::sync::Mutex<()>,
 
-    // Lifecycle state (connect/disconnect).
     conn: Mutex<ConnectionState>,
+    shared: Arc<Shared>,
 
-    // Video receivers are spawned by the event loop (on TrackSubscribed) and
-    // torn down by `disconnect`, so they live in an Arc shared with both.
+    // Video receivers are spawned by the event actor (on TrackSubscribed)
+    // and torn down by `disconnect`, so they live in an Arc shared with both.
     video_receivers: Arc<Mutex<HashMap<String, VideoReceiver>>>,
-
-    // Hot-path publishers. Each is guarded by its own mutex so send methods
-    // can clone the Arc out and drop the lock before doing any IO.
     video_publishers: Mutex<HashMap<String, Arc<VideoPublisher>>>,
-    /// Robot-side: one publisher per declared frame-video track. Frame-video
-    /// frames travel as byte streams (per-frame RGB encode), bypassing the
-    /// WebRTC media path.
+    /// Robot-side: one publisher per declared frame-video track.
     frame_video_publishers: Mutex<HashMap<String, Arc<FrameVideoPublisher>>>,
-    state_publisher: Mutex<Option<Arc<DataPublisher>>>,
-    action_publisher: Mutex<Option<Arc<DataPublisher>>>,
-
-    // Operator-side sync + dispatch.
-    sync_buffer: Mutex<Option<Arc<Mutex<SyncBuffer>>>>,
-    obs_sink: Arc<ObservationSink>,
-
-    // Push callback + pull latest-wins slot, bundled per stream.
-    action: Arc<ActionSlot>,
-    state: Arc<StateSlot>,
-    // Fixed at construction (keyed by declared video_tracks) — no lock on the map itself.
-    video_tracks: HashMap<String, Arc<VideoTrackSlots>>,
-    /// Names of all video tracks (WebRTC + frame video) in declaration
-    /// order. Used by `setup_operator` to size the sync buffer over the
-    /// union of transports. Computed once at `Portal::new` so the connect
-    /// hot path doesn't re-walk the config.
-    all_track_names: Vec<String>,
-    /// Per-track frame-video entries (spec + slots + metrics fused). Fixed
-    /// at construction and shared as an `Arc<HashMap>` so the receive
-    /// dispatch can fan out to per-frame spawn tasks via a refcount bump
-    /// instead of cloning the whole map (which would allocate one `String`
-    /// per declared track per received frame).
-    frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>>,
-
-    metrics: Arc<MetricsRegistry>,
 
     // RPC methods the caller has registered. Applied to the LocalParticipant
     // on connect(); survives disconnect so reconnects reapply them.
     rpc_handlers: Arc<Mutex<HashMap<String, RpcHandler>>>,
-
-    // Local-participant handle held in its own `Arc<Mutex<...>>` so the
-    // built-in `set_active_operator` RPC handler can clone access to it
-    // without sharing the broader `ConnectionState`.
-    local_participant: Arc<Mutex<Option<LocalParticipant>>>,
-
-    // Multi-controller state (v0.2). Shared with the room event handler so
-    // attribute-change and participant-connect events can update operators,
-    // robot_identity, and active_operator without taking a Portal-level lock.
-    controller: Arc<ControllerState>,
-
-    // Handle to the tokio runtime `connect()` ran on. Captured because
-    // `register_rpc_method` can be called from a foreign thread with no
-    // runtime context (e.g. a binding's asyncio loop); registering an RPC
-    // method on a live LocalParticipant triggers publisher negotiation,
-    // which `tokio::spawn`s and would otherwise panic with "no reactor
-    // running". We enter this handle around that call. `None` before the
-    // first connect.
-    runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
-
-    // Outlives connections so `now_us()` stays continuous across reconnects.
-    clock: Arc<SyncedClock>,
-
-    keypoints: Arc<KeypointSlot>,
 }
 
 impl Portal {
     pub fn new(config: PortalConfig) -> Self {
-        // Slots and metrics cover both transports. Frame-video and WebRTC
-        // tracks share the same VideoFrameData / VideoTrackSlots / sync
-        // buffer, so the consumer-facing API is identical.
-        let all_track_names: Vec<String> = config.video_track_names().map(String::from).collect();
-        let video_tracks: HashMap<String, Arc<VideoTrackSlots>> = all_track_names
-            .iter()
-            .map(|name| (name.clone(), Arc::new(VideoTrackSlots::new())))
-            .collect();
-
-        let metrics = Arc::new(MetricsRegistry::new(&all_track_names));
-        let obs_sink = Arc::new(ObservationSink::new());
-
-        // Same idea for frame-video entries: the dispatch path reads them
-        // per packet, so freezing the map at construction lets the hot path
-        // skip a Portal-level lock and the per-connect rebuild. Each entry
-        // bundles spec + slots + metrics so dispatch is a single lookup.
-        // Wrapped in `Arc<HashMap>` so per-frame fan-out is a refcount bump
-        // rather than a `String`-cloning map clone.
-        let frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>> = Arc::new(
-            config
-                .frame_video_tracks()
-                .map(|spec| {
-                    let slots = video_tracks
-                        .get(&spec.name)
-                        .expect("video_tracks contains every frame-video name")
-                        .clone();
-                    let track_metrics = metrics
-                        .track(&spec.name)
-                        .expect("track metrics registered for every frame-video name");
-                    (
-                        spec.name.clone(),
-                        Arc::new(FrameVideoTrackEntry {
-                            spec: spec.clone(),
-                            metrics: track_metrics,
-                            slots,
-                        }),
-                    )
-                })
-                .collect(),
-        );
-
-        let ignored = config.ignored_sync_options();
-        if !ignored.is_empty() {
-            log::warn!(
-                "[{}] observation sync is off, so these options do nothing: {}",
-                config.session,
-                ignored.join(", ")
-            );
-        }
-
-        let clock = Arc::new(SyncedClock::new(ClockOptions {
-            is_reference: config.role == Role::Robot,
-            source: config.time_sync_source,
-            skew_us: config.clock_skew_us,
-        }));
-
+        let core = PortalCore::new(CoreInit { config: config.clone(), caps: wire::CAPS });
+        let metrics = core.metrics_registry().clone();
+        let (wake, _) = watch::channel(None);
+        let shared = Arc::new_cyclic(|this| Shared {
+            sinks: Sinks::new(config.video_track_names()),
+            metrics,
+            frame_video: FrameVideoTracks::new(&config),
+            clock: RawClock { source: config.time_sync_source(), skew_us: config.clock_skew_us() },
+            core: Mutex::new(core),
+            lanes: Mutex::new(None),
+            wake,
+            rpc_waiters: Mutex::new(HashMap::new()),
+            next_rpc: AtomicU64::new(0),
+            local_participant: Mutex::new(None),
+            runtime_handle: Mutex::new(None),
+            this: this.clone(),
+        });
         Self {
             config,
             lifecycle: tokio::sync::Mutex::new(()),
-            conn: Mutex::new(ConnectionState { room: None, event_task: None, clock: None }),
+            conn: Mutex::new(ConnectionState { room: None, event_task: None }),
+            shared,
             video_receivers: Arc::new(Mutex::new(HashMap::new())),
             video_publishers: Mutex::new(HashMap::new()),
             frame_video_publishers: Mutex::new(HashMap::new()),
-            state_publisher: Mutex::new(None),
-            action_publisher: Mutex::new(None),
-            sync_buffer: Mutex::new(None),
-            obs_sink,
-            action: Arc::new(ActionSlot::new()),
-            state: Arc::new(StateSlot::new()),
-            video_tracks,
-            all_track_names,
-            frame_video_entries,
-            metrics,
             rpc_handlers: Arc::new(Mutex::new(HashMap::new())),
-            local_participant: Arc::new(Mutex::new(None)),
-            controller: Arc::new(ControllerState::new()),
-            clock,
-            keypoints: Arc::new(KeypointSlot::new()),
-            runtime_handle: Mutex::new(None),
         }
     }
 
@@ -449,7 +221,7 @@ impl Portal {
         let _lifecycle = self.lifecycle.lock().await;
         // Capture the runtime we're running on so `register_rpc_method` can
         // enter it when called later from a non-runtime (foreign) thread.
-        *self.runtime_handle.lock() = Some(tokio::runtime::Handle::current());
+        *self.shared.runtime_handle.lock() = Some(tokio::runtime::Handle::current());
         if self.conn.lock().room.is_some() {
             return Err(PortalError::AlreadyConnected);
         }
@@ -459,19 +231,21 @@ impl Portal {
         let mut options = RoomOptions::default();
         options.sdk_options.other_sdks = Some(OTHER_SDKS_VALUE.to_string());
         options.auto_subscribe = true;
-        if let Some(key) = &self.config.shared_key {
+        if let Some(key) = self.config.e2ee_key() {
             use livekit::E2eeOptions;
             use livekit::e2ee::{
                 EncryptionType,
                 key_provider::{KeyProvider, KeyProviderOptions},
             };
             let key_provider =
-                KeyProvider::with_shared_key(KeyProviderOptions::default(), key.clone());
+                KeyProvider::with_shared_key(KeyProviderOptions::default(), key.to_vec());
             options.encryption =
                 Some(E2eeOptions { key_provider, encryption_type: EncryptionType::Gcm });
         }
 
-        log::info!("[{}] connecting as {:?} to {}", self.config.session, self.config.role, url);
+        let session = self.config.session();
+        let role = self.config.role();
+        log::info!("[{session}] connecting as {role:?} to {url}");
 
         // Hand decoded frames over as soon as they are ready instead of
         // holding them for smooth playback. Process-wide, and only possible
@@ -490,21 +264,16 @@ impl Portal {
         // handler itself. Overlap is idempotent — the SDK's rpc handler map
         // is last-writer-wins.
         let local_participant = room.local_participant();
-        *self.local_participant.lock() = Some(local_participant.clone());
+        *self.shared.local_participant.lock() = Some(local_participant.clone());
+        *self.shared.lanes.lock() = Some(Lanes::new(&local_participant));
 
-        // Robot-side: register the built-in `set_active_operator` RPC. The
-        // handler clones the LP slot and the controller Arc so the closure
-        // can update both the attribute and the local mirror without holding
-        // any Portal-level lock.
-        if self.config.role == Role::Robot {
-            let lp_slot = self.local_participant.clone();
-            let controller = self.controller.clone();
+        // Robot-side: the built-in `set_active_operator` RPC. The core
+        // decides; the handler only relays the call and its answer.
+        if role == Role::Robot {
+            let shared = Arc::downgrade(&self.shared);
             let handler: RpcHandler = Arc::new(move |data: RpcInvocationData| {
-                let lp_slot = lp_slot.clone();
-                let controller = controller.clone();
-                Box::pin(
-                    async move { set_active_operator_rpc_impl(&lp_slot, &controller, data).await },
-                )
+                let shared = shared.clone();
+                Box::pin(async move { set_active_operator_rpc(shared, data).await })
             });
             self.register_rpc_method(SET_ACTIVE_OPERATOR_RPC, handler);
         }
@@ -514,112 +283,67 @@ impl Portal {
         // Self-set the role attribute so other participants can discover us.
         // Token-mint may also have set this key; in that case `set_attributes`
         // is effectively a no-op for the same value.
-        let role_value = match self.config.role {
-            Role::Robot => ROLE_VALUE_ROBOT,
-            Role::Operator => ROLE_VALUE_OPERATOR,
-            Role::Observer => ROLE_VALUE_OBSERVER,
-        };
-        let mut role_attrs = HashMap::new();
-        role_attrs.insert(ROLE_ATTR_KEY.to_string(), role_value.to_string());
-        role_attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), PROTOCOL_VERSION.to_string());
-        if let Err(e) = local_participant.set_attributes(role_attrs).await {
+        if let Err(e) = local_participant.set_attributes(wire::role_attributes(role)).await {
             // Most common cause: the token grant did not include
             // `canUpdateOwnMetadata`. Surface a clear error so callers fix
             // their token-mint script rather than silently leaving the
             // participant unidentified. Roll back the partial state we
-            // already wrote (LP slot, RPC handler bindings) so a retry
-            // starts from a clean slate.
-            self.rollback_partial_connect();
+            // already wrote so a retry starts from a clean slate.
+            self.teardown();
             let _ = room.close().await;
             return Err(PortalError::Room(format!(
                 "failed to publish role attribute (token may be missing canUpdateOwnMetadata): {e}"
             )));
         }
 
-        // Robot-side: if the token seeded `lk.portal.active_operator`,
-        // mirror it locally so the action gate sees the configured pointer
-        // before anyone calls `set_active_operator`.
-        if self.config.role == Role::Robot {
-            let attrs = local_participant.attributes();
-            if let Some(seed) = attrs.get(ACTIVE_OPERATOR_ATTR_KEY) {
-                let value = if seed.is_empty() { None } else { Some(seed.clone()) };
-                *self.controller.active_operator.lock() = value;
-            }
-        }
-
-        // Walk the room snapshot once at connect so any participant that
-        // joined before us is already in `operators` / `robot_identity`. New
-        // joiners get added by the `ParticipantConnected` event handler.
-        for (_sid, participant) in room.remote_participants() {
-            classify_and_update(
-                &self.controller,
-                self.config.role,
-                &participant.identity(),
-                &participant.attributes(),
-            );
-        }
-
-        let setup_result = match self.config.role {
-            Role::Robot => self.setup_robot(&room).await,
-            Role::Operator | Role::Observer => {
-                self.setup_operator(&room);
-                Ok(())
+        let peers = room
+            .remote_participants()
+            .into_values()
+            .map(|p| (p.identity().as_str().to_string(), wire::presence(&p.attributes())))
+            .collect();
+        let now_us = self.shared.now_us();
+        let connected = self.shared.core.lock().connect(Connect {
+            local_peer: local_participant.identity().as_str().to_string(),
+            // A token can seed the pointer, so the gate holds before anyone
+            // calls `set_active_operator`.
+            active_operator: wire::active_operator(&local_participant.attributes()),
+            peers,
+            now_us,
+        });
+        let out = match connected {
+            Ok(out) => out,
+            Err(e) => {
+                self.teardown();
+                let _ = room.close().await;
+                return Err(e);
             }
         };
-        if let Err(e) = setup_result {
-            // setup_robot can fail mid-way through publishing video tracks.
-            // Its own rollback already clears the partial video_publishers
-            // map; we still need to undo the LP slot, controller mirror,
-            // and any other state written above before bailing.
-            self.rollback_partial_connect();
+        self.shared.execute(out);
+
+        if role == Role::Robot
+            && let Err(e) = self.setup_robot(&local_participant).await
+        {
+            // Publishing a video track can fail mid-way; undo everything
+            // written above before bailing.
+            self.teardown();
             let _ = room.close().await;
             return Err(e);
         }
 
-        let clock = Arc::new(ClockService::spawn(ClockActor {
-            role: self.config.role,
-            local_participant: local_participant.clone(),
-            controller: self.controller.clone(),
-            clock: self.clock.clone(),
-            metrics: self.metrics.clone(),
-        }));
+        log::info!("[{session}] connected as {role:?}");
 
-        log::info!("[{}] connected as {:?}", self.config.session, self.config.role);
-
-        // Event dispatch runs off a snapshot of the fields it touches, not the
-        // whole Portal, so it doesn't need any outer lock.
-        let action_schema_fp = action_fingerprint(&self.config.action_schema);
-        let state_schema_fp = schema_fingerprint(&self.config.state_schema);
-        let local_identity = local_participant.identity().as_str().to_string();
-        let ctx = EventContext {
-            config: self.config.clone(),
-            action_schema_fp,
-            state_schema_fp,
-            sync_buffer: self.sync_buffer.lock().clone(),
-            obs_sink: self.obs_sink.clone(),
-            action: self.action.clone(),
-            state: self.state.clone(),
-            video_tracks: self.video_tracks.clone(),
+        let event_loop = EventLoop {
+            shared: self.shared.clone(),
+            events,
+            wake: self.shared.wake.subscribe(),
             video_receivers: self.video_receivers.clone(),
-            frame_video_entries: self.frame_video_entries.clone(),
-            metrics: self.metrics.clone(),
-            clock: clock.clone(),
-            time: self.clock.clone(),
-            keypoints: self.keypoints.clone(),
-            controller: self.controller.clone(),
-            local_identity,
+            config: self.config.clone(),
         };
-        let event_handle = tokio::spawn(async move {
-            let mut events = events;
-            while let Some(event) = events.recv().await {
-                handle_room_event(&ctx, event);
-            }
-        });
+        let event_task = tokio::spawn(event_loop.run());
 
         let mut state = self.conn.lock();
         state.room = Some(room);
-        state.event_task = Some(event_handle);
-        state.clock = Some(clock);
+        state.event_task = Some(event_task);
         Ok(())
     }
 
@@ -631,28 +355,36 @@ impl Portal {
         height: u32,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
-        // Two transports, one user-facing method. WebRTC publishers and
-        // frame-video publishers are populated by `add_video` at config
-        // time — codec selection routes the spec to one list or the
-        // other — and names are unique across both, so a track lives in
-        // exactly one map.
-        let timestamp_us = Some(timestamp_us.unwrap_or_else(|| self.clock.now_us()));
-        if let Some(publisher) = self.video_publishers.lock().get(track_name).cloned() {
-            return publisher.send_frame(rgb_data, width, height, timestamp_us);
+        let now_us = self.shared.now_us();
+        let route = self.shared.core.lock().send_video_frame(SendVideoFrame {
+            track: track_name,
+            timestamp_us,
+            now_us,
+        })?;
+        // Publishers exist only while connected; before that the track has
+        // nowhere to go.
+        let unknown = || PortalError::UnknownVideoTrack { name: track_name.to_string() };
+        match route.transport {
+            VideoTransport::TransportEncoded => {
+                let publisher =
+                    self.video_publishers.lock().get(track_name).cloned().ok_or_else(unknown)?;
+                publisher.send_frame(rgb_data, width, height, route.timestamp_us)
+            }
+            VideoTransport::ByteFrames { .. } => {
+                let publisher = self
+                    .frame_video_publishers
+                    .lock()
+                    .get(track_name)
+                    .cloned()
+                    .ok_or_else(unknown)?;
+                publisher.send_frame(rgb_data, width, height, route.timestamp_us)
+            }
+            // LiveKit encodes video itself (`wire::CAPS`), so the core never
+            // routes a frame to a driver encoder here.
+            VideoTransport::DriverEncoded { codec } => Err(PortalError::Unsupported(format!(
+                "no driver-side {codec:?} encoder on LiveKit"
+            ))),
         }
-        if let Some(publisher) = self.frame_video_publishers.lock().get(track_name).cloned() {
-            return publisher.send_frame(rgb_data, width, height, timestamp_us);
-        }
-        // Distinguish wrong-role (track is declared but no publisher exists
-        // because send is operator-side) from genuinely unknown-track. The
-        // operator never spawns video publishers, so a declared name with
-        // no publisher means "wrong role" — same shape as `send_state`.
-        if self.config.role != Role::Robot
-            && self.config.video_tracks.iter().any(|s| s.name == track_name)
-        {
-            return Err(PortalError::WrongRole(self.config.role));
-        }
-        Err(PortalError::UnknownVideoTrack { name: track_name.to_string() })
     }
 
     /// Publish a state sample (robot only). Values are typed — build the
@@ -665,12 +397,10 @@ impl Portal {
         values: &HashMap<String, TypedValue>,
         timestamp_us: Option<u64>,
     ) -> PortalResult<()> {
-        let publisher =
-            self.state_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
-        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
-        // State has no echo path; drop the wire-values vector that
-        // `send_map` returns for action callers.
-        publisher.send_map(values, Some(timestamp_us), None).map(|_| ())
+        let now_us = self.shared.now_us();
+        let out = self.shared.core.lock().send_state(SendState { values, timestamp_us, now_us })?;
+        self.shared.execute(out);
+        Ok(())
     }
 
     /// Publish an action (operator only).
@@ -686,45 +416,16 @@ impl Portal {
         timestamp_us: Option<u64>,
         in_reply_to_ts_us: Option<u64>,
     ) -> PortalResult<()> {
-        let publisher =
-            self.action_publisher.lock().clone().ok_or(PortalError::WrongRole(self.config.role))?;
-        // Resolve the actual send timestamp the publisher will stamp onto
-        // the wire so the local echo (if any) sees the same value the
-        // robot sees.
-        let send_ts = timestamp_us.unwrap_or_else(|| self.clock.now_us());
-        let wire_values = publisher.send_map(values, Some(send_ts), in_reply_to_ts_us)?;
-        // Echo path. LiveKit does not fan out a publisher's own data
-        // packets, so without this an operator would never see its own
-        // action through `on_action`. Echo exactly what the subscription
-        // would have delivered from anyone else.
-        //
-        // `wire_values` is what the receiver will reconstruct after decode:
-        // post-carry-forward (so omitted fields keep their last-sent value
-        // rather than reading as 0.0) and post-saturation (so out-of-range
-        // inputs match the clipped wire bytes). Building the echo from the
-        // caller's input map directly would silently diverge whenever a
-        // partial update or saturating value is involved.
-        let active = self.is_self_active();
-        let echo = match self.config.action_subscription {
-            ActionSubscription::None => false,
-            ActionSubscription::Active => active,
-            ActionSubscription::All => true,
-        };
-        let Some(sender) = self.local_identity().filter(|_| echo) else {
-            return Ok(());
-        };
-        let action = crate::data::build_action(
-            send_ts,
+        let now_us = self.shared.now_us();
+        let out = self.shared.core.lock().send_action(SendAction {
+            values,
+            timestamp_us,
             in_reply_to_ts_us,
-            &self.config.action_schema,
-            &wire_values,
-            ActionOrigin { sender, active },
-        );
-        self.action.deliver(action);
+            now_us,
+        })?;
+        self.shared.execute(out);
         Ok(())
     }
-
-    // --- RPC ---
 
     /// Declared state schema (field names + dtypes), in declaration order.
     /// Bindings mirror this snapshot internally; reading from the Portal
@@ -743,7 +444,7 @@ impl Portal {
     /// This Portal's own LiveKit identity once connected. Reads from the
     /// stored `LocalParticipant`. `None` before `connect()` succeeds.
     pub fn local_identity(&self) -> Option<String> {
-        self.local_participant.lock().as_ref().map(|lp| lp.identity().as_str().to_string())
+        self.shared.local_participant.lock().as_ref().map(|lp| lp.identity().as_str().to_string())
     }
 
     /// Identity of the operator the robot is currently listening to, or
@@ -751,19 +452,7 @@ impl Portal {
     /// pointer (also broadcast as the `lk.portal.active_operator` attribute).
     /// On Operator side it is a mirror of the robot's attribute.
     pub fn active_operator(&self) -> Option<String> {
-        self.controller.active_operator.lock().clone()
-    }
-
-    /// `true` iff this Portal's local identity is the current
-    /// `active_operator`. Used internally by the echo path; exposed so
-    /// callers can decide whether to record their own outgoing actions.
-    fn is_self_active(&self) -> bool {
-        let local = self.local_identity();
-        let active = self.controller.active_operator.lock().clone();
-        match (local, active) {
-            (Some(local), Some(active)) => local == active,
-            _ => false,
-        }
+        self.shared.core.lock().active_operator()
     }
 
     /// Set the active operator. On Robot side this updates the local pointer
@@ -772,78 +461,76 @@ impl Portal {
     ///
     /// Pass `None` to clear and drop all incoming actions.
     pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
-        match self.config.role {
-            Role::Robot => {
-                let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
-                let prev = self.controller.active_operator.lock().clone();
-                let mut attrs = HashMap::new();
-                attrs.insert(
-                    ACTIVE_OPERATOR_ATTR_KEY.to_string(),
-                    identity.clone().unwrap_or_default(),
-                );
-                lp.set_attributes(attrs).await.map_err(|e| PortalError::Room(e.to_string()))?;
-                *self.controller.active_operator.lock() = identity.clone();
-                if prev != identity {
-                    self.controller.fire_active_changed(identity.as_deref());
+        if self.config.role() != Role::Robot {
+            // The common pattern is to call this right after `connect()`,
+            // before the robot's attributes have surfaced. Wait briefly for
+            // it rather than forcing every caller to.
+            self.resolve_robot_identity().await?;
+        }
+        let now_us = self.shared.now_us();
+        let (_, out) =
+            self.shared.core.lock().set_active_operator(SetActiveOperator { identity, now_us })?;
+        for output in out {
+            match output {
+                Output::SetPresence { id: Some(id), presence } => {
+                    let lp = self
+                        .shared
+                        .local_participant
+                        .lock()
+                        .clone()
+                        .ok_or(PortalError::NotConnected)?;
+                    let attributes = wire::active_operator_attributes(&presence);
+                    let result = lp.set_attributes(attributes).await.map_err(|e| e.to_string());
+                    self.shared.step(Input::PresenceSet { id, result: result.clone() });
+                    result.map_err(PortalError::Room)?;
                 }
-                Ok(())
-            }
-            Role::Operator | Role::Observer => {
-                // Cached robot identity (populated by attribute events) is
-                // the fast path. The common pattern is:
-                //
-                //   await op.connect(...)
-                //   await op.set_active_operator(op.local_identity())
-                //
-                // immediately after connect, before the SDK has surfaced the
-                // robot's attributes via `ParticipantAttributesChanged`. To
-                // make that work without forcing every caller to manually
-                // wait, we scan `remote_participants()` and, if still empty,
-                // poll briefly. Bounded at ~1.5 s — long enough for the
-                // initial attribute event on a healthy LAN, short enough to
-                // surface NoPeer quickly when there really is no robot.
-                let robot = self.resolve_robot_identity().await?;
-                let payload = identity.unwrap_or_default();
-                self.perform_rpc(Some(&robot), SET_ACTIVE_OPERATOR_RPC, payload, None).await?;
-                Ok(())
+                Output::Rpc { id, to, method, payload, timeout_ms } => {
+                    let timeout = timeout_ms.map(|ms| Duration::from_millis(ms.into()));
+                    let result = self.perform_rpc(Some(&to), &method, payload, timeout).await;
+                    let core_result = match &result {
+                        Ok(s) => Ok(s.clone()),
+                        Err(PortalError::Rpc(e)) => Err(e.clone()),
+                        Err(e) => Err(RpcError::new(1500, e.to_string(), None)),
+                    };
+                    self.shared.step(Input::RpcResponse { id, result: core_result });
+                    result?;
+                }
+                other => self.shared.execute(vec![other]),
             }
         }
+        Ok(())
     }
 
     /// Currently-connected operator identities (excluding self).
     pub fn operators(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.controller.operators.lock().iter().cloned().collect();
-        v.sort();
-        v
+        self.shared.core.lock().operators()
     }
 
     /// Currently-connected observer identities (excluding self). Observers
     /// never drive, so they are listed apart from `operators()`.
     pub fn observers(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.controller.observers.lock().iter().cloned().collect();
-        v.sort();
-        v
+        self.shared.core.lock().observers()
     }
 
     /// Identity of the robot in the room, or `None` if none has been seen.
     /// Operator-side helper, derived from the robot's `lk.portal.role`
     /// attribute.
     pub fn robot_identity(&self) -> Option<String> {
-        self.controller.robot_identity.lock().clone()
+        self.shared.core.lock().robot_identity()
     }
 
     /// Fire when an operator joins the room. Identity is the new operator's
     /// participant identity. Only one callback is stored; subsequent calls
     /// overwrite.
     pub fn on_operator_joined(&self, callback: impl Fn(&str) + Send + Sync + 'static) {
-        *self.controller.on_operator_joined.lock() = Some(Box::new(callback));
+        *self.shared.sinks.operator_joined_cb.lock() = Some(Box::new(callback));
     }
 
     /// Fire when an operator leaves the room. The robot's `active_operator`
     /// attribute is **not** auto-cleared on disconnect; the pointer stays
     /// pinned so a reconnect with the same identity resumes control.
     pub fn on_operator_left(&self, callback: impl Fn(&str) + Send + Sync + 'static) {
-        *self.controller.on_operator_left.lock() = Some(Box::new(callback));
+        *self.shared.sinks.operator_left_cb.lock() = Some(Box::new(callback));
     }
 
     /// Fire when the robot's `active_operator` attribute changes (or, on the
@@ -854,39 +541,37 @@ impl Portal {
         &self,
         callback: impl Fn(Option<&str>) + Send + Sync + 'static,
     ) {
-        *self.controller.on_active_operator_changed.lock() = Some(Box::new(callback));
+        *self.shared.sinks.active_operator_changed_cb.lock() = Some(Box::new(callback));
     }
 
     /// Register an RPC method handler. Handlers can be registered before or
     /// after `connect()`; stored handlers are (re)applied to the
     /// `LocalParticipant` on each connect.
     pub fn register_rpc_method(&self, method: &str, handler: RpcHandler) {
-        {
-            let mut map = self.rpc_handlers.lock();
-            map.insert(method.to_string(), handler.clone());
-        }
-        if let Some(lp) = self.local_participant.lock().clone() {
-            // The SDK's `register_rpc_method` kicks off publisher negotiation,
-            // which `tokio::spawn`s internally. If we were called from a
-            // foreign thread with no runtime context (a binding's asyncio
-            // loop), that spawn panics. Enter the runtime `connect()` ran on
-            // so the spawn lands on it. The handle is always present here
-            // (an LP exists only after a successful connect set it), but fall
-            // back to a bare call rather than panicking if it somehow isn't.
-            match self.runtime_handle.lock().clone() {
-                Some(handle) => {
-                    let _guard = handle.enter();
-                    register_handler_on(&lp, method.to_string(), handler);
-                }
-                None => register_handler_on(&lp, method.to_string(), handler),
+        self.rpc_handlers.lock().insert(method.to_string(), handler.clone());
+        let Some(lp) = self.shared.local_participant.lock().clone() else {
+            return;
+        };
+        // The SDK's `register_rpc_method` kicks off publisher negotiation,
+        // which `tokio::spawn`s internally. If we were called from a
+        // foreign thread with no runtime context (a binding's asyncio
+        // loop), that spawn panics. Enter the runtime `connect()` ran on
+        // so the spawn lands on it. The handle is always present here
+        // (an LP exists only after a successful connect set it), but fall
+        // back to a bare call rather than panicking if it somehow isn't.
+        match self.shared.runtime_handle.lock().clone() {
+            Some(handle) => {
+                let _guard = handle.enter();
+                register_handler_on(&lp, method.to_string(), handler);
             }
+            None => register_handler_on(&lp, method.to_string(), handler),
         }
     }
 
     /// Remove a previously registered RPC method handler.
     pub fn unregister_rpc_method(&self, method: &str) {
         self.rpc_handlers.lock().remove(method);
-        if let Some(lp) = self.local_participant.lock().clone() {
+        if let Some(lp) = self.shared.local_participant.lock().clone() {
             lp.unregister_rpc_method(method.to_string());
         }
     }
@@ -908,7 +593,7 @@ impl Portal {
             Some(id) => id.to_string(),
             None => self.resolve_peer()?,
         };
-        let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
+        let lp = self.shared.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
 
         let mut data = PerformRpcData {
             destination_identity: destination,
@@ -920,70 +605,53 @@ impl Portal {
             data.response_timeout = t;
         }
 
-        lp.perform_rpc(data).await.map_err(|e| PortalError::Rpc(e.into()))
+        lp.perform_rpc(data).await.map_err(|e| PortalError::Rpc(crate::rpc::rpc_error_from_sdk(e)))
     }
 
     /// Walk `room.remote_participants()` looking for one whose attributes
-    /// declare `role=robot`. Synchronous one-shot lookup.
+    /// declare `role=robot`, and tell the core about it so later calls take
+    /// the fast path.
     fn find_robot_in_room(&self) -> Option<String> {
-        let conn = self.conn.lock();
-        let room = conn.room.as_ref()?;
-        for (_sid, participant) in room.remote_participants() {
-            let attrs = participant.attributes();
-            if classify_role(&attrs) == Some(Role::Robot) {
-                let id = participant.identity().as_str().to_string();
-                // Cache for subsequent calls so the slow path runs at most
-                // once per session.
-                *self.controller.robot_identity.lock() = Some(id.clone());
-                return Some(id);
-            }
-        }
-        None
+        let (identity, presence) = {
+            let conn = self.conn.lock();
+            let room = conn.room.as_ref()?;
+            room.remote_participants().into_values().find_map(|p| {
+                let presence = wire::presence(&p.attributes());
+                (presence.compatible_role() == Some(Role::Robot))
+                    .then(|| (p.identity().as_str().to_string(), presence))
+            })?
+        };
+        self.shared.step(Input::PresenceChanged { peer: &identity, presence });
+        Some(identity)
     }
 
     /// Resolve the robot's identity for an operator-side RPC. Tries the
-    /// cached value first (populated by attribute events), then a synchronous
-    /// scan of `room.remote_participants()`, then a short polling loop so
-    /// `set_active_operator` works immediately after `connect()` without
-    /// racing the initial attribute-propagation event. Returns `NoPeer`
-    /// after the timeout if no participant with `role=robot` ever appears.
+    /// core's roster first, then a synchronous scan of the room, then a
+    /// short polling loop so `set_active_operator` works immediately after
+    /// `connect()` without racing the initial attribute-propagation event.
+    /// Returns `NoPeer` after the timeout if no robot ever appears.
     async fn resolve_robot_identity(&self) -> PortalResult<String> {
-        if let Some(id) = self.controller.robot_identity.lock().clone() {
-            return Ok(id);
-        }
-        if let Some(id) = self.find_robot_in_room() {
+        let lookup = || self.robot_identity().or_else(|| self.find_robot_in_room());
+        if let Some(id) = lookup() {
             return Ok(id);
         }
         // Poll for ~1.5s in 50ms ticks. On a healthy LAN the first
         // ParticipantAttributesChanged event lands well within this window.
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            if let Some(id) = self.controller.robot_identity.lock().clone() {
-                return Ok(id);
-            }
-            if let Some(id) = self.find_robot_in_room() {
+            if let Some(id) = lookup() {
                 return Ok(id);
             }
         }
         Err(PortalError::NoPeer)
     }
 
-    /// Resolve a default destination for `perform_rpc(None, ...)`. Reads
-    /// the multi-controller mirrors first (operator → robot, robot →
-    /// active operator), then falls back to a single-remote-participant
-    /// snapshot for setups that haven't designated control yet.
+    /// Resolve a default destination for `perform_rpc(None, ...)`: the
+    /// core's counterpart first, then a single-remote-participant snapshot
+    /// for setups that haven't designated control yet.
     fn resolve_peer(&self) -> PortalResult<String> {
-        match self.config.role {
-            Role::Operator | Role::Observer => {
-                if let Some(id) = self.controller.robot_identity.lock().clone() {
-                    return Ok(id);
-                }
-            }
-            Role::Robot => {
-                if let Some(id) = self.controller.active_operator.lock().clone() {
-                    return Ok(id);
-                }
-            }
+        if let Some(id) = self.shared.core.lock().default_peer() {
+            return Ok(id);
         }
         let conn = self.conn.lock();
         let room = conn.room.as_ref().ok_or(PortalError::NotConnected)?;
@@ -999,7 +667,6 @@ impl Portal {
     }
 
     /// Apply every stored handler to a freshly-connected LocalParticipant.
-    /// Called once from `connect()` after the Room is up.
     fn apply_rpc_handlers(&self, lp: &LocalParticipant) {
         let handlers = self.rpc_handlers.lock().clone();
         for (method, handler) in handlers {
@@ -1007,18 +674,15 @@ impl Portal {
         }
     }
 
-    /// Reset Portal-side state written during a `connect()` that failed
-    /// before reaching the final commit (where `conn.room` / `conn.event_task`
-    /// would be stored). Mirrors the cleanup `disconnect()` does, except it
-    /// (a) doesn't take the lifecycle lock — `connect()` already holds it —
-    /// and (b) leaves the room handle for the caller to close, since the
-    /// failing connect path holds it as a local. Without this, a failed
-    /// connect would leave a stale `LocalParticipant` slot, RPC handler
-    /// bindings on a dropped LP, and partial publisher maps that the next
-    /// `connect()` (or any pre-connect getter) would still see.
-    fn rollback_partial_connect(&self) {
-        *self.local_participant.lock() = None;
-        self.controller.clear();
+    /// Per-connection cleanup shared by `disconnect()` and a failed
+    /// `connect()`, which leaves the room for its caller to close.
+    fn teardown(&self) {
+        *self.shared.local_participant.lock() = None;
+        // Rosters, the active-operator mirror, publishers and the sync
+        // buffer are per-connection, so the next connect starts clean.
+        let out = self.shared.core.lock().disconnect();
+        self.shared.execute(out);
+        *self.shared.lanes.lock() = None;
         {
             let mut receivers = self.video_receivers.lock();
             for receiver in receivers.values() {
@@ -1028,17 +692,7 @@ impl Portal {
         }
         self.video_publishers.lock().clear();
         self.frame_video_publishers.lock().clear();
-        *self.state_publisher.lock() = None;
-        *self.action_publisher.lock() = None;
-        if let Some(sb) = self.sync_buffer.lock().take() {
-            sb.lock().clear();
-        }
-        self.obs_sink.clear();
-        self.action.clear();
-        self.state.clear();
-        for slots in self.video_tracks.values() {
-            slots.clear();
-        }
+        self.shared.sinks.clear_latest();
     }
 
     pub async fn disconnect(&self) -> PortalResult<()> {
@@ -1054,58 +708,25 @@ impl Portal {
             None => Ok(()),
         };
 
-        {
-            let mut state = self.conn.lock();
-            if let Some(task) = state.event_task.take() {
-                task.abort();
-            }
-            state.clock = None;
+        if let Some(task) = self.conn.lock().event_task.take() {
+            task.abort();
         }
-        *self.local_participant.lock() = None;
-        // Multi-controller state (operators, robot_identity, active_operator
-        // mirror) is per-connection and cleared so a subsequent connect()
-        // starts from a clean slate.
-        self.controller.clear();
-        {
-            let mut receivers = self.video_receivers.lock();
-            for receiver in receivers.values() {
-                receiver.abort();
-            }
-            receivers.clear();
-        }
-
-        self.video_publishers.lock().clear();
-        self.frame_video_publishers.lock().clear();
-        *self.state_publisher.lock() = None;
-        *self.action_publisher.lock() = None;
-
-        if let Some(sb) = self.sync_buffer.lock().take() {
-            sb.lock().clear();
-        }
-        self.obs_sink.clear();
-        self.action.clear();
-        self.state.clear();
-        for slots in self.video_tracks.values() {
-            slots.clear();
-        }
-
+        self.teardown();
         close_result
     }
 
     // --- Pull API (latest-wins, peek semantics) ---
 
-    /// Clone of the latest observation, or `None` if none received yet.
-    /// Consumers wanting a history of observations should register
-    /// `on_observation` and buffer on their own side.
     /// Latest observation, or `ObservationSyncDisabled` when observation
-    /// sync is off.
+    /// sync is off. Consumers wanting a history of observations should
+    /// register `on_observation` and buffer on their own side.
     pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
         self.require_observation_sync()?;
-        Ok(self.obs_sink.get())
+        Ok(self.shared.sinks.observation.get())
     }
 
     fn require_observation_sync(&self) -> PortalResult<()> {
-        match self.config.observation_sync {
+        match self.config.observation_sync() {
             true => Ok(()),
             false => Err(PortalError::ObservationSyncDisabled),
         }
@@ -1115,18 +736,18 @@ impl Portal {
     /// `.values` holds typed values per the declared schema; `.raw_values`
     /// is the lossless `f64` view.
     pub fn get_action(&self) -> Option<Action> {
-        self.action.get()
+        self.shared.sinks.action.get()
     }
 
     /// Clone of the latest state received (Operator side), or `None`.
     /// Typed per the declared schema.
     pub fn get_state(&self) -> Option<State> {
-        self.state.get()
+        self.shared.sinks.state.get()
     }
 
     /// Clone of the latest frame received for `track_name`, or `None`.
     pub fn get_video_frame(&self, track_name: &str) -> Option<VideoFrameData> {
-        self.video_tracks.get(track_name).and_then(|s| s.latest.lock().clone())
+        self.shared.sinks.video.get(track_name).and_then(|s| s.latest.lock().clone())
     }
 
     // --- Callback registration (push API) ---
@@ -1135,7 +756,7 @@ impl Portal {
     /// values per the declared schema plus `raw_values` for the lossless
     /// `f64` view.
     pub fn on_action(&self, callback: impl Fn(&Action) + Send + Sync + 'static) {
-        *self.action.cb.lock() = Some(Box::new(callback));
+        *self.shared.sinks.action.cb.lock() = Some(Box::new(callback));
     }
 
     pub fn on_observation(
@@ -1143,19 +764,19 @@ impl Portal {
         callback: impl Fn(&Observation) + Send + Sync + 'static,
     ) -> PortalResult<()> {
         self.require_observation_sync()?;
-        self.obs_sink.set_observation_cb(Box::new(callback));
+        *self.shared.sinks.observation.cb.lock() = Some(Box::new(callback));
         Ok(())
     }
 
     /// Whether this peer bundles observations. See
     /// `PortalConfig::set_observation_sync`.
     pub fn observation_sync(&self) -> bool {
-        self.config.observation_sync
+        self.config.observation_sync()
     }
 
     /// Fire on every received state. Semantics mirror `on_action`.
     pub fn on_state(&self, callback: impl Fn(&State) + Send + Sync + 'static) {
-        *self.state.cb.lock() = Some(Box::new(callback));
+        *self.shared.sinks.state.cb.lock() = Some(Box::new(callback));
     }
 
     pub fn on_video_frame(
@@ -1163,7 +784,7 @@ impl Portal {
         track_name: &str,
         callback: impl Fn(&str, &VideoFrameData) + Send + Sync + 'static,
     ) {
-        match self.video_tracks.get(track_name) {
+        match self.shared.sinks.video.get(track_name) {
             Some(slots) => *slots.cb.lock() = Some(Box::new(callback)),
             None => log::warn!(
                 "[unknown-track] on_video_frame: track '{track_name}' not registered, callback ignored"
@@ -1178,126 +799,53 @@ impl Portal {
         &self,
         callback: impl Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync + 'static,
     ) {
-        self.obs_sink.set_drop_cb(Box::new(callback));
+        *self.shared.sinks.drop_cb.lock() = Some(Box::new(callback));
     }
 
     // --- Internal ---
 
-    async fn setup_robot(&self, room: &Room) -> PortalResult<()> {
-        let lp = room.local_participant();
-
-        for spec in self.config.video_tracks.iter().filter(|s| s.is_webrtc()) {
+    async fn setup_robot(&self, lp: &LocalParticipant) -> PortalResult<()> {
+        let session = self.config.session();
+        for spec in self.config.video_tracks().iter().filter(|s| s.is_webrtc()) {
             let track_name = &spec.name;
-            let track_metrics =
-                self.metrics.track(track_name).expect("track metrics registered at construction");
-            let publisher = VideoPublisher::new(VideoPublisherOptions {
-                spec,
-                metrics: track_metrics,
-                fps: self.config.fps,
-            });
-            if let Err(e) = publisher.publish(&lp).await {
-                // Roll back any earlier publishers so their send tasks stop
-                // and connect() leaves Portal in a clean state.
-                self.video_publishers.lock().clear();
-                return Err(e);
-            }
-            log::info!("[{}] published video track '{track_name}'", self.config.session);
+            let metrics = self
+                .shared
+                .metrics
+                .track(track_name)
+                .expect("track metrics registered at construction");
+            let fps = self.config.fps();
+            let publisher = VideoPublisher::new(VideoPublisherOptions { spec, metrics, fps });
+            publisher.publish(lp).await?;
+            log::info!("[{session}] published video track '{track_name}'");
             self.video_publishers.lock().insert(track_name.clone(), Arc::new(publisher));
         }
 
-        // Frame-video publishers don't go through `LocalParticipant.publish_track`
-        // — they emit one byte stream per frame instead. So no async setup
-        // here, just spawn the per-track drainer task.
+        // Frame-video publishers don't publish a track: they emit one byte
+        // stream per frame, so there is only a drainer task to start.
         for spec in self.config.frame_video_tracks() {
-            let track_metrics =
-                self.metrics.track(&spec.name).expect("track metrics registered at construction");
-            let publisher = FrameVideoPublisher::new(spec.clone(), lp.clone(), track_metrics);
-            log::info!(
-                "[{}] ready to publish frame-video track '{}' via byte stream (codec={:?}, quality={})",
-                self.config.session,
-                spec.name,
-                spec.codec,
-                spec.quality
-            );
+            let metrics = self
+                .shared
+                .metrics
+                .track(&spec.name)
+                .expect("track metrics registered at construction");
+            let publisher = FrameVideoPublisher::new(FrameVideoPublisherOptions {
+                spec: spec.clone(),
+                local_participant: lp.clone(),
+                metrics,
+            });
             self.frame_video_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
         }
-
-        if !self.config.state_schema.is_empty() {
-            let publisher = DataPublisher::new(
-                &self.config.state_schema,
-                STATE_TOPIC,
-                self.config.state_reliable,
-                lp.clone(),
-                self.metrics.clone(),
-                DataStream::State,
-            );
-            let mode = if self.config.state_reliable { "reliable" } else { "unreliable" };
-            log::info!(
-                "[{}] ready to publish state via {mode} data ({} fields)",
-                self.config.session,
-                self.config.state_schema.len()
-            );
-            *self.state_publisher.lock() = Some(Arc::new(publisher));
-        }
-
         Ok(())
-    }
-
-    fn setup_operator(&self, room: &Room) {
-        let lp = room.local_participant();
-
-        // Sync buffer treats both transports the same way — it tracks frame
-        // arrivals by name, regardless of whether they came from a WebRTC
-        // RTP track or a frame-video byte stream. `all_track_names` was
-        // computed once at construction.
-        if self.config.observation_sync {
-            let sync_buffer = Arc::new(Mutex::new(SyncBuffer::new(
-                &self.all_track_names,
-                self.config.state_schema.clone(),
-                self.config.sync_config(),
-                self.config.stall_configs(&self.all_track_names),
-                self.metrics.clone(),
-            )));
-            *self.sync_buffer.lock() = Some(sync_buffer);
-        }
-
-        if self.config.role == Role::Operator && !self.config.action_schema.is_empty() {
-            let mode = if self.config.action_reliable { "reliable" } else { "unreliable" };
-            log::info!(
-                "[{}] ready to publish action via {mode} data ({} fields)",
-                self.config.session,
-                self.config.action_schema.len()
-            );
-            let publisher = DataPublisher::new(
-                &self.config.action_schema,
-                ACTION_TOPIC,
-                self.config.action_reliable,
-                lp.clone(),
-                self.metrics.clone(),
-                DataStream::Action,
-            );
-            *self.action_publisher.lock() = Some(Arc::new(publisher));
-        }
     }
 
     /// Snapshot of metrics since construction or the last `reset_metrics()`.
     pub fn metrics(&self) -> PortalMetrics {
-        let (video_fill, state_fill) = match self.sync_buffer.lock().as_ref() {
-            Some(sb) => {
-                let sb = sb.lock();
-                (sb.video_fill_snapshot(), sb.state_fill())
-            }
-            None => (HashMap::new(), 0),
-        };
-        let mut snapshot = self.metrics.snapshot(video_fill, state_fill);
-        snapshot.time_sync = self.clock.metrics();
-        snapshot
+        self.shared.core.lock().metrics()
     }
 
     /// Resets counters. Time sync state is kept: see `TimeSyncMetrics`.
     pub fn reset_metrics(&self) {
-        self.metrics.reset();
-        self.clock.reset_counters();
+        self.shared.core.lock().reset_metrics();
     }
 
     /// Now, in microseconds on the robot's clock. On the robot this is its
@@ -1305,7 +853,8 @@ impl Portal {
     /// sync it switches to the robot's clock in one step, possibly backwards.
     /// After that it never repeats and never goes backwards.
     pub fn now_us(&self) -> u64 {
-        self.clock.now_us()
+        let raw = self.shared.now_us();
+        self.shared.core.lock().now_us(raw)
     }
 
     /// Send an annotation to everyone in the room, including this peer's own
@@ -1322,31 +871,63 @@ impl Portal {
         payload: serde_json::Map<String, serde_json::Value>,
         timestamp_us: Option<u64>,
     ) -> PortalResult<Vec<String>> {
-        let lp = self.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
-        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now_us());
-        let packet = DataPacket {
-            payload: crate::keypoint::encode(kind, &payload, timestamp_us),
-            topic: Some(KEYPOINT_TOPIC.to_string()),
-            reliable: true,
-            destination_identities: Vec::new(),
-        };
-        lp.publish_data(packet).await.map_err(|e| PortalError::Room(e.to_string()))?;
-        // LiveKit doesn't fan a publisher's own packets back, and a recorder
-        // that marks its own takes still has to see them.
-        let sender = lp.identity().as_str().to_string();
-        self.keypoints.deliver(&Keypoint { kind: kind.to_string(), payload, timestamp_us, sender });
+        let lp = self.shared.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
+        let now_us = self.shared.now_us();
+        let out = self.shared.core.lock().send_keypoint(SendKeypoint {
+            kind,
+            payload,
+            timestamp_us,
+            now_us,
+        })?;
+        for output in out {
+            match output {
+                Output::Publish { stream: Stream::Keypoint, payload, delivery, to } => {
+                    let stream = Stream::Keypoint;
+                    let Some(publish) = publish(Outgoing { stream, payload, delivery, to }) else {
+                        continue;
+                    };
+                    lp.publish_data(packet(publish))
+                        .await
+                        .map_err(|e| PortalError::Room(e.to_string()))?;
+                }
+                // LiveKit doesn't fan a publisher's own packets back, and a
+                // recorder that marks its own takes still has to see them.
+                other => self.shared.execute(vec![other]),
+            }
+        }
         Ok(self.observers())
     }
 
     /// Fire on every keypoint in the room, this peer's own included.
     pub fn on_keypoint(&self, callback: impl Fn(&Keypoint) + Send + Sync + 'static) {
-        self.keypoints.set_callback(Box::new(callback));
+        *self.shared.sinks.keypoint_cb.lock() = Some(Box::new(callback));
     }
 
     /// Fires on the first sync with the robot's clock, and after each resync.
     pub fn on_time_synced(&self, callback: impl Fn() + Send + Sync + 'static) {
-        self.clock.set_on_synced(Box::new(callback));
+        *self.shared.sinks.time_synced_cb.lock() = Some(Box::new(callback));
     }
+}
+
+/// The fields of an `Output::Publish`.
+struct Outgoing {
+    stream: Stream,
+    payload: Vec<u8>,
+    delivery: Delivery,
+    to: Option<String>,
+}
+
+/// A core publish as a LiveKit data packet: the stream's topic, reliable
+/// only for `Delivery::Reliable` (`LatestOnly` and `BestEffort` both ride
+/// the lossy channel), and LiveKit's own addressing for a hinted peer.
+fn publish(outgoing: Outgoing) -> Option<Publish> {
+    let Outgoing { stream, payload, delivery, to } = outgoing;
+    let Some(topic) = wire::topic(stream) else {
+        log::warn!("[publish-failed] stream '{}' has no LiveKit topic", stream.name());
+        return None;
+    };
+    let reliable = delivery == Delivery::Reliable;
+    Some(Publish { topic, payload, reliable, destinations: to.into_iter().collect() })
 }
 
 /// Wrap a Portal `RpcHandler` in the signature the SDK expects and install
@@ -1357,494 +938,33 @@ fn register_handler_on(lp: &LocalParticipant, method: String, handler: RpcHandle
     lp.register_rpc_method(method, move |data| {
         let handler = handler.clone();
         Box::pin(async move {
-            let core_data: crate::rpc::RpcInvocationData = data.into();
-            handler(core_data).await.map_err(Into::into)
+            let core_data = crate::rpc::invocation_from_sdk(data);
+            handler(core_data).await.map_err(crate::rpc::rpc_error_to_sdk)
         })
     });
 }
 
-/// Snapshot of the fields the room event loop needs, so it doesn't take any
-/// Portal-level lock on the hot path.
-struct EventContext {
-    config: PortalConfig,
-    /// Cached schema fingerprints so the receive hot path doesn't recompute
-    /// them per packet. Matches the peer's fingerprint when schemas agree;
-    /// a mismatch logs once per offending value and drops the packet.
-    action_schema_fp: u32,
-    state_schema_fp: u32,
-    sync_buffer: Option<Arc<Mutex<SyncBuffer>>>,
-    obs_sink: Arc<ObservationSink>,
-    action: Arc<ActionSlot>,
-    state: Arc<StateSlot>,
-    video_tracks: HashMap<String, Arc<VideoTrackSlots>>,
-    video_receivers: Arc<Mutex<HashMap<String, VideoReceiver>>>,
-    /// Frame-video entries (spec + slots + metrics fused) keyed by track
-    /// name. Shared as `Arc<HashMap>` so per-frame fan-out into spawn
-    /// tasks bumps a refcount instead of cloning the map.
-    frame_video_entries: Arc<HashMap<String, Arc<FrameVideoTrackEntry>>>,
-    metrics: Arc<MetricsRegistry>,
-    clock: Arc<ClockService>,
-    time: Arc<SyncedClock>,
-    keypoints: Arc<KeypointSlot>,
-    /// Multi-controller state, shared with `Portal` so attribute and
-    /// participant lifecycle events can update it directly without going
-    /// through the Portal struct.
-    controller: Arc<ControllerState>,
-    /// Cached at connect time. Used to skip self when classifying participants
-    /// observed via `ParticipantConnected` / `ParticipantAttributesChanged` —
-    /// our own attribute updates also fire these events on the local participant.
-    local_identity: String,
-}
-
-/// Classify a remote participant by their `lk.portal.role` attribute and
-/// reconcile controller state. Idempotent: re-observing the same participant
-/// does not re-fire `on_operator_joined`. Used by the connect-time snapshot
-/// and the ongoing `ParticipantConnected` / `ParticipantAttributesChanged`
-/// handlers.
-fn classify_and_update(
-    controller: &ControllerState,
-    self_role: Role,
-    identity: &ParticipantIdentity,
-    attrs: &HashMap<String, String>,
-) {
-    let id = identity.as_str().to_string();
-    match classify_role(attrs) {
-        Some(Role::Robot) => {
-            {
-                let mut slot = controller.robot_identity.lock();
-                if slot.as_deref() != Some(id.as_str()) {
-                    *slot = Some(id.clone());
-                }
-            }
-            // Operators and observers mirror the robot's `active_operator`.
-            if self_role != Role::Robot {
-                let new_value = attrs
-                    .get(ACTIVE_OPERATOR_ATTR_KEY)
-                    .and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
-                let mut slot = controller.active_operator.lock();
-                if *slot != new_value {
-                    *slot = new_value.clone();
-                    drop(slot);
-                    controller.fire_active_changed(new_value.as_deref());
-                }
-            }
-        }
-        Some(Role::Operator) => {
-            let inserted = controller.operators.lock().insert(id.clone());
-            if inserted {
-                controller.fire_op_joined(&id);
-            }
-        }
-        Some(Role::Observer) => {
-            controller.observers.lock().insert(id);
-        }
-        None => {
-            // Either the role attribute isn't visible yet (a follow-up
-            // ParticipantAttributesChanged event will bring it) or the peer
-            // speaks another protocol version and stays out of the rosters.
-            if attrs.contains_key(ROLE_ATTR_KEY)
-                && !is_compatible(attrs)
-                && controller.version_mismatch_warned.lock().insert(id.clone())
-            {
-                log::warn!(
-                    "[version-mismatch] ignoring '{id}': it speaks Portal protocol {:?}, this \
-                     peer speaks {PROTOCOL_VERSION:?}; upgrade both sides to the same release",
-                    attrs.get(PROTOCOL_VERSION_ATTR_KEY).map(String::as_str).unwrap_or("<none>"),
-                );
-            }
-        }
-    }
-}
-
-/// Implementation of the `portal.set_active_operator` RPC, registered on the
-/// Robot side at connect. Anyone in the room may call this; payload is the
-/// new identity (or empty string to clear). The handler updates the local
-/// pointer and the broadcast attribute, then fires
-/// `on_active_operator_changed` if the value actually moved.
-/// Whether `caller` is an operator or observer. A peer that calls right
-/// after connecting can reach the robot before its role attribute does, so
-/// an unknown caller gets a short grace period to show up in the rosters.
-async fn caller_may_steer(controller: &ControllerState, caller: &str) -> bool {
-    let known = || {
-        controller.operators.lock().contains(caller) || controller.observers.lock().contains(caller)
-    };
-    let deadline = tokio::time::Instant::now() + RPC_CALLER_ROSTER_WAIT;
-    while !known() {
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    true
-}
-
-async fn set_active_operator_rpc_impl(
-    lp_slot: &Mutex<Option<LocalParticipant>>,
-    controller: &ControllerState,
+/// Relay a `portal.set_active_operator` call to the core and wait for its
+/// answer. The core may hold the call while an unknown caller's role
+/// attribute catches up with it.
+async fn set_active_operator_rpc(
+    shared: Weak<Shared>,
     data: RpcInvocationData,
 ) -> Result<String, RpcError> {
-    if !caller_may_steer(controller, &data.caller_identity).await {
-        return Err(RpcError::new(
-            RPC_NOT_AUTHORIZED,
-            "only operators and observers may set the active operator",
-            None,
-        ));
-    }
-    let identity = if data.payload.is_empty() { None } else { Some(data.payload.clone()) };
-    let lp = lp_slot.lock().clone();
-    let Some(lp) = lp else {
-        return Err(RpcError::new(RPC_NOT_CONNECTED, "robot not connected", None));
+    let not_connected =
+        || RpcError::new(livekit_portal_core::RPC_NOT_CONNECTED, "robot not connected", None);
+    let rx = {
+        let shared = shared.upgrade().ok_or_else(not_connected)?;
+        let id = RpcId(shared.next_rpc.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        shared.rpc_waiters.lock().insert(id, tx);
+        shared.step(Input::RpcRequest(RpcRequest {
+            id,
+            method: SET_ACTIVE_OPERATOR_RPC,
+            from: &data.caller_identity,
+            payload: &data.payload,
+        }));
+        rx
     };
-    let prev = controller.active_operator.lock().clone();
-    let mut attrs = HashMap::new();
-    attrs.insert(ACTIVE_OPERATOR_ATTR_KEY.to_string(), identity.clone().unwrap_or_default());
-    if let Err(e) = lp.set_attributes(attrs).await {
-        return Err(RpcError::new(
-            RPC_SET_ATTRIBUTES_FAILED,
-            format!("set_attributes failed: {e}"),
-            None,
-        ));
-    }
-    *controller.active_operator.lock() = identity.clone();
-    if prev != identity {
-        controller.fire_active_changed(identity.as_deref());
-    }
-    Ok(String::new())
-}
-
-/// The active-operator gate for an incoming action packet. Returns who sent
-/// it and whether they were active, or `None` to drop it before decoding.
-///
-/// The robot takes only the active operator's actions. An operator takes
-/// what its subscription asks for, so a controller with `None` pays nothing
-/// on the receive path. In every case the sender must be a recognised
-/// operator: a pointer seeded from a token or set over RPC can name any
-/// identity.
-fn gate_action(
-    ctx: &EventContext,
-    participant: Option<&RemoteParticipant>,
-) -> Option<ActionOrigin> {
-    let subscription = match ctx.config.role {
-        Role::Robot => ActionSubscription::Active,
-        Role::Operator | Role::Observer => ctx.config.action_subscription,
-    };
-    if subscription == ActionSubscription::None {
-        return None;
-    }
-    let sender = participant?.identity().as_str().to_string();
-    if !ctx.controller.operators.lock().contains(&sender) {
-        return None;
-    }
-    let active = ctx.controller.active_operator.lock().as_deref() == Some(sender.as_str());
-    if !active && subscription == ActionSubscription::Active {
-        return None;
-    }
-    Some(ActionOrigin { sender, active })
-}
-
-fn handle_room_event(ctx: &EventContext, event: RoomEvent) {
-    match event {
-        RoomEvent::TrackSubscribed { track, publication, .. } => {
-            if ctx.config.role == Role::Robot {
-                return;
-            }
-            if let RemoteTrack::Video(video_track) = track {
-                let track_name = publication.name();
-                if ctx.config.video_tracks.iter().any(|s| s.name == track_name) {
-                    log::info!("[{}] subscribed to video track '{track_name}'", ctx.config.session);
-                    let slots = ctx
-                        .video_tracks
-                        .get(track_name.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| Arc::new(VideoTrackSlots::new()));
-                    let track_metrics = ctx
-                        .metrics
-                        .track(track_name.as_str())
-                        .expect("track metrics registered at construction");
-
-                    let stream = NativeVideoStream::new(video_track.rtc_track());
-                    let receiver = VideoReceiver::spawn(
-                        track_name.to_string(),
-                        stream,
-                        ctx.sync_buffer.clone(),
-                        slots,
-                        ctx.obs_sink.clone(),
-                        track_metrics,
-                    );
-                    ctx.video_receivers.lock().insert(track_name.to_string(), receiver);
-                }
-            }
-        }
-        RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. } => {
-            if topic == CLOCK_TOPIC {
-                if let Some(p) = &participant {
-                    ctx.clock.handle_packet(&payload, p.identity().as_str());
-                }
-                return;
-            }
-            if topic == KEYPOINT_TOPIC {
-                let Some(p) = &participant else {
-                    return;
-                };
-                let sender = p.identity().as_str().to_string();
-                if ctx.controller.is_known_peer(&sender) {
-                    ctx.keypoints.handle_packet(&payload, sender);
-                }
-                return;
-            }
-            // Actions go through the gate; state carries no sender.
-            let origin = match topic.as_str() {
-                ACTION_TOPIC => {
-                    let Some(origin) = gate_action(ctx, participant.as_ref()) else {
-                        return;
-                    };
-                    origin
-                }
-                _ => ActionOrigin { sender: String::new(), active: false },
-            };
-            let output = handle_data_received(
-                &payload,
-                &topic,
-                ctx.config.role,
-                &ctx.config.action_schema,
-                ctx.action_schema_fp,
-                &ctx.config.state_schema,
-                ctx.state_schema_fp,
-                &ctx.action,
-                &ctx.state,
-                ctx.sync_buffer.as_ref(),
-                &ctx.metrics,
-                origin,
-                ctx.time.estimate_us(),
-            );
-            if !output.is_empty() {
-                ctx.obs_sink.dispatch(output);
-            }
-        }
-        RoomEvent::ByteStreamOpened { reader, topic, .. } => {
-            // Portal owns one byte-stream topic, `portal_frame_video`
-            // (robot → operator): per-frame RGB/PNG/MJPEG payloads that
-            // bypass the WebRTC media path. We `take` only matching streams
-            // so other applications using byte streams on unrelated topics
-            // are left untouched. The header in each payload routes it to
-            // the right entry (spec + slots + metrics fused; one HashMap
-            // lookup at dispatch).
-            if ctx.config.role == Role::Robot
-                || topic != FRAME_VIDEO_TOPIC
-                || ctx.frame_video_entries.is_empty()
-            {
-                return;
-            }
-            let sync_buffer = ctx.sync_buffer.clone();
-            let Some(reader) = reader.take() else {
-                return;
-            };
-            // Refcount bumps only — no map or HashMap clone.
-            let entries = ctx.frame_video_entries.clone();
-            let obs_sink = ctx.obs_sink.clone();
-            tokio::spawn(async move {
-                use livekit::StreamReader;
-                match reader.read_all().await {
-                    // `Bytes::from(Vec)` is a move. Subsequent
-                    // `Bytes::slice(...)` in the dispatch path is a
-                    // refcount bump, so the `Raw` codec gets a
-                    // zero-copy view of the wire payload all the
-                    // way to `VideoFrameData.data`.
-                    Ok(payload) => {
-                        dispatch_frame_payload(payload, &entries, sync_buffer.as_ref(), &obs_sink)
-                    }
-                    Err(e) => {
-                        log::warn!("[bad-payload] failed to read frame_video byte stream: {e}")
-                    }
-                }
-            });
-        }
-        RoomEvent::ParticipantConnected(participant) => {
-            // Snapshot the peer's attributes once they are visible. We may
-            // observe an empty attribute map if the new participant has not
-            // yet completed their `set_attributes` call; the
-            // `ParticipantAttributesChanged` event will reclassify them when
-            // the role attribute lands.
-            let identity = participant.identity();
-            let attrs = participant.attributes();
-            classify_and_update(&ctx.controller, ctx.config.role, &identity, &attrs);
-        }
-        RoomEvent::ParticipantAttributesChanged { participant, .. } => {
-            let identity = participant.identity();
-            // Skip our own attribute updates: when we self-set `role` /
-            // `active_operator`, the SDK echoes the change back through this
-            // event for the local participant.
-            if identity.as_str() == ctx.local_identity {
-                return;
-            }
-            let attrs = participant.attributes();
-            classify_and_update(&ctx.controller, ctx.config.role, &identity, &attrs);
-        }
-        RoomEvent::ParticipantDisconnected(participant) => {
-            // Multi-controller bookkeeping. The `active_operator` pointer
-            // stays pinned by design (see spec.md §Defaults: "stays pinned");
-            // a same-identity reconnect resumes control, a different operator
-            // claims explicitly via `set_active_operator`.
-            let identity = participant.identity();
-            let id_str = identity.as_str().to_string();
-            log::info!("[{}] participant '{}' disconnected", ctx.config.session, id_str);
-            if ctx.controller.operators.lock().remove(&id_str) {
-                ctx.controller.fire_op_left(&id_str);
-            }
-            ctx.controller.observers.lock().remove(&id_str);
-            let mut robot_slot = ctx.controller.robot_identity.lock();
-            if robot_slot.as_deref() == Some(id_str.as_str()) {
-                *robot_slot = None;
-                ctx.clock.robot_left();
-            }
-        }
-        RoomEvent::Reconnected => {
-            log::info!(
-                "[{}] reconnected, clearing sync buffers and latest slots",
-                ctx.config.session
-            );
-            if let Some(sb) = &ctx.sync_buffer {
-                sb.lock().clear();
-            }
-            // Pre-reconnect data is stale by definition; consumers calling
-            // get_* after a reconnect should see None until fresh packets
-            // arrive, matching the semantics already applied to sync_buffer.
-            ctx.obs_sink.clear();
-            ctx.action.clear();
-            ctx.state.clear();
-            for slots in ctx.video_tracks.values() {
-                slots.clear();
-            }
-            // Reset the per-room rosters but keep `active_operator` pinned —
-            // the robot has no self-event to re-read its own attribute, and
-            // the operator-side mirror gets reseeded by the post-reconnect
-            // `ParticipantConnected` for the robot (idempotent on equal
-            // values). Clearing it here would silently stall control on the
-            // robot side across any transient reconnect.
-            ctx.controller.clear_for_reconnect();
-        }
-        _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn attrs(role: &str, version: Option<&str>) -> HashMap<String, String> {
-        let mut attrs = HashMap::from([(ROLE_ATTR_KEY.to_string(), role.to_string())]);
-        if let Some(v) = version {
-            attrs.insert(PROTOCOL_VERSION_ATTR_KEY.to_string(), v.to_string());
-        }
-        attrs
-    }
-
-    #[test]
-    fn matching_version_is_classified() {
-        assert_eq!(classify_role(&attrs("robot", Some(PROTOCOL_VERSION))), Some(Role::Robot));
-        assert_eq!(classify_role(&attrs("operator", Some(PROTOCOL_VERSION))), Some(Role::Operator));
-    }
-
-    #[test]
-    fn missing_or_other_version_is_ignored() {
-        assert_eq!(classify_role(&attrs("operator", None)), None);
-        assert_eq!(classify_role(&attrs("operator", Some("2"))), None);
-        assert_eq!(classify_role(&attrs("robot", Some(""))), None);
-        assert_eq!(classify_role(&HashMap::new()), None);
-    }
-
-    #[test]
-    fn mismatched_peer_stays_out_of_rosters() {
-        let controller = ControllerState::new();
-        let id = ParticipantIdentity::from("old-operator".to_string());
-        classify_and_update(&controller, Role::Robot, &id, &attrs("operator", None));
-        classify_and_update(&controller, Role::Robot, &id, &attrs("operator", Some("2")));
-        assert!(controller.operators.lock().is_empty());
-        assert!(controller.version_mismatch_warned.lock().contains("old-operator"));
-
-        let robot = ParticipantIdentity::from("old-robot".to_string());
-        classify_and_update(&controller, Role::Operator, &robot, &attrs("robot", Some("2")));
-        assert!(controller.robot_identity.lock().is_none());
-    }
-
-    #[test]
-    fn observers_have_their_own_roster() {
-        assert_eq!(classify_role(&attrs("observer", Some(PROTOCOL_VERSION))), Some(Role::Observer));
-
-        let controller = ControllerState::new();
-        let joined = Arc::new(Mutex::new(Vec::new()));
-        let log = joined.clone();
-        *controller.on_operator_joined.lock() =
-            Some(Box::new(move |id| log.lock().push(id.to_string())));
-
-        let obs = ParticipantIdentity::from("recorder".to_string());
-        let op = ParticipantIdentity::from("teleop".to_string());
-        classify_and_update(
-            &controller,
-            Role::Robot,
-            &obs,
-            &attrs("observer", Some(PROTOCOL_VERSION)),
-        );
-        classify_and_update(
-            &controller,
-            Role::Robot,
-            &op,
-            &attrs("operator", Some(PROTOCOL_VERSION)),
-        );
-
-        assert!(controller.observers.lock().contains("recorder"));
-        assert!(!controller.operators.lock().contains("recorder"));
-        assert_eq!(*joined.lock(), vec!["teleop".to_string()], "observers are not operators");
-    }
-
-    #[test]
-    fn observers_mirror_the_active_operator() {
-        let controller = ControllerState::new();
-        let robot = ParticipantIdentity::from("robot".to_string());
-        let mut robot_attrs = attrs("robot", Some(PROTOCOL_VERSION));
-        robot_attrs.insert(ACTIVE_OPERATOR_ATTR_KEY.to_string(), "teleop".to_string());
-        classify_and_update(&controller, Role::Observer, &robot, &robot_attrs);
-        assert_eq!(controller.active_operator.lock().as_deref(), Some("teleop"));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn only_operators_and_observers_may_steer() {
-        let controller = ControllerState::new();
-        controller.operators.lock().insert("teleop".to_string());
-        controller.observers.lock().insert("recorder".to_string());
-        assert!(caller_may_steer(&controller, "teleop").await);
-        assert!(caller_may_steer(&controller, "recorder").await);
-        assert!(!caller_may_steer(&controller, "stranger").await);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn waiting_strangers_do_not_hold_up_other_callers() {
-        let controller = Arc::new(ControllerState::new());
-        controller.operators.lock().insert("teleop".to_string());
-        let start = tokio::time::Instant::now();
-        let strangers: Vec<_> = (0..50)
-            .map(|i| {
-                let controller = controller.clone();
-                tokio::spawn(async move { caller_may_steer(&controller, &format!("s{i}")).await })
-            })
-            .collect();
-        let late = {
-            let controller = controller.clone();
-            tokio::spawn(async move { caller_may_steer(&controller, "late").await })
-        };
-
-        assert!(caller_may_steer(&controller, "teleop").await);
-        assert_eq!(start.elapsed(), Duration::ZERO);
-        // A caller whose role shows up during the wait is let in.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        controller.observers.lock().insert("late".to_string());
-        assert!(late.await.expect("task"));
-        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT);
-
-        for s in strangers {
-            assert!(!s.await.expect("task"));
-        }
-        // Refused together after one wait, not one wait each.
-        assert!(start.elapsed() < RPC_CALLER_ROSTER_WAIT + Duration::from_millis(100));
-    }
+    rx.await.unwrap_or_else(|_| Err(not_connected()))
 }

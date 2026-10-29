@@ -26,6 +26,15 @@ for file in "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/python/pyproject.toml"; do
     echo "updated $file"
 done
 
+# Every crate (livekit-portal-core, livekit-portal, livekit-portal-ffi) inherits the
+# workspace version; fail loudly if one stops doing so and would be skipped.
+for crate in livekit-portal-core livekit-portal livekit-portal-ffi; do
+    if ! grep -q '^version = { workspace = true }' "$REPO_ROOT/$crate/Cargo.toml"; then
+        echo "error: $crate/Cargo.toml does not inherit the workspace version" >&2
+        exit 1
+    fi
+done
+
 # Sync lockfile entries for workspace members to the new version.
 (cd "$REPO_ROOT" && cargo update --workspace --offline)
 echo "updated $REPO_ROOT/Cargo.lock"

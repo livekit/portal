@@ -1,5 +1,5 @@
 [workspace]
-members = ["livekit-portal", "livekit-portal-ffi"]
+members = ["livekit-portal-core", "livekit-portal", "livekit-portal-ffi"]
 resolver = "2"
 
 [workspace.package]

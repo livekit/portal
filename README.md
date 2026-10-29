@@ -201,8 +201,7 @@ Cloud; one-way values in its diagram are derived from round trips.
 
 To measure overhead across regions, compare direct UDP ping, plain LiveKit SDK
 round trips, and Portal round trips between the same machines. In the run above,
-Portal added about 1.5 ms over plain LiveKit. Between two machines in San
-Francisco, the LiveKit route is about 18 ms and Portal adds about 1–2 ms. See
+Portal added about 1.5 ms over plain LiveKit. See
 [Measuring overhead across regions](examples/python/benchmark/README.md#measuring-overhead-across-regions)
 for the method and results.
 

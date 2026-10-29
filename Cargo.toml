@@ -9,7 +9,7 @@ version = "0.2.8"
 
 [workspace.dependencies]
 log = "0.4"
-parking_lot = "0.12"
+parking_lot = "0.13"
 thiserror = "2"
 tokio = "1"
 

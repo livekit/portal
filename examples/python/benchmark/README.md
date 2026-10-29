@@ -139,6 +139,25 @@ to run, and the direct ping's p95 moved with it. Portal's share was
 under 5 ms in every run that wasn't hit by a network burst. A shorter path
 shrinks the network and LiveKit terms.
 
+### Example: within San Francisco
+
+Two machines in San Francisco, the robot on one and the operator on the other,
+both on LiveKit Cloud. Traffic between them goes through the LiveKit SFU rather
+than directly, so this reflects a same-region deployment. H264 640x480 at 30 fps,
+30 s per run, median of three interleaved runs:
+
+| Round trip                        | p50     | p95     | Added                         |
+| --------------------------------- | ------- | ------- | ----------------------------- |
+| LiveKit SDK, data echo            | 17.6 ms | 23.3 ms | LiveKit route                 |
+| Portal, `on_state` → action       | 18.2 ms | 24.9 ms | +0.6 ms Portal                |
+| LiveKit SDK, video echo           | 23.9 ms | 54.6 ms | +6.3 ms video pipeline        |
+| Portal, `on_video_frame` → action | 26.0 ms | 56.5 ms | +2.1 ms Portal                |
+| Portal, `on_observation` → action | 25.4 ms | 57.3 ms | waits for its own video frame |
+
+In the same region the route shrinks to about 18 ms, and Portal still adds
+about 1–2 ms. Video is the slower path, about 6 ms behind state, so an
+observation completes when its frame arrives.
+
 ## Configuration
 
 Set options in `.env`. Use the same `PORTAL_FPS` and `PORTAL_CODEC` on both sides.

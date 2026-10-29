@@ -85,7 +85,8 @@ that uncertainty are not reliable.
 ### Interpreting results
 
 - `obs` waits for both video and state, so it usually tracks the slower video path.
-- `loop` includes observation latency, action latency, and callback processing.
+- `loop` is a round trip (RTT): observation latency, action latency, and callback
+  processing.
 - High `loop` relative to `rtt` can indicate media pipeline overhead. Try smaller
   frames or `PORTAL_CODEC=mjpeg`.
 - With `mjpeg`, `png`, or `raw`, video and state share a reliable data channel.
@@ -112,7 +113,51 @@ Time every round trip on the robot's clock, so clock sync can't skew it.
 Interleave the LiveKit and Portal runs, and keep the ping running throughout,
 so all three see the same network.
 
-### Example: Vietnam to San Francisco
+## Sample results
+
+Three cases, from one machine to opposite sides of the Pacific. All use H264
+640x480 at 30 fps. Every latency below is a **round trip (RTT)**: from capture on
+the robot to the reply arriving back, timed on the robot's clock. One-way values
+in the diagrams are derived from those round trips.
+
+| Case                                                      | Capture-to-action loop, p50 RTT | Portal over plain LiveKit |
+| --------------------------------------------------------- | ------------------------------- | ------------------------- |
+| [Local server](#local-server)                             | 6.84 ms                         | -                         |
+| [Within San Francisco](#within-san-francisco)             | 25.4 ms                         | ≈1–2 ms                   |
+| [San Francisco to Hanoi](#san-francisco-to-hanoi-vietnam) | 235.1 ms                        | ≈1.5 ms                   |
+
+### Local server
+
+Robot and operator on one machine with `livekit-server --dev`: the diagram at the
+top of this page, and the sample output in
+[Reading the results](#reading-the-results). The loop is 6.84 ms RTT at p50, most
+of it video encode and decode.
+
+### Within San Francisco
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-sf-dark.svg">
+  <img alt="Robot and teleoperator on two machines in San Francisco, on LiveKit Cloud, 640x480 H264 at 30 fps. Video about 17 ms and state about 9 ms to the teleoperator, observation at about 17 ms, action about 9 ms back, loop 25.4 ms round trip. Portal adds about 1 to 2 ms over plain LiveKit. One-way values are derived from round trips." src="../../../docs/images/example-benchmark-sf-light.svg" width="100%">
+</picture>
+
+Two machines in San Francisco, the robot on one and the operator on the other,
+both on [LiveKit Cloud](https://cloud.livekit.io). Traffic between them goes
+through the LiveKit SFU rather than directly, so this reflects a same-region
+deployment. 30 s per run, median of three interleaved runs:
+
+| Round trip (RTT)                  | p50     | p95     | Added                         |
+| --------------------------------- | ------- | ------- | ----------------------------- |
+| LiveKit SDK, data echo            | 17.6 ms | 23.3 ms | LiveKit route                 |
+| Portal, `on_state` → action       | 18.2 ms | 24.9 ms | +0.6 ms Portal                |
+| LiveKit SDK, video echo           | 23.9 ms | 54.6 ms | +6.3 ms video pipeline        |
+| Portal, `on_video_frame` → action | 26.0 ms | 56.5 ms | +2.1 ms Portal                |
+| Portal, `on_observation` → action | 25.4 ms | 57.3 ms | waits for its own video frame |
+
+In the same region the route shrinks to about 18 ms RTT, and Portal still adds
+about 1–2 ms. Video is the slower path, about 6 ms behind state, so an
+observation completes when its frame arrives.
+
+### San Francisco to Hanoi, Vietnam
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../../../docs/images/example-benchmark-cloud-dark.svg">
@@ -120,10 +165,10 @@ so all three see the same network.
 </picture>
 
 A hard case: the robot in San Francisco, the operator in Hanoi, Vietnam, both
-on [LiveKit Cloud](https://cloud.livekit.io). H264 640x480 at 30 fps, 30 s per
-run. Median round trips from the best of three interleaved runs:
+on [LiveKit Cloud](https://cloud.livekit.io). 30 s per run. Median round trips
+from the best of three interleaved runs:
 
-| Round trip                        | p50      | Added                                          |
+| Round trip (RTT)                  | p50      | Added                                          |
 | --------------------------------- | -------- | ---------------------------------------------- |
 | Direct UDP ping                   | 184.1 ms | network floor                                  |
 | LiveKit SDK, data echo            | 221.0 ms | +36.9 ms LiveKit route                         |
@@ -138,25 +183,6 @@ latency followed the network: p95 ranged from about 320 ms to over 1 s from run
 to run, and the direct ping's p95 moved with it. Portal's share was
 under 5 ms in every run that wasn't hit by a network burst. A shorter path
 shrinks the network and LiveKit terms.
-
-### Example: within San Francisco
-
-Two machines in San Francisco, the robot on one and the operator on the other,
-both on LiveKit Cloud. Traffic between them goes through the LiveKit SFU rather
-than directly, so this reflects a same-region deployment. H264 640x480 at 30 fps,
-30 s per run, median of three interleaved runs:
-
-| Round trip                        | p50     | p95     | Added                         |
-| --------------------------------- | ------- | ------- | ----------------------------- |
-| LiveKit SDK, data echo            | 17.6 ms | 23.3 ms | LiveKit route                 |
-| Portal, `on_state` → action       | 18.2 ms | 24.9 ms | +0.6 ms Portal                |
-| LiveKit SDK, video echo           | 23.9 ms | 54.6 ms | +6.3 ms video pipeline        |
-| Portal, `on_video_frame` → action | 26.0 ms | 56.5 ms | +2.1 ms Portal                |
-| Portal, `on_observation` → action | 25.4 ms | 57.3 ms | waits for its own video frame |
-
-In the same region the route shrinks to about 18 ms, and Portal still adds
-about 1–2 ms. Video is the slower path, about 6 ms behind state, so an
-observation completes when its frame arrives.
 
 ## Configuration
 

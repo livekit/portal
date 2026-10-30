@@ -18,6 +18,10 @@ async def main() -> None:
     config.add_state_typed(JOINTS)
     config.add_action_typed(JOINTS)
     config.set_fps(settings.fps)
+    # Lossy: a late sample is worse than a lost one, and reliable delivery
+    # stalls for seconds after packet loss on long routes.
+    config.set_state_reliable(False)
+    config.set_action_reliable(False)
     op = Operator(config)
 
     stats = Stats("teleoperator", "obs", "video", "state")

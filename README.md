@@ -171,39 +171,48 @@ latency, jitter, and the full capture-to-action loop on your network. It streams
 synthetic video and state and replies to each observation immediately. No hardware
 required.
 
-Sample results with H264 at 640×480, 30 fps:
+The sample results below use H264 at 640×480 and 30 fps. The capture-to-action
+loop is a **round trip (RTT)**, measured from capture on the robot until the
+operator's reply reaches the robot.
 
 <table>
 <thead>
-<tr><th>Local LiveKit server</th><th>San Francisco ↔ Hanoi, Vietnam</th></tr>
+<tr><th>Local LiveKit server</th><th>Within San Francisco</th><th>San Francisco ↔ Hanoi, Vietnam</th></tr>
 </thead>
 <tbody>
 <tr>
-<td width="50%">
+<td width="33%">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-benchmark-dark.svg">
-  <img alt="Local benchmark: video 5.9 ms, state 1.2 ms, observation 6.2 ms, action 0.5 ms, and full loop 6.8 ms at p50." src="docs/images/example-benchmark-light.svg" width="100%">
+  <img alt="Local benchmark: video 5.9 ms, state 1.2 ms, observation 6.2 ms, action 0.5 ms, and full loop 6.8 ms round trip at p50." src="docs/images/example-benchmark-light.svg" width="100%">
 </picture>
 </td>
-<td width="50%">
+<td width="33%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-benchmark-sf-dark.svg">
+  <img alt="LiveKit Cloud benchmark between two machines in San Francisco: full loop 26.0 ms round trip at p50, and under 2 ms added by Portal over plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-sf-light.svg" width="100%">
+</picture>
+</td>
+<td width="33%">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/example-benchmark-cloud-dark.svg">
-  <img alt="LiveKit Cloud benchmark with the robot in San Francisco and operator in Hanoi: full loop 235.1 ms at p50, direct UDP ping 184.1 ms, and about 1.5 ms added by Portal over plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-cloud-light.svg" width="100%">
+  <img alt="LiveKit Cloud benchmark with the robot in San Francisco and operator in Hanoi: full loop 264.5 ms round trip at p50, within 3 ms of plain LiveKit. One-way values are derived from round trips." src="docs/images/example-benchmark-cloud-light.svg" width="100%">
 </picture>
 </td>
 </tr>
-<tr><td>Capture-to-action loop: <b>6.84 ms p50</b></td><td>Capture-to-action loop: <b>235.1 ms p50</b></td></tr>
+<tr><td>Loop RTT: <b>6.84 ms p50</b></td><td>Loop RTT: <b>26.0 ms p50</b></td><td>Loop RTT: <b>264.5 ms p50</b></td></tr>
 </tbody>
 </table>
 
-The cross-region result is from the best of three interleaved runs on LiveKit
-Cloud; one-way values in its diagram are derived from round trips.
+Each LiveKit Cloud result is the median of three interleaved runs. One-way
+values in the Cloud diagrams are estimates derived from round trips.
 
-To measure overhead across regions, compare direct UDP ping, plain LiveKit SDK
-round trips, and Portal round trips between the same machines. In the run above,
-Portal added about 1.5 ms over plain LiveKit. See
+To measure what Portal adds over a real network, compare plain LiveKit SDK round
+trips with Portal round trips between the same machines. Portal added under
+2 ms on a 19 ms LiveKit route within San Francisco, and stayed within ±3 ms of
+plain LiveKit on a 259 ms route from San Francisco to Hanoi. See
 [Measuring overhead across regions](examples/python/benchmark/README.md#measuring-overhead-across-regions)
-for the method and results.
+for the method, full results, and delivery gaps observed on the cross-region route.
 
 ## License
 

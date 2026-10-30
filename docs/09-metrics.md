@@ -72,11 +72,17 @@ of 8 000 means you are using a sixth of the window and could tighten
 `tolerance`. A p95 near 45 000 means you are riding the edge and any added
 jitter will start dropping.
 
+With aligned state and video capture, a delta near one tick (33 333 µs at
+30 fps) can indicate a neighboring frame stood in after the own frame was
+missing or the lag budget expired. It is not proof of transport loss: capture
+offsets and stall fallbacks also affect this metric. A borrowed neighbor remains
+`LIVE` and does not increment `stale_observations_emitted`.
+
 **`stale_observations_emitted` is your freeze detector.** With
 `stall_behavior: freeze`, a frozen camera produces observations exactly like a
 healthy one. This counter is the session-level signal that distinguishes them;
 per frame, `frame.source` reads `STALE`. Rising here
-while `observations_emitted` holds steady means video is frozen and state is
+while the observation emission rate stays steady means video is frozen and state is
 still flowing.
 
 **`last_blocker_track` is sticky.** It names the last track that held matching

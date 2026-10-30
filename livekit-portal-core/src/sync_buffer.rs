@@ -104,6 +104,10 @@ struct MatchSlot<F> {
     // set `last_emitted_frames[track] = frame`. If `None`, the frame is
     // the stored last-emitted fallback — buffer and pointer stay put.
     drain_to: Option<usize>,
+    // A neighbor ahead of the state, standing in for a lost frame. It is
+    // left in the buffer (drain stops just before it) so the state it
+    // belongs to can still match it.
+    borrowed: bool,
     // How the frame relates to the state it is being attached to. `Live`
     // for an in-range match; `Stale` for either reuse path (pure reuse or a
     // below-horizon drain-match). Stamped onto the emitted frame so
@@ -457,6 +461,7 @@ impl<F: FramePayload> SyncBuffer<F> {
                 // being non-empty; if empty we fall through to the reuse /
                 // wait branches below.
                 let mut best_idx: Option<usize> = None;
+                let mut best_delta = u64::MAX;
                 if !frame_buf.is_empty() {
                     let cursor = &mut self.cursors[track_i];
                     // Defensive clamp in case capacity shrunk or mutation missed an adjustment.
@@ -476,7 +481,6 @@ impl<F: FramePayload> SyncBuffer<F> {
                     }
 
                     let cursor_val = *cursor;
-                    let mut best_delta = u64::MAX;
                     for candidate in
                         [Some(cursor_val), cursor_val.checked_add(1)].into_iter().flatten()
                     {
@@ -500,10 +504,31 @@ impl<F: FramePayload> SyncBuffer<F> {
                     }
                 }
 
+                let newest_ts = frame_buf.back().map(|f| f.timestamp_us());
+                let stall = self.stall[track_i];
+                let lagged =
+                    stall.max_lag_us.is_some_and(|max| logical_now.saturating_sub(state_ts) >= max);
+
                 if let Some(idx) = best_idx {
+                    // A neighbor stands in only once the state's own frame is
+                    // lost. Frames arrive in timestamp order, so it is lost
+                    // once a frame past its window is buffered; until then it
+                    // may only be late (video is often slower than state).
+                    let native = self.config.native_range_us;
+                    let own_frame_pending = best_delta >= native
+                        && newest_ts.is_some_and(|n| n < state_ts.saturating_add(native));
+                    if own_frame_pending && !lagged {
+                        if iter_blocker.is_none() {
+                            iter_blocker = Some(track_i);
+                        }
+                        continue;
+                    }
+                    let frame = self.video_buffers[track_i][idx].clone();
+                    let borrowed = best_delta >= native && frame.timestamp_us() > state_ts;
                     self.matched_scratch[track_i] = Some(MatchSlot {
-                        frame: self.video_buffers[track_i][idx].clone(),
+                        frame,
                         drain_to: Some(idx),
+                        borrowed,
                         source: FrameSource::Live,
                     });
                     continue;
@@ -523,7 +548,6 @@ impl<F: FramePayload> SyncBuffer<F> {
                 // `video_buffer_size` frames.) `>=` matches the strict
                 // `d < range` match rule: a frame at exactly `state_ts +
                 // range` is not a match, so the state cannot match it either.
-                let newest_ts = frame_buf.back().map(|f| f.timestamp_us());
                 let unmatchable = newest_ts.is_some_and(|n| n >= state_ts.saturating_add(range));
 
                 // Otherwise a future frame could still land in range, so we
@@ -532,10 +556,6 @@ impl<F: FramePayload> SyncBuffer<F> {
                 // historical behavior of waiting until state-buffer capacity
                 // evicts the moment (or forever, if state output has stopped
                 // too). See `logical_now`.
-                let stall = self.stall[track_i];
-                let lagged =
-                    stall.max_lag_us.is_some_and(|max| logical_now.saturating_sub(state_ts) >= max);
-
                 if !unmatchable && !lagged {
                     if iter_blocker.is_none() {
                         iter_blocker = Some(track_i);
@@ -565,6 +585,7 @@ impl<F: FramePayload> SyncBuffer<F> {
                                 self.matched_scratch[track_i] = Some(MatchSlot {
                                     frame: cand.clone(),
                                     drain_to: Some(c),
+                                    borrowed: false,
                                     source: FrameSource::Stale,
                                 });
                                 continue;
@@ -574,6 +595,7 @@ impl<F: FramePayload> SyncBuffer<F> {
                             self.matched_scratch[track_i] = Some(MatchSlot {
                                 frame: stale,
                                 drain_to: None,
+                                borrowed: false,
                                 source: FrameSource::Stale,
                             });
                             continue;
@@ -595,6 +617,7 @@ impl<F: FramePayload> SyncBuffer<F> {
                             self.matched_scratch[track_i] = Some(MatchSlot {
                                 frame,
                                 drain_to: None,
+                                borrowed: false,
                                 source: FrameSource::Omitted,
                             });
                             if let Some(tm) = self.metrics.track(&self.track_names[track_i]) {
@@ -672,9 +695,10 @@ impl<F: FramePayload> SyncBuffer<F> {
                         // for fresh matches AND for below-horizon reuse
                         // matches, so `last_emitted_frames` always advances
                         // with state_ts.
-                        self.video_buffers[track_i].drain(0..=idx);
+                        let end = if slot.borrowed { idx } else { idx + 1 };
+                        self.video_buffers[track_i].drain(0..end);
                         // Cursor was at or just past idx; after draining, shift it back.
-                        self.cursors[track_i] = self.cursors[track_i].saturating_sub(idx + 1);
+                        self.cursors[track_i] = self.cursors[track_i].saturating_sub(end);
                         self.last_emitted_frames[track_i] = Some(slot.frame.clone());
                     }
                     // Pure reuse (drain_to == None): leave buffer / cursor /
@@ -1045,27 +1069,128 @@ mod tests {
         assert_eq!(out.drops[0]["j1"], TypedValue::F64(1.0));
     }
 
-    /// With a widened range (>1 tick), a state whose exact frame was lost
-    /// falls back to an adjacent frame if no later state has a closer claim.
-    #[test]
-    fn wide_range_matches_neighbor_when_native_lost() {
-        let tracks = vec!["cam1".to_string()];
-        let fields = vec!["j1".to_string()];
-        // 30fps ticks = 33_333us; tolerance 1.5 → range = 50_000us.
-        let config = SyncConfig {
+    /// 30fps with tolerance 1.5: range 50_000us, native window half a tick.
+    fn wide_config() -> SyncConfig {
+        SyncConfig {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 50_000,
+            native_range_us: 16_666,
             ..Default::default()
-        };
-        let mut buf = mk(&tracks, fields, config);
+        }
+    }
 
-        // Frame at tick 0 stands in for "T−1"; frame at T was lost; only
-        // frame@0 is available for state@33_333.
+    /// With a widened range (>1 tick), a state whose exact frame was lost
+    /// falls back to an adjacent frame if no later state has a closer claim.
+    /// The loss is proven by a frame past the state's tick arriving.
+    #[test]
+    fn wide_range_matches_neighbor_when_native_lost() {
+        let mut buf = mk(&["cam1".to_string()], vec!["j1".to_string()], wide_config());
+
+        let _ = push_f(&mut buf, "cam1", 0);
+        assert!(buf.push_state(33_333, vec![1.0]).is_empty(), "own frame may still arrive");
+
+        // frame@33_333 lost: frame@66_666 arriving proves it.
+        let out = push_f(&mut buf, "cam1", 66_666);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam1"].timestamp_us, 0);
+    }
+
+    /// State usually beats its frame over a real network. A neighbor in
+    /// range must not stand in for a frame that is only late.
+    #[test]
+    fn wide_range_waits_for_late_native_frame() {
+        let mut buf = mk(&["cam1".to_string()], vec!["j1".to_string()], wide_config());
+
+        let _ = push_f(&mut buf, "cam1", 0);
+        assert!(buf.push_state(33_333, vec![1.0]).is_empty());
+
+        let out = push_f(&mut buf, "cam1", 33_333);
+        assert_eq!(out.observations.len(), 1);
+        assert_eq!(out.observations[0].frames["cam1"].timestamp_us, 33_333);
+    }
+
+    /// `max_lag` bounds the wait for a late own frame: once it elapses the
+    /// neighbor stands in.
+    #[test]
+    fn wide_range_neighbor_after_max_lag() {
+        let config = SyncConfig {
+            default_stall: StallConfig { max_lag_us: Some(0), behavior: StallBehavior::Drop },
+            ..wide_config()
+        };
+        let mut buf = mk(&["cam1".to_string()], vec!["j1".to_string()], config);
+
         let _ = push_f(&mut buf, "cam1", 0);
         let out = buf.push_state(33_333, vec![1.0]);
         assert_eq!(out.observations.len(), 1);
         assert_eq!(out.observations[0].frames["cam1"].timestamp_us, 0);
+    }
+
+    /// State ahead of video, one frame lost: the orphaned state drops once
+    /// frame T+2 proves nothing can match it, and pairing is back in step.
+    #[test]
+    fn state_ahead_recovers_after_lost_frame() {
+        let mut buf = mk(&["cam1".to_string()], vec!["j1".to_string()], wide_config());
+
+        let _ = push_f(&mut buf, "cam1", 0);
+        assert_eq!(buf.push_state(0, vec![0.0]).observations.len(), 1);
+
+        // frame@33_333 lost. Both states land before frame@66_666.
+        assert!(buf.push_state(33_333, vec![1.0]).is_empty());
+        assert!(buf.push_state(66_666, vec![2.0]).is_empty());
+        assert!(
+            push_f(&mut buf, "cam1", 66_666).is_empty(),
+            "fair-share keeps it for state@66_666"
+        );
+
+        let _ = buf.push_state(100_000, vec![3.0]);
+        let out = push_f(&mut buf, "cam1", 100_000);
+        assert_eq!(out.drops.len(), 1);
+        assert_eq!(out.drops[0]["j1"], TypedValue::F64(1.0));
+        let pairs: Vec<_> = out
+            .observations
+            .iter()
+            .map(|o| (o.state["j1"], o.frames["cam1"].timestamp_us))
+            .collect();
+        assert_eq!(pairs, vec![(TypedValue::F64(2.0), 66_666), (TypedValue::F64(3.0), 100_000)]);
+    }
+
+    /// Video ahead of state, one frame lost: the orphaned state borrows the
+    /// next frame without consuming it, so every later state still gets its
+    /// own frame and nothing drops.
+    #[test]
+    fn video_ahead_lost_frame_borrows_next_frame() {
+        let mut buf = mk(&["cam1".to_string()], vec!["j1".to_string()], wide_config());
+
+        let _ = push_f(&mut buf, "cam1", 0);
+        let _ = push_f(&mut buf, "cam1", 66_666); // frame@33_333 lost
+        assert_eq!(buf.push_state(0, vec![0.0]).observations[0].frames["cam1"].timestamp_us, 0);
+
+        let mut ticks = Vec::new();
+        for k in 1..6u64 {
+            let _ = push_f(&mut buf, "cam1", (k + 2) * 33_333);
+            let out = buf.push_state(k * 33_333, vec![k as f64]);
+            assert!(out.drops.is_empty());
+            ticks.push(out.observations[0].frames["cam1"].timestamp_us / 33_333);
+        }
+        // State 1 borrows frame 2; states 2.. match their own frames.
+        assert_eq!(ticks, vec![2, 2, 3, 4, 5]);
+    }
+
+    /// A neighbor behind the state is consumed as before: no later state
+    /// can want an older frame.
+    #[test]
+    fn backward_neighbor_is_consumed() {
+        let mut buf = mk(&["cam1".to_string()], vec!["j1".to_string()], wide_config());
+
+        let _ = push_f(&mut buf, "cam1", 0);
+        let _ = push_f(&mut buf, "cam1", 66_666); // frame@33_333 lost
+        let out = buf.push_state(33_333, vec![1.0]);
+        assert_eq!(out.observations[0].frames["cam1"].timestamp_us, 0);
+
+        let out = buf.push_state(66_666, vec![2.0]);
+        assert_eq!(out.observations[0].frames["cam1"].timestamp_us, 66_666);
+        assert_eq!(buf.video_fill_snapshot()["cam1"], 0);
     }
 
     /// Fair-share: if an earlier state and a later state are both in the
@@ -1140,6 +1265,7 @@ mod tests {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 500,
+            native_range_us: 500,
             default_stall: StallConfig { max_lag_us: Some(0), behavior: StallBehavior::Freeze },
         }
     }
@@ -1344,6 +1470,7 @@ mod tests {
             video_buffer_size: 5,
             state_buffer_size: 5,
             search_range_us: 100,
+            native_range_us: 100,
             default_stall: StallConfig { max_lag_us: Some(0), behavior: StallBehavior::Freeze },
         };
         let mut buf = mk(&tracks, fields, config);
@@ -1596,6 +1723,7 @@ mod tests {
             video_buffer_size: 100,
             state_buffer_size: 100,
             search_range_us: 1_000,
+            native_range_us: 1_000,
             default_stall: StallConfig { max_lag_us, behavior },
         }
     }

@@ -38,6 +38,7 @@ from livekit.portal import (
     Observation,
     Portal,
     PortalConfig,
+    PortalError,
     Role,
     VideoCodec,
 )
@@ -148,79 +149,19 @@ async def test_e2ee_matching_key_observations_arrive():
 
 
 # ---------------------------------------------------------------------------
-# Mismatched keys: data must NOT form valid observations
+# Mismatched keys: the operator can't read the robot's clock pongs, so it
+# never syncs and connect fails before any data could form an observation.
 # ---------------------------------------------------------------------------
 
 
-async def test_e2ee_mismatched_keys_no_observations():
-    """Robot uses KEY_A, operator uses KEY_B. Packets arrive at the
-    operator but decrypt as garbage; no valid observations should form."""
-    robot_cfg, operator_cfg, url, robot_tok, op_tok = _e2ee_pair(
-        KEY_A, operator_key=KEY_B
-    )
-
+@pytest.mark.parametrize("operator_key", [KEY_B, None], ids=["mismatched", "only-robot"])
+async def test_e2ee_key_mismatch_fails_connect(operator_key):
+    robot_cfg, operator_cfg, url, robot_tok, op_tok = _e2ee_pair(KEY_A, operator_key=operator_key)
     robot = Portal(robot_cfg)
     operator = Portal(operator_cfg)
-    obs: list[Observation] = []
-    operator.on_observation(lambda o: obs.append(o))
-
     try:
         await robot.connect(url, robot_tok)
-        await asyncio.sleep(0.2)
-        await operator.connect(url, op_tok)
-        await asyncio.sleep(0.3)
-
-        ts = int(time.time() * 1_000_000)
-        for _ in range(5):
-            robot.send_video_frame("cam", _rgb_frame(), timestamp_us=ts)
-            robot.send_state({"j": 0.5}, timestamp_us=ts)
-            ts += 33_333
-
-        await asyncio.sleep(SETTLE_S)
-
-        assert len(obs) == 0, (
-            f"expected no observations with mismatched E2EE keys; got {len(obs)}"
-        )
+        with pytest.raises(PortalError.TimeSyncTimeout):
+            await operator.connect(url, op_tok)
     finally:
-        await operator.disconnect()
-        await robot.disconnect()
-
-
-# ---------------------------------------------------------------------------
-# One side unencrypted: data must NOT form valid observations
-# ---------------------------------------------------------------------------
-
-
-async def test_e2ee_only_robot_encrypted_no_observations():
-    """Robot sets a key, operator does not. Robot's outbound packets are
-    E2EE-encrypted; the operator has no key to decrypt them. No valid
-    observations should arrive."""
-    robot_cfg, operator_cfg, url, robot_tok, op_tok = _e2ee_pair(
-        KEY_A, operator_key=None
-    )
-
-    robot = Portal(robot_cfg)
-    operator = Portal(operator_cfg)
-    obs: list[Observation] = []
-    operator.on_observation(lambda o: obs.append(o))
-
-    try:
-        await robot.connect(url, robot_tok)
-        await asyncio.sleep(0.2)
-        await operator.connect(url, op_tok)
-        await asyncio.sleep(0.3)
-
-        ts = int(time.time() * 1_000_000)
-        for _ in range(5):
-            robot.send_video_frame("cam", _rgb_frame(), timestamp_us=ts)
-            robot.send_state({"j": 0.5}, timestamp_us=ts)
-            ts += 33_333
-
-        await asyncio.sleep(SETTLE_S)
-
-        assert len(obs) == 0, (
-            f"expected no observations when only robot is encrypted; got {len(obs)}"
-        )
-    finally:
-        await operator.disconnect()
         await robot.disconnect()

@@ -48,6 +48,7 @@ YAML_FULL = textwrap.dedent(
     tolerance: 1.0
     state_reliable: false
     action_reliable: false
+    action_max_age_ms: 150
     reuse_stale_frames: true
     action_subscription: all
     videos:
@@ -234,6 +235,7 @@ def test_yaml_sync_knobs_are_readable(cfg):
     assert cfg.tolerance == pytest.approx(1.0)
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
+    assert cfg.action_max_age_ms == 150
     assert cfg.reuse_stale_frames is True
     assert cfg.action_subscription == ActionSubscription.ALL
     assert cfg.has_e2ee_key is False

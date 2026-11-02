@@ -198,9 +198,13 @@ fn lossy_state_never_goes_backwards() {
 fn stale_lossy_actions_are_dropped() {
     let link = LinkConfig { latency_us: 300 * MS, ..Default::default() };
     let mut lb = session_with(pubsub_caps(), link);
-    join(&mut lb, "robot", robot_config());
+    let mut robot = robot_config();
     let mut op = operator_config(ActionSubscription::None);
-    op.set_action_reliable(false);
+    for config in [&mut robot, &mut op] {
+        config.set_action_reliable(false);
+        config.set_action_max_age_ms(Some(200));
+    }
+    join(&mut lb, "robot", robot);
     join(&mut lb, "alice", op);
     lb.run_for(2 * S);
     set_active_operator(&mut lb, "robot", Some("alice"));
@@ -431,7 +435,11 @@ fn clock_sync_converges_under_skew_and_jitter() {
         assert!(m.time_sync.offset_us.abs_diff(offset) <= uncertainty, "{id}: {m:?}");
         assert!(uncertainty <= 7 * MS, "{id}: min-rtt sample is tight, got {uncertainty}");
         assert_eq!(m.time_sync.samples_rejected, 0, "{id}: no foreign pong got in");
-        assert!(m.rtt.pongs_received > 25 && m.rtt.pings_sent >= m.rtt.pongs_received, "{id}");
+        assert!(
+            m.rtt.pongs_received > 20 && m.rtt.pings_sent >= m.rtt.pongs_received,
+            "{id}: {:?}",
+            m.rtt
+        );
 
         let robot_now = lb.with_core("robot", |c, now| Ok((c.now_us(now), vec![]))).unwrap();
         let op_now = lb.with_core(id, |c, now| Ok((c.now_us(now), vec![]))).unwrap();

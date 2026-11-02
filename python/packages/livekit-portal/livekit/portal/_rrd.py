@@ -152,6 +152,7 @@ class RrdSink:
             "time_sync/uncertainty_us": metrics.time_sync.uncertainty_us,
             "transport/states_received": metrics.transport.states_received,
             "transport/actions_received": metrics.transport.actions_received,
+            "transport/actions_dropped_stale": metrics.transport.actions_dropped_stale,
             "transport/frames_received": sum(metrics.transport.frames_received.values()),
         }
         for name, value in rows.items():

@@ -46,10 +46,7 @@ async def main() -> None:
     op.on_state(on_state)
     op.on_observation(on_observation)
 
-    synced = asyncio.Event()
-    op.on_time_synced(synced.set)
     await op.connect(settings.url, settings.token("teleoperator"))
-    await synced.wait()
     await op.set_active_operator(op.local_identity())
 
     await asyncio.sleep(settings.warmup)

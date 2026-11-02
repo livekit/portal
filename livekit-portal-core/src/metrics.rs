@@ -79,6 +79,9 @@ pub struct TransportMetrics {
     pub states_received: u64,
     pub actions_sent: u64,
     pub actions_received: u64,
+    /// Lossy actions dropped on arrival for being older than
+    /// `action_max_age_ms`.
+    pub actions_dropped_stale: u64,
     /// Per-stream RFC 3550 inter-arrival jitter estimate (EWMA, α=1/16).
     pub frame_jitter_us: HashMap<String, u64>,
     pub state_jitter_us: u64,
@@ -154,6 +157,7 @@ pub struct MetricsRegistry {
     states_received: AtomicU64,
     actions_sent: AtomicU64,
     actions_received: AtomicU64,
+    actions_dropped_stale: AtomicU64,
     state_jitter: Mutex<JitterState>,
     action_jitter: Mutex<JitterState>,
     e2e_samples: Mutex<SampleRing>,
@@ -185,6 +189,7 @@ impl MetricsRegistry {
             states_received: AtomicU64::new(0),
             actions_sent: AtomicU64::new(0),
             actions_received: AtomicU64::new(0),
+            actions_dropped_stale: AtomicU64::new(0),
             state_jitter: Mutex::new(JitterState::default()),
             action_jitter: Mutex::new(JitterState::default()),
             e2e_samples: Mutex::new(SampleRing::new(SAMPLE_RING_CAP)),
@@ -215,6 +220,10 @@ impl MetricsRegistry {
     /// Bump the appropriate received counter and feed the per-stream
     /// inter-arrival jitter sampler. Mirrors `bump_sent`'s dispatch shape
     /// so both streams share one entry point.
+    pub fn record_stale_action(&self) {
+        self.actions_dropped_stale.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_received(&self, stream: DataStream, send_ts_us: u64, recv_ts_us: u64) {
         match stream {
             DataStream::State => {
@@ -334,6 +343,7 @@ impl MetricsRegistry {
                 states_received: self.states_received.load(Ordering::Relaxed),
                 actions_sent: self.actions_sent.load(Ordering::Relaxed),
                 actions_received: self.actions_received.load(Ordering::Relaxed),
+                actions_dropped_stale: self.actions_dropped_stale.load(Ordering::Relaxed),
                 frame_jitter_us,
                 state_jitter_us: self.state_jitter.lock().jitter_us,
                 action_jitter_us: self.action_jitter.lock().jitter_us,
@@ -361,6 +371,7 @@ impl MetricsRegistry {
         self.states_received.store(0, Ordering::Relaxed);
         self.actions_sent.store(0, Ordering::Relaxed);
         self.actions_received.store(0, Ordering::Relaxed);
+        self.actions_dropped_stale.store(0, Ordering::Relaxed);
         *self.state_jitter.lock() = JitterState::default();
         *self.action_jitter.lock() = JitterState::default();
         self.e2e_samples.lock().clear();

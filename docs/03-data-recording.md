@@ -93,10 +93,7 @@ from livekit.portal.recording import RrdSink
 async def main() -> None:
     obs = Observer(ObserverConfig.from_yaml_file("portal.yaml", ROOM))
 
-    synced = asyncio.Event()
-    obs.on_time_synced(synced.set)
-    await obs.connect(URL, mint("recorder"))
-    await synced.wait()   # start on the robot's clock (skip with TimeSyncSource.SYSTEM)
+    await obs.connect(URL, mint("recorder"))   # returns once on the robot's clock
 
     sink = RrdSink("data/sessions", jpeg_quality=95)
     obs.record_to(sink)
@@ -115,12 +112,9 @@ asyncio.run(main())
 
 Open the result with `rerun data/sessions/<session>-<UTC start>.rrd`.
 
-- **Wait for `on_time_synced` before recording.** Every row is stamped on the
-  robot's clock. Until the observer's first sync, `now_us()` is only its own
-  clock, so anything stamped from it, such as `started_at_us` and the metrics
-  rows, would sit on a different timeline from the rest of the archive. With
-  `TimeSyncSource.SYSTEM` there is nothing to wait for and `on_time_synced`
-  never fires, so start recording right away.
+- **Every row is on the robot's clock.** `connect()` returns only after the
+  observer's first sync, so what it stamps itself, such as `started_at_us` and
+  the metrics rows, shares the archive's timeline.
 - **`disconnect()` finishes the recording.** It stops the feed, writes what
   is already queued and closes the sink. `stop_recording()` does the same
   without leaving the room, so one observer can write several archives in a

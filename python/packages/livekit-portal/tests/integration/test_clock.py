@@ -24,7 +24,16 @@ import struct
 
 import pytest
 
-from livekit.portal import DType, Observer, ObserverConfig, Operator, OperatorConfig, Robot, RobotConfig
+from livekit.portal import (
+    DType,
+    Observer,
+    ObserverConfig,
+    Operator,
+    OperatorConfig,
+    PortalError,
+    Robot,
+    RobotConfig,
+)
 
 from .conftest import URL, RawPeer, _make_token, wait_for
 
@@ -43,13 +52,10 @@ def _offset_error_us(robot: Robot, operator: Operator) -> int:
     return abs(op - (before + after) // 2)
 
 
-async def test_operator_syncs_to_skewed_robot(pair):
+async def test_connect_returns_synced_to_skewed_robot(pair):
     pair.robot_cfg._set_clock_skew_us(SKEW_US)
-    synced = asyncio.Event()
     await pair.start()
-    pair.operator.on_time_synced(synced.set)
 
-    await asyncio.wait_for(synced.wait(), timeout=3)
     m = pair.operator.metrics().time_sync
     assert m.synced
     assert abs(m.offset_us - SKEW_US) < 50_000
@@ -62,14 +68,13 @@ async def test_operator_syncs_to_skewed_robot(pair):
 
 async def test_operator_syncs_to_robot_behind_it(pair):
     """The first correction is backward here, the case a robot ahead never
-    hits. The robot streams state and the operator sends actions throughout,
-    so it hands out timestamps and times packets before it has synced, as a
-    teleop loop does."""
+    hits. It lands inside connect, so a teleop loop started right after
+    stamps everything on the robot's clock."""
     pair.robot_cfg._set_clock_skew_us(-SKEW_US)
     for cfg in (pair.robot_cfg, pair.operator_cfg):
         cfg.add_action_typed([("a", DType.F32)])
     await pair.start()
-    assert not pair.operator.metrics().time_sync.synced
+    assert pair.operator.metrics().time_sync.synced
 
     async def stream():
         while True:
@@ -79,8 +84,7 @@ async def test_operator_syncs_to_robot_behind_it(pair):
 
     streaming = asyncio.create_task(stream())
     try:
-        assert await wait_for(lambda: pair.operator.metrics().transport.actions_sent > 0)
-        assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
+        assert await wait_for(lambda: pair.operator.metrics().transport.states_received > 0)
         m = pair.operator.metrics().time_sync
         assert pair.operator.metrics().transport.states_received > 0
         assert abs(m.offset_us + SKEW_US) < 50_000
@@ -100,7 +104,7 @@ async def test_observer_syncs_to_skewed_robot(pair):
     obs.on_time_synced(synced.set)
     try:
         await obs.connect(URL, _make_token("observer", pair.room))
-        await asyncio.wait_for(synced.wait(), timeout=3)
+        assert synced.is_set()
         m = obs.metrics().time_sync
         before, now, after = pair.robot.now_us(), obs.now_us(), pair.robot.now_us()
         assert abs(now - (before + after) // 2) <= m.uncertainty_us + 5_000
@@ -120,7 +124,6 @@ async def test_rtt_comes_from_time_sync(pair):
 async def test_reset_metrics_keeps_sync_state(pair):
     pair.robot_cfg._set_clock_skew_us(SKEW_US)
     await pair.start()
-    assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
     before = pair.operator.metrics().time_sync
 
     pair.operator.reset_metrics()
@@ -131,24 +134,25 @@ async def test_reset_metrics_keeps_sync_state(pair):
     assert pair.operator.metrics().rtt.pongs_received == 0
 
 
-async def test_unsynced_before_robot_joins():
-    room = "clock-alone"
-    operator = Operator(OperatorConfig(f"{room}-{id(object())}"))
+async def test_connect_fails_without_a_robot():
+    room = f"clock-alone-{id(object())}"
+    operator = Operator(OperatorConfig(room))
+    with pytest.raises(PortalError.TimeSyncTimeout):
+        await operator.connect(URL, _make_token("operator", room))
+    # The failed connect left nothing behind, so a retry starts clean.
+    robot = Robot(RobotConfig(room))
+    await robot.connect(URL, _make_token("robot", room))
     try:
-        await operator.connect(URL, _make_token("operator", f"{room}-{id(operator)}"))
-        await asyncio.sleep(0.5)
-        m = operator.metrics().time_sync
-        assert not m.synced and m.uncertainty_us is None
-        a, b = operator.now_us(), operator.now_us()
-        assert b > a
+        await operator.connect(URL, _make_token("operator", room))
+        assert operator.metrics().time_sync.synced
     finally:
         await operator.disconnect()
+        await robot.disconnect()
 
 
 async def test_resyncs_after_robot_restarts(pair):
     pair.robot_cfg._set_clock_skew_us(SKEW_US)
     await pair.start()
-    assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
 
     await pair.robot.disconnect()
     cfg = RobotConfig(pair.room)

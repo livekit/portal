@@ -183,6 +183,8 @@ pub struct PortalConfig {
     pub(crate) action_schema: Vec<FieldSpec>,
     pub(crate) state_reliable: bool,
     pub(crate) action_reliable: bool,
+    /// Lossy actions older than this on arrival are dropped. `None` keeps all.
+    pub(crate) action_max_age_ms: Option<u32>,
     pub(crate) fps: u32,
     pub(crate) slack: u32,
     pub(crate) tolerance: f32,
@@ -224,6 +226,7 @@ impl PortalConfig {
             action_schema: Vec::new(),
             state_reliable: true,
             action_reliable: true,
+            action_max_age_ms: None,
             fps: 30,
             slack: 5,
             tolerance: 1.5,
@@ -474,6 +477,12 @@ impl PortalConfig {
         self.action_reliable = reliable;
     }
 
+    /// Drop a lossy action that arrives more than `ms` after it was stamped,
+    /// measured on the robot's clock. `None` (default) keeps every action.
+    pub fn set_action_max_age_ms(&mut self, ms: Option<u32>) {
+        self.action_max_age_ms = ms;
+    }
+
     /// Where `now_us()` comes from. `Portal` (default) syncs to the robot's
     /// clock; `System` trusts the host clock, for hosts already kept in step
     /// by PTP or GPS. A per-peer choice: both kinds of peer share a room.
@@ -711,6 +720,10 @@ impl PortalConfig {
     /// Whether action packets are published on the reliable channel.
     pub fn action_reliable(&self) -> bool {
         self.action_reliable
+    }
+
+    pub fn action_max_age_ms(&self) -> Option<u32> {
+        self.action_max_age_ms
     }
 
     /// Whether a state past its video match window reuses the last emitted

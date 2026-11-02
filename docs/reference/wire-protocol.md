@@ -252,7 +252,7 @@ offset = ((t2 - t1) + (t3 - t4)) / 2      robot clock minus local clock
 rtt    = (t4 - t1) - (t3 - t2)
 ```
 
-Portal pings at 4 Hz until synced, then 1 Hz. It keeps a 10 s window of samples
+Portal pings at 20 Hz until synced, then 1 Hz. It keeps a 10 s window of samples
 and uses the offset from the one with the smallest `rtt`, since the
 least-delayed sample is closest to the true offset. It needs 4 samples before
 the first estimate. A sample implying a jump of more than 1 s is ignored unless

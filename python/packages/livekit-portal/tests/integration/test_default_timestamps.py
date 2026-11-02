@@ -39,16 +39,11 @@ def _schemas(pair) -> None:
     pair.robot_cfg._set_clock_skew_us(SKEW_US)
 
 
-async def _synced(pair) -> None:
-    assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
-
-
 async def test_default_action_timestamp_is_on_robot_clock(pair):
     _schemas(pair)
     received = []
     await pair.start()
     pair.robot.on_action(lambda a: received.append((a.timestamp_us, pair.robot.now_us())))
-    await _synced(pair)
 
     pair.operator.send_action({"a": 1.0})
 
@@ -62,7 +57,6 @@ async def test_explicit_timestamps_pass_through(pair):
     received = []
     await pair.start()
     pair.robot.on_action(lambda a: received.append(a))
-    await _synced(pair)
 
     pair.operator.send_action({"a": 1.0}, timestamp_us=123_456, in_reply_to_ts_us=654_321)
 
@@ -76,7 +70,6 @@ async def test_in_reply_to_is_the_exact_state_timestamp(pair):
     await pair.start()
     pair.operator.on_state(lambda s: states.append(s.timestamp_us))
     pair.robot.on_action(lambda a: actions.append(a.in_reply_to_ts_us))
-    await _synced(pair)
 
     pair.robot.send_state({"j": 0.5})
     assert await wait_for(lambda: states)

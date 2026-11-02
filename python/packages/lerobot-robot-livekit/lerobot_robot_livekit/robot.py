@@ -97,6 +97,7 @@ class LiveKitRobotConfig(RobotConfig):
     tolerance: float | None = None
     state_reliable: bool = True
     action_reliable: bool = True
+    action_max_age_ms: int | None = None
     reuse_stale_frames: bool = False
     # `PORTAL` syncs to the robot's clock. `SYSTEM` trusts this host's clock,
     # for labs already synced by PTP or GPS.
@@ -228,6 +229,7 @@ class LiveKitRobot(Robot):
             self._portal_cfg.set_tolerance(self.config.tolerance)
         self._portal_cfg.set_state_reliable(self.config.state_reliable)
         self._portal_cfg.set_action_reliable(self.config.action_reliable)
+        self._portal_cfg.set_action_max_age_ms(self.config.action_max_age_ms)
         self._portal_cfg.set_reuse_stale_frames(self.config.reuse_stale_frames)
         self._portal_cfg.set_time_sync_source(self.config.time_sync_source)
 

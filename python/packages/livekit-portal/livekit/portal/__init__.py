@@ -755,6 +755,11 @@ class PortalConfig:
         return self._inner.action_reliable()
 
     @property
+    def action_max_age_ms(self) -> Optional[int]:
+        """Lossy actions older than this on arrival are dropped. `None` keeps all."""
+        return self._inner.action_max_age_ms()
+
+    @property
     def reuse_stale_frames(self) -> bool:
         """Whether a state past its video match window reuses the last
         emitted frame instead of being dropped.
@@ -908,6 +913,9 @@ class PortalConfig:
 
     def set_action_reliable(self, reliable: bool) -> None:
         self._inner.set_action_reliable(reliable)
+
+    def set_action_max_age_ms(self, ms: Optional[int]) -> None:
+        self._inner.set_action_max_age_ms(ms)
 
     def _set_clock_skew_us(self, skew_us: int) -> None:
         """Test hook: shift this peer's local clock by `skew_us`."""
@@ -1495,6 +1503,11 @@ class _RoleConfigBase:
         return self._inner.action_reliable()
 
     @property
+    def action_max_age_ms(self) -> Optional[int]:
+        """Lossy actions older than this on arrival are dropped. `None` keeps all."""
+        return self._inner.action_max_age_ms()
+
+    @property
     def reuse_stale_frames(self) -> bool:
         """Whether a state past its video match window reuses the last
         emitted frame instead of being dropped.
@@ -1565,6 +1578,9 @@ class _RoleConfigBase:
 
     def set_action_reliable(self, reliable: bool) -> None:
         self._inner.set_action_reliable(reliable)
+
+    def set_action_max_age_ms(self, ms: Optional[int]) -> None:
+        self._inner.set_action_max_age_ms(ms)
 
     def _set_clock_skew_us(self, skew_us: int) -> None:
         """Test hook: shift this peer's local clock by `skew_us`."""
@@ -1907,6 +1923,8 @@ class Operator:
     # -- lifecycle -----------------------------------------------------------
 
     async def connect(self, url: str, token: str) -> None:
+        """Join the room. Returns once synced to the robot's clock; raises
+        `PortalError.TimeSyncTimeout` if no robot answers within 10 s."""
         await self._portal.connect(url, token)
 
     async def disconnect(self) -> None:
@@ -2088,6 +2106,8 @@ class Observer:
     # -- lifecycle -----------------------------------------------------------
 
     async def connect(self, url: str, token: str) -> None:
+        """Join the room. Returns once synced to the robot's clock; raises
+        `PortalError.TimeSyncTimeout` if no robot answers within 10 s."""
         await self._portal.connect(url, token)
 
     async def disconnect(self) -> None:

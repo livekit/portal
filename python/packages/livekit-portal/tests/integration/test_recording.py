@@ -99,9 +99,6 @@ async def test_recording_puts_every_peer_on_the_robot_clock(pair, skew_us):
     await pair.start()
     obs = await _observer(pair)
     sink = MemorySink()
-    assert await wait_for(
-        lambda: pair.operator.metrics().time_sync.synced and obs.metrics().time_sync.synced, timeout_s=3
-    )
     assert await wait_for(lambda: obs.active_operator() == "operator")
     obs.record_to(sink)
 

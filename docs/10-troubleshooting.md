@@ -167,9 +167,11 @@ See [Frame size](05-portal-api.md#frame-size).
 
 ### Time sync never completes
 
-`metrics().time_sync.synced` stays `False` and `on_time_synced` never fires.
-Every peer except the robot syncs to the robot, so nothing can sync until the
-robot is in the room. Once it is, the first sync takes about a second.
+`connect()` raises `PortalError.TimeSyncTimeout`. Every peer except the robot
+syncs to the robot, so nothing can sync until the robot is in the room and can
+be read: start the robot first, and give every peer the same E2EE key and
+Portal version. Once it is there, the first sync takes about 150 ms plus a
+round trip.
 
 The other `time_sync` fields tell you how good the estimate is:
 

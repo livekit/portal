@@ -12,12 +12,8 @@ async def main() -> None:
     observer = Observer(ObserverConfig.from_yaml_file(CONFIG, settings.room))
 
     observer.on_keypoint(lambda kp: print(f"[observer] {kp.type} {kp.payload}"))
-    synced = asyncio.Event()
-    observer.on_time_synced(synced.set)
 
     await observer.connect(settings.url, settings.token("observer"))
-    # Start on the robot's clock, so the whole archive is too.
-    await synced.wait()
 
     sink = RrdSink(settings.recording_dir)
     observer.record_to(sink)

@@ -129,6 +129,8 @@ struct ConfigFileV1 {
     #[serde(default)]
     action_reliable: Option<bool>,
     #[serde(default)]
+    action_max_age_ms: Option<u32>,
+    #[serde(default)]
     reuse_stale_frames: Option<bool>,
     /// Default stall behavior: `drop` (default), `freeze`, or `omit`.
     #[serde(default)]
@@ -318,6 +320,9 @@ impl PortalConfig {
         if let Some(v) = parsed.action_reliable {
             cfg.set_action_reliable(v);
         }
+        if let Some(v) = parsed.action_max_age_ms {
+            cfg.set_action_max_age_ms(Some(v));
+        }
         if let Some(v) = parsed.reuse_stale_frames {
             // Deprecated alias; `stall_for` folds it into the stall behavior.
             cfg.reuse_stale_frames = v;
@@ -468,6 +473,7 @@ slack: 8
 tolerance: 1.0
 state_reliable: false
 action_reliable: false
+action_max_age_ms: 150
 reuse_stale_frames: true
 time_sync_source: system
 action_subscription: all
@@ -511,6 +517,7 @@ action:
         assert_eq!(cfg.tolerance(), 1.0);
         assert!(!cfg.state_reliable());
         assert!(!cfg.action_reliable());
+        assert_eq!(cfg.action_max_age_ms(), Some(150));
         assert!(cfg.reuse_stale_frames());
         assert_eq!(cfg.time_sync_source(), TimeSyncSource::System);
         assert_eq!(cfg.action_subscription(), ActionSubscription::All);
@@ -531,6 +538,7 @@ action:
         assert_eq!(cfg.tolerance(), 1.5);
         assert!(cfg.state_reliable());
         assert!(cfg.action_reliable());
+        assert_eq!(cfg.action_max_age_ms(), None);
         assert!(!cfg.reuse_stale_frames());
         assert_eq!(cfg.time_sync_source(), TimeSyncSource::Portal);
         assert_eq!(cfg.action_subscription(), ActionSubscription::None);

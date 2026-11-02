@@ -77,14 +77,8 @@ pub const DEFAULT_RPC_TIMEOUT_MS: u32 = 15_000;
 /// taken to have left after `PRESENCE_TIMEOUT_US` of silence.
 pub const PRESENCE_HEARTBEAT_US: u64 = 1_000_000;
 pub const PRESENCE_TIMEOUT_US: u64 = 3 * PRESENCE_HEARTBEAT_US;
-/// Lossy actions older than this are stale commands, better dropped.
-pub const ACTION_MAX_AGE_MS: u32 = 200;
 /// A late clock packet only adds a useless round trip.
 pub const CLOCK_MAX_AGE_MS: u32 = 500;
-/// A lossy packet stamped at most this far behind its sender's newest was
-/// overtaken in flight and is dropped. Further behind is a clock reset (the
-/// sender's first sync, or a restart) and starts the sequence over.
-pub const REORDER_WINDOW_US: u64 = 1_000_000;
 
 /// An RPC to answer. Numbered by the driver for native RPC, by the core
 /// for polyfilled RPC.
@@ -340,7 +334,8 @@ pub struct PortalCore<F> {
     /// Keypoint senders already warned about for a malformed packet.
     keypoint_warned: HashSet<String>,
     /// Newest timestamp taken per sender on the lossy state and action
-    /// streams, so an overtaken packet is dropped. See `REORDER_WINDOW_US`.
+    /// streams, so an overtaken packet is dropped. A sender's stamps never
+    /// go backwards while it stays connected; leaving clears its entry.
     newest_state_us: Option<u64>,
     newest_action_us: HashMap<PeerId, u64>,
     pending: HashMap<OpId, PendingOp>,
@@ -585,7 +580,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.metrics.bump_sent(DataStream::Action);
         let delivery = match self.config.action_reliable() {
             true => Delivery::Reliable,
-            false => Delivery::BestEffort { max_age_ms: ACTION_MAX_AGE_MS },
+            false => Delivery::BestEffort { max_age_ms: self.config.action_max_age_ms() },
         };
         let mut out = vec![Output::Publish {
             stream: Stream::Action,
@@ -794,6 +789,11 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.clock.now(raw_us)
     }
 
+    /// Whether `now_us` is on the robot's clock yet. See `ClockSync::is_synced`.
+    pub fn time_synced(&self) -> bool {
+        self.clock.is_synced()
+    }
+
     /// Counters shared with the driver, which records the transport events
     /// only it sees (frames captured, received off a stream, bytes sent).
     pub fn metrics_registry(&self) -> &Arc<MetricsRegistry> {
@@ -978,6 +978,11 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         match deserialize_action(payload, self.action_fp, schema) {
             Ok((send_ts, in_reply_to_ts_us, values)) => {
                 if !self.config.action_reliable() {
+                    let max_age_us = self.config.action_max_age_ms().map(|ms| ms as u64 * 1_000);
+                    if max_age_us.is_some_and(|max| received_at_us.saturating_sub(send_ts) > max) {
+                        self.metrics.record_stale_action();
+                        return;
+                    }
                     let newest = self.newest_action_us.get_mut(origin.sender.as_str());
                     if overtaken(newest.as_deref().copied(), send_ts) {
                         return;
@@ -1377,7 +1382,7 @@ fn clock_packet<F>(packet: ClockPacket, to: PeerId) -> Output<F> {
         stream: Stream::Clock,
         payload: packet.encode(),
         // Retransmits would inflate the round trip and skew the offset.
-        delivery: Delivery::BestEffort { max_age_ms: CLOCK_MAX_AGE_MS },
+        delivery: Delivery::BestEffort { max_age_ms: Some(CLOCK_MAX_AGE_MS) },
         to: Some(to),
     }
 }
@@ -1394,7 +1399,7 @@ fn warn_mismatch(warned: &mut HashSet<u32>, stream: Stream, expected: u32, got: 
 /// Whether a lossy packet stamped `ts` was overtaken in flight by its
 /// sender's `newest`.
 fn overtaken(newest: Option<u64>, ts: u64) -> bool {
-    newest.is_some_and(|n| ts < n && n - ts <= REORDER_WINDOW_US)
+    newest.is_some_and(|n| ts < n)
 }
 
 fn reliability(reliable: bool) -> &'static str {
@@ -1522,12 +1527,30 @@ mod tests {
     }
 
     #[test]
-    fn lossy_state_drops_overtaken_packets_until_a_clock_reset() {
+    fn lossy_state_drops_overtaken_packets() {
         let s = |ts| ("robot", Stream::State, ts);
-        let base = 10 * REORDER_WINDOW_US;
-        let packets = [s(base), s(base + 20), s(base + 10), s(base + 20), s(base + 30), s(1), s(2)];
+        let packets = [s(10), s(30), s(20), s(30), s(40)];
         let stamps: Vec<u64> = received(false, &packets).into_iter().map(|(_, ts)| ts).collect();
-        assert_eq!(stamps, [base, base + 20, base + 20, base + 30, 1, 2]);
+        assert_eq!(stamps, [10, 30, 30, 40]);
+    }
+
+    #[test]
+    fn a_restarted_robot_starts_its_state_sequence_over() {
+        let mut op = lossy_core(Role::Operator, false);
+        let mut robot = lossy_core(Role::Robot, false);
+        let values = HashMap::from([("j".to_string(), TypedValue::F64(0.0))]);
+        let mut state_at = |op: &mut PortalCore<VideoFrameData>, ts| {
+            let send = SendState { values: &values, timestamp_us: Some(ts), now_us: 0 };
+            let payload = published(robot.send_state(send).expect("state"));
+            let input =
+                Input::Data { stream: Stream::State, from: Some("robot"), payload: &payload };
+            op.handle(Step { input, now_us: 1 })
+                .iter()
+                .any(|o| matches!(o, Output::Emit(Event::State(_))))
+        };
+        assert!(state_at(&mut op, 5_000));
+        op.handle(Step { input: Input::PeerLeft { peer: "robot" }, now_us: 2 });
+        assert!(state_at(&mut op, 10), "a new robot's clock may start behind the old one");
     }
 
     #[test]
@@ -1537,6 +1560,45 @@ mod tests {
         let got = received(false, &packets);
         let want = [("alice", 100), ("bob", 50), ("bob", 60)].map(|(p, ts)| (p.to_string(), ts));
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn lossy_actions_older_than_max_age_are_dropped() {
+        let mut config = PortalConfig::new("s", Role::Robot);
+        config.add_action_typed([("v", crate::dtype::DType::F64)]);
+        config.set_action_reliable(false);
+        config.set_action_max_age_ms(Some(100));
+        let mut robot: PortalCore<VideoFrameData> =
+            PortalCore::new(CoreInit { config, caps: caps(true) });
+        let peers = vec![("alice".to_string(), Presence::local(Role::Operator))];
+        let connect = Connect {
+            local_peer: "robot".into(),
+            active_operator: Some("alice".into()),
+            peers,
+            now_us: 0,
+        };
+        robot.connect(connect).expect("connect");
+        let mut op = lossy_core(Role::Operator, false);
+        let values = HashMap::from([("v".to_string(), TypedValue::F64(0.0))]);
+        let mut arrive = |stamp_us, at_us| {
+            let send = SendAction {
+                values: &values,
+                timestamp_us: Some(stamp_us),
+                in_reply_to_ts_us: None,
+                now_us: 0,
+            };
+            let payload = published(op.send_action(send).expect("action"));
+            let input =
+                Input::Data { stream: Stream::Action, from: Some("alice"), payload: &payload };
+            robot
+                .handle(Step { input, now_us: at_us })
+                .iter()
+                .any(|o| matches!(o, Output::Emit(Event::Action(_))))
+        };
+        assert!(arrive(1_000_000, 1_090_000), "90 ms old is fresh");
+        assert!(!arrive(1_100_000, 1_250_000), "150 ms old is stale");
+        assert!(arrive(1_300_000, 1_250_000), "a stamp ahead of the robot's clock is fresh");
+        assert_eq!(robot.metrics().transport.actions_dropped_stale, 1);
     }
 
     #[test]

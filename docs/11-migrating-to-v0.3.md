@@ -65,11 +65,24 @@ wall clock. Labs whose hosts are already synced by PTP or GPS can keep the host
 clock with `set_time_sync_source(TimeSyncSource.SYSTEM)` (yaml
 `time_sync_source: system`); see [Time sync](05-portal-api.md#time-sync).
 
+## `connect()` waits for clock sync
+
+On operators and observers, `connect()` now returns only after the first clock
+sync with the robot, about 150 ms plus a round trip. Nothing goes out stamped
+on the wrong clock, so the `on_time_synced` wait before recording or sending is
+no longer needed. Without a robot in the room, `connect()` raises
+`PortalError.TimeSyncTimeout` after 10 s.
+
+**Do this:** start the robot before operators and observers. Drop any
+`await synced.wait()` after `connect()`, and register `on_time_synced` before
+connecting if you still use it, since its first call now happens inside
+`connect()`.
+
 ## `ping_ms` is removed
 
 `set_ping_ms`, `ping_ms` and the yaml `ping_ms` key are gone, along with the
 `portal_rtt` topic. RTT now comes from the time sync exchange on
-`portal_clock`, which runs at fixed rates (4 Hz until synced, then 1 Hz).
+`portal_clock`, which runs at fixed rates (20 Hz until synced, then 1 Hz).
 `metrics().rtt` keeps its fields, but the robot only answers pings now, so its
 own `rtt` stays empty.
 

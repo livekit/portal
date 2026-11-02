@@ -81,6 +81,10 @@ pub const PRESENCE_TIMEOUT_US: u64 = 3 * PRESENCE_HEARTBEAT_US;
 pub const ACTION_MAX_AGE_MS: u32 = 200;
 /// A late clock packet only adds a useless round trip.
 pub const CLOCK_MAX_AGE_MS: u32 = 500;
+/// A lossy packet stamped at most this far behind its sender's newest was
+/// overtaken in flight and is dropped. Further behind is a clock reset (the
+/// sender's first sync, or a restart) and starts the sequence over.
+pub const REORDER_WINDOW_US: u64 = 1_000_000;
 
 /// An RPC to answer. Numbered by the driver for native RPC, by the core
 /// for polyfilled RPC.
@@ -335,6 +339,10 @@ pub struct PortalCore<F> {
     state_mismatch_warned: HashSet<u32>,
     /// Keypoint senders already warned about for a malformed packet.
     keypoint_warned: HashSet<String>,
+    /// Newest timestamp taken per sender on the lossy state and action
+    /// streams, so an overtaken packet is dropped. See `REORDER_WINDOW_US`.
+    newest_state_us: Option<u64>,
+    newest_action_us: HashMap<PeerId, u64>,
     pending: HashMap<OpId, PendingOp>,
     next_op: u64,
     /// Polyfilled RPCs handed to the application, by the id it answers.
@@ -382,6 +390,8 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             action_mismatch_warned: HashSet::new(),
             state_mismatch_warned: HashSet::new(),
             keypoint_warned: HashSet::new(),
+            newest_state_us: None,
+            newest_action_us: HashMap::new(),
             pending: HashMap::new(),
             next_op: 0,
             inbound: HashMap::new(),
@@ -842,6 +852,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         log::info!("[{}] participant '{peer}' disconnected", self.config.session());
         self.peers.remove(peer);
         self.last_heard_us.remove(peer);
+        self.newest_action_us.remove(peer);
         for event in self.roster.remove(peer) {
             self.roster_event(event);
         }
@@ -856,6 +867,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                 // Whoever answers next may be a restarted robot with a new
                 // clock, so the estimate starts over.
                 self.clock.restart();
+                self.newest_state_us = None;
                 return;
             }
         };
@@ -965,6 +977,18 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         let schema = self.config.action_schema();
         match deserialize_action(payload, self.action_fp, schema) {
             Ok((send_ts, in_reply_to_ts_us, values)) => {
+                if !self.config.action_reliable() {
+                    let newest = self.newest_action_us.get_mut(origin.sender.as_str());
+                    if overtaken(newest.as_deref().copied(), send_ts) {
+                        return;
+                    }
+                    match newest {
+                        Some(newest) => *newest = send_ts,
+                        None => {
+                            self.newest_action_us.insert(origin.sender.clone(), send_ts);
+                        }
+                    }
+                }
                 self.metrics.record_received(DataStream::Action, send_ts, self.now_us);
                 self.metrics.record_e2e(in_reply_to_ts_us, received_at_us);
                 self.out.push(Output::Emit(Event::Action(build_action(ActionRecord {
@@ -988,6 +1012,12 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         let schema = self.config.state_schema();
         match deserialize_values(payload, self.state_fp, schema) {
             Ok((timestamp_us, values)) => {
+                if !self.config.state_reliable() {
+                    if overtaken(self.newest_state_us, timestamp_us) {
+                        return;
+                    }
+                    self.newest_state_us = Some(timestamp_us);
+                }
                 self.metrics.record_received(DataStream::State, timestamp_us, self.now_us);
                 self.out.push(Output::Emit(Event::State(build_state(
                     timestamp_us,
@@ -1361,6 +1391,12 @@ fn warn_mismatch(warned: &mut HashSet<u32>, stream: Stream, expected: u32, got: 
     }
 }
 
+/// Whether a lossy packet stamped `ts` was overtaken in flight by its
+/// sender's `newest`.
+fn overtaken(newest: Option<u64>, ts: u64) -> bool {
+    newest.is_some_and(|n| ts < n && n - ts <= REORDER_WINDOW_US)
+}
+
 fn reliability(reliable: bool) -> &'static str {
     match reliable {
         true => "reliable",
@@ -1411,6 +1447,102 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn lossy_core(role: Role, reliable: bool) -> PortalCore<VideoFrameData> {
+        let mut config = PortalConfig::new("s", role);
+        config.add_state_typed([("j", crate::dtype::DType::F64)]);
+        config.add_action_typed([("v", crate::dtype::DType::F64)]);
+        config.set_state_reliable(reliable);
+        config.set_action_reliable(reliable);
+        config.set_action_subscription(ActionSubscription::All);
+        let mut core = PortalCore::new(CoreInit { config, caps: caps(true) });
+        let peers = ["alice", "bob"]
+            .map(|p| (p.to_string(), Presence::local(Role::Operator)))
+            .into_iter()
+            .chain([("robot".to_string(), Presence::local(Role::Robot))])
+            .collect();
+        let local_peer = match role {
+            Role::Robot => "robot",
+            _ => "op",
+        };
+        core.connect(Connect {
+            local_peer: local_peer.into(),
+            active_operator: None,
+            peers,
+            now_us: 0,
+        })
+        .expect("connect");
+        core
+    }
+
+    fn published(out: Vec<Output<VideoFrameData>>) -> Vec<u8> {
+        out.into_iter()
+            .find_map(|o| match o {
+                Output::Publish { payload, .. } => Some(payload),
+                _ => None,
+            })
+            .expect("a publish")
+    }
+
+    /// Feeds `(sender, stream, stamp)` packets into a fresh operator and
+    /// returns the stamps it emits.
+    fn received(reliable: bool, packets: &[(&str, Stream, u64)]) -> Vec<(String, u64)> {
+        let mut robot = lossy_core(Role::Robot, reliable);
+        let mut op = lossy_core(Role::Operator, reliable);
+        let mut got = Vec::new();
+        for &(from, stream, ts) in packets {
+            let payload = match stream {
+                Stream::State => {
+                    let values = HashMap::from([("j".to_string(), TypedValue::F64(0.0))]);
+                    let send = SendState { values: &values, timestamp_us: Some(ts), now_us: 0 };
+                    published(robot.send_state(send).expect("state"))
+                }
+                _ => {
+                    let values = HashMap::from([("v".to_string(), TypedValue::F64(0.0))]);
+                    let send = SendAction {
+                        values: &values,
+                        timestamp_us: Some(ts),
+                        in_reply_to_ts_us: None,
+                        now_us: 0,
+                    };
+                    published(op.send_action(send).expect("action"))
+                }
+            };
+            let input = Input::Data { stream, from: Some(from), payload: &payload };
+            for o in op.handle(Step { input, now_us: 1 }) {
+                match o {
+                    Output::Emit(Event::State(s)) => got.push((from.to_string(), s.timestamp_us)),
+                    Output::Emit(Event::Action(a)) => got.push((a.sender, a.timestamp_us)),
+                    _ => {}
+                }
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn lossy_state_drops_overtaken_packets_until_a_clock_reset() {
+        let s = |ts| ("robot", Stream::State, ts);
+        let base = 10 * REORDER_WINDOW_US;
+        let packets = [s(base), s(base + 20), s(base + 10), s(base + 20), s(base + 30), s(1), s(2)];
+        let stamps: Vec<u64> = received(false, &packets).into_iter().map(|(_, ts)| ts).collect();
+        assert_eq!(stamps, [base, base + 20, base + 20, base + 30, 1, 2]);
+    }
+
+    #[test]
+    fn lossy_actions_are_ordered_per_sender() {
+        let a = |from, ts| (from, Stream::Action, ts);
+        let packets = [a("alice", 100), a("bob", 50), a("alice", 90), a("bob", 60)];
+        let got = received(false, &packets);
+        let want = [("alice", 100), ("bob", 50), ("bob", 60)].map(|(p, ts)| (p.to_string(), ts));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn reliable_streams_deliver_what_arrives() {
+        let packets = [("robot", Stream::State, 20), ("robot", Stream::State, 10)];
+        assert_eq!(received(true, &packets).len(), 2);
     }
 
     #[test]

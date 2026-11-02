@@ -226,6 +226,12 @@ is what you want when a fresher reading is already in flight.
 Actions usually want ordering, because applying a stale action after a newer one
 moves the arm backwards.
 
+Unreliable delivery can also reorder. The receiver drops any state or action
+stamped behind the newest it already took from that sender, so neither stream
+ever goes backwards. A stamp more than a second behind is treated as the
+sender's clock resetting (its first sync, or a restart), not as reordering, and
+is taken.
+
 ## Time sync
 
 Not tunable. Each peer pings the robot at 4 Hz until synced, then 1 Hz, with

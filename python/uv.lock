@@ -860,7 +860,7 @@ provides-extras = ["dev", "examples", "integration", "lerobot", "rerun"]
 
 [[package]]
 name = "livekit-portal-workspace"
-version = "0.2.8"
+version = "0.3.0rc1"
 source = { virtual = "." }
 dependencies = [
     { name = "lerobot-robot-livekit" },

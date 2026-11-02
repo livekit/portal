@@ -13,8 +13,8 @@ if [ $# -ne 1 ]; then
 fi
 
 VERSION=$1
-if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-    echo "error: '$VERSION' is not a semver (expected X.Y.Z)" >&2
+if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+    echo "error: '$VERSION' is not a semver (expected X.Y.Z or X.Y.Z-rc.N)" >&2
     exit 1
 fi
 

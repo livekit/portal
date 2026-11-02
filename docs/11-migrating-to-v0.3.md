@@ -65,6 +65,19 @@ wall clock. Labs whose hosts are already synced by PTP or GPS can keep the host
 clock with `set_time_sync_source(TimeSyncSource.SYSTEM)` (yaml
 `time_sync_source: system`); see [Time sync](05-portal-api.md#time-sync).
 
+## State and actions are lossy by default
+
+`state_reliable` and `action_reliable` now default to `false`. Under packet
+loss, reliable delivery stalls everything behind the lost packet; lossy delivery
+drops it and keeps the stream fresh. Portal drops a state or action that arrives
+behind a newer one from the same sender, so neither stream goes backwards.
+Keypoints and control stay reliable.
+
+**Do this:** nothing for streaming control. If every sample must arrive, for
+example discrete commands that are not resent, set them back with
+`set_state_reliable(True)` / `set_action_reliable(True)` (yaml
+`state_reliable: true`, `action_reliable: true`).
+
 ## `connect()` waits for clock sync
 
 On operators and observers, `connect()` now returns only after the first clock

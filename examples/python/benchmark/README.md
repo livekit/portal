@@ -9,9 +9,8 @@ Measure latency, jitter, and gaps between arrivals for video, state, observation
 and actions. The robot streams synthetic data; the operator replies to each
 observation immediately.
 
-The benchmark uses lossy delivery for state and actions
-(`set_state_reliable(False)`, `set_action_reliable(False)`) to avoid waiting for
-retransmissions. This favors fresh samples over guaranteed delivery; read latency
+The benchmark uses Portal's default lossy delivery for state and actions to
+avoid waiting for retransmissions. This favors fresh samples over guaranteed delivery; read latency
 percentiles alongside sample counts and arrival gaps.
 
 Both peers use the robot's clock to measure one-way latency across machines.

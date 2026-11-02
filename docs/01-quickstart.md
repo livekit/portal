@@ -386,7 +386,7 @@ write your own sink, and how to turn recordings into training datasets.
 The robot stamped every frame and every state packet with one clock. The
 operator buffered both streams and matched them by that timestamp, then fired
 `on_observation` once per matched pair. Actions went back on a separate
-reliable channel, gated so only the active operator's arrive.
+lossy channel, gated so only the active operator's arrive.
 
 Step 5 calls `set_active_operator` so the robot accepts this operator's actions.
 Until control is assigned, observations can arrive but all actions are rejected.

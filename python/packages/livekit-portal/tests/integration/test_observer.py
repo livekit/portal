@@ -204,17 +204,23 @@ async def test_all_subscription_ignores_actions_from_strangers(pair, attributes)
         await obs.connect(URL, _make_token("observer", pair.room))
         await raw.connect()
         assert await wait_for(lambda: "operator" in obs.operators())
-        pair.operator.send_action({"a": 1.0})
-        assert await wait_for(lambda: raw.payloads("portal_action", "operator") and seen)
+        # Actions are lossy, and a peer that just joined can miss the first
+        # few, so resend until the stranger has a genuine packet to replay.
+        for _ in range(20):
+            pair.operator.send_action({"a": 1.0})
+            if await wait_for(lambda: raw.payloads("portal_action", "operator"), timeout_s=0.5):
+                break
         payload = raw.payloads("portal_action", "operator")[0]
+        assert await wait_for(lambda: seen)
+        before = len(seen)
 
         for _ in range(10):
             await raw.publish("portal_action", payload)
             await asyncio.sleep(0.05)
         pair.operator.send_action({"a": 2.0})
-        assert await wait_for(lambda: seen.count("operator") == 2)
+        assert await wait_for(lambda: len(seen) == before + 1)
         await asyncio.sleep(0.3)
-        assert seen == ["operator", "operator"]
+        assert seen == ["operator"] * (before + 1)
     finally:
         await raw.disconnect()
         await obs.disconnect()

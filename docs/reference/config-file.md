@@ -96,8 +96,8 @@ slack: 5                     # pipeline headroom, in ticks
 tolerance: 1.5               # match window, in ticks
 
 # Transport reliability
-state_reliable: true
-action_reliable: true
+state_reliable: false
+action_reliable: false
 action_max_age_ms: 200       # optional; drop lossy actions older than this
 
 # Stalled-track handling. Both override per video track.
@@ -140,8 +140,8 @@ action:
 | `fps` | int | `30` | Observation rate. Drives `search_range = tolerance / fps`. |
 | `slack` | int | `5` | Pipeline headroom, in ticks. |
 | `tolerance` | float | `1.5` | Match window, in ticks. See [Tuning](../06-tuning.md). |
-| `state_reliable` | bool | `true` | Reliable transport for state packets. |
-| `action_reliable` | bool | `true` | Reliable transport for action packets. |
+| `state_reliable` | bool | `false` | Reliable transport for state packets. |
+| `action_reliable` | bool | `false` | Reliable transport for action packets. |
 | `action_max_age_ms` | int | none | Drop lossy actions older than this on arrival. |
 | `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
 | `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |

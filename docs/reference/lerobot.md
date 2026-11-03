@@ -243,6 +243,7 @@ Shared by both plugin configs:
 | `tolerance` | `None` | Passed to `set_tolerance(...)`. `1.5` widens to one frame either side, `0.5` drops on loss. |
 | `state_reliable` | `True` | Reliable delivery for state. |
 | `action_reliable` | `True` | Reliable delivery for actions. |
+| `action_max_age_ms` | `None` | Robot side. Drop lossy actions older than this on arrival. |
 | `reuse_stale_frames` | `False` | Passed to `set_reuse_stale_frames(...)`: re-emit a silent camera's last matched frame instead of dropping the state. |
 | `video_codec` | `VideoCodec.H264` | Codec for every camera track. Must match across both sides. |
 | `video_quality` | `90` | MJPEG quality, 1 to 100. Ignored by other codecs. |

@@ -192,6 +192,7 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.tolerance == pytest.approx(1.5)
     assert cfg.state_reliable is True
     assert cfg.action_reliable is True
+    assert cfg.action_max_age_ms is None
     assert cfg.reuse_stale_frames is False
     assert cfg.action_subscription == ActionSubscription.NONE
     assert cfg.has_e2ee_key is False
@@ -201,6 +202,7 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     cfg.set_tolerance(0.5)
     cfg.set_state_reliable(False)
     cfg.set_action_reliable(False)
+    cfg.set_action_max_age_ms(150)
     cfg.set_reuse_stale_frames(True)
     cfg.set_action_subscription("all")
     cfg.set_e2ee_key(b"0" * 32)
@@ -210,6 +212,7 @@ def test_config_knobs_default_and_round_trip(make_cfg):
     assert cfg.tolerance == pytest.approx(0.5)
     assert cfg.state_reliable is False
     assert cfg.action_reliable is False
+    assert cfg.action_max_age_ms == 150
     assert cfg.reuse_stale_frames is True
     assert cfg.action_subscription == ActionSubscription.ALL
     # Presence only — the key bytes are deliberately not readable back.

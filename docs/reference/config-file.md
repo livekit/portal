@@ -98,6 +98,7 @@ tolerance: 1.5               # match window, in ticks
 # Transport reliability
 state_reliable: true
 action_reliable: true
+action_max_age_ms: 200       # optional; drop lossy actions older than this
 
 # Stalled-track handling. Both override per video track.
 stall_behavior: drop               # drop | freeze | omit
@@ -141,6 +142,7 @@ action:
 | `tolerance` | float | `1.5` | Match window, in ticks. See [Tuning](../06-tuning.md). |
 | `state_reliable` | bool | `true` | Reliable transport for state packets. |
 | `action_reliable` | bool | `true` | Reliable transport for action packets. |
+| `action_max_age_ms` | int | none | Drop lossy actions older than this on arrival. |
 | `stall_behavior` | string | `drop` | What to do with a moment a silent track cannot cover: `drop`, `freeze`, or `omit`. Overridable per video entry. |
 | `max_lag_ms` | int | `slack / fps` | How far the stream clock may run past a moment before it resolves without a silent track, in sender-clock ms. Overridable per video entry. |
 | `reuse_stale_frames` | bool | `false` | Deprecated. Alias for `stall_behavior: freeze` with `max_lag_ms: 0`. |
@@ -261,6 +263,7 @@ The loader produces the same config you would build by hand.
 | `tolerance` | `cfg.set_tolerance(...)` |
 | `state_reliable` | `cfg.set_state_reliable(...)` |
 | `action_reliable` | `cfg.set_action_reliable(...)` |
+| `action_max_age_ms` | `cfg.set_action_max_age_ms(...)` |
 | `stall_behavior` | `cfg.set_stall_behavior(...)` / `cfg.set_track_stall_behavior(...)` |
 | `max_lag_ms` | `cfg.set_max_lag_ms(...)` / `cfg.set_track_max_lag_ms(...)` |
 | `reuse_stale_frames` | `cfg.set_reuse_stale_frames(...)` (deprecated) |

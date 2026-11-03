@@ -33,8 +33,8 @@ const PING_LEN: usize = 1 + 4 + 8;
 const PONG_LEN: usize = 1 + 4 + 8 + 8 + 8;
 
 const WINDOW_US: u64 = 10_000_000;
-/// Samples needed before the first estimate is trusted: one second at the
-/// unsynced rate, enough for the min-rtt pick to skip an unlucky first sample.
+/// Samples needed before the first estimate is trusted: enough for the
+/// min-rtt pick to skip an unlucky first sample.
 pub const MIN_SAMPLES_TO_SYNC: usize = 4;
 const JUMP_THRESHOLD_US: u64 = 1_000_000;
 const RESYNC_RUN: usize = 30;
@@ -318,10 +318,11 @@ impl MonotonicClock {
 }
 // --- Synced clock ---
 
-const UNSYNCED_PING_INTERVAL_US: u64 = 250_000;
-/// Pings remembered for matching pongs: 16 s of the synced rate. A pong
+/// Fast until synced, since `connect` waits for the first sync.
+const UNSYNCED_PING_INTERVAL_US: u64 = 50_000;
+/// Pings remembered for matching pongs: 2 s at the unsynced rate. A pong
 /// for an older ping is dropped; its round trip would be useless anyway.
-const OUTSTANDING_PINGS: usize = 16;
+const OUTSTANDING_PINGS: usize = 40;
 const SYNCED_PING_INTERVAL_US: u64 = 1_000_000;
 
 pub struct ClockOptions {
@@ -382,11 +383,18 @@ impl ClockSync {
         self.estimator.is_synced()
     }
 
+    /// Whether `now` is on the robot's clock: always on the robot and with
+    /// `TimeSyncSource::System`, otherwise once the first estimate lands.
+    pub fn is_synced(&self) -> bool {
+        self.options.is_reference
+            || self.options.source == TimeSyncSource::System
+            || self.estimator.is_synced()
+    }
+
     pub fn metrics(&self) -> TimeSyncMetrics {
-        let trusted = self.options.is_reference || self.options.source == TimeSyncSource::System;
         TimeSyncMetrics {
             source: self.options.source,
-            synced: trusted || self.estimator.is_synced(),
+            synced: self.is_synced(),
             offset_us: self.clock.applied_offset_us(),
             uncertainty_us: match (self.options.is_reference, self.options.source) {
                 (true, _) => Some(0),
@@ -784,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn pings_four_times_a_second_until_synced_then_once_a_second() {
+    fn pings_twenty_times_a_second_until_synced_then_once_a_second() {
         let mut clock = clock(false, TimeSyncSource::Portal);
         let start = 10 * S;
         clock.start_pinging(start);
@@ -792,13 +800,13 @@ mod tests {
             clock.poll_ping(start, Some("robot")),
             Some((ClockPacket::Ping { seq: 0, t1: start }, "robot".into()))
         );
-        assert_eq!(clock.poll_ping(start + 249 * MS, Some("robot")), None);
-        assert_eq!(clock.next_ping_us(), Some(start + 250 * MS));
+        assert_eq!(clock.poll_ping(start + 49 * MS, Some("robot")), None);
+        assert_eq!(clock.next_ping_us(), Some(start + 50 * MS));
         for i in 0..MIN_SAMPLES_TO_SYNC as u64 {
             clock.record("robot", exchange(start + i * MS, 0, MS, MS, 0));
         }
-        assert!(clock.poll_ping(start + 250 * MS, Some("robot")).is_some());
-        assert_eq!(clock.next_ping_us(), Some(start + 1_250 * MS));
+        assert!(clock.poll_ping(start + 50 * MS, Some("robot")).is_some());
+        assert_eq!(clock.next_ping_us(), Some(start + 1_050 * MS));
     }
 
     #[test]
@@ -806,9 +814,9 @@ mod tests {
         let mut clock = clock(false, TimeSyncSource::Portal);
         clock.start_pinging(0);
         assert_eq!(clock.poll_ping(0, None), None);
-        assert_eq!(clock.next_ping_us(), Some(250 * MS));
-        let (packet, _) = clock.poll_ping(250 * MS, Some("robot")).expect("ping");
-        assert_eq!(packet, ClockPacket::Ping { seq: 1, t1: 250 * MS });
+        assert_eq!(clock.next_ping_us(), Some(50 * MS));
+        let (packet, _) = clock.poll_ping(50 * MS, Some("robot")).expect("ping");
+        assert_eq!(packet, ClockPacket::Ping { seq: 1, t1: 50 * MS });
     }
 
     #[test]

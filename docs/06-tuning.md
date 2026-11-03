@@ -226,9 +226,20 @@ is what you want when a fresher reading is already in flight.
 Actions usually want ordering, because applying a stale action after a newer one
 moves the arm backwards.
 
+On a congested link, lossy actions can also arrive in order but late. Set
+`action_max_age_ms` (off by default) to drop actions older than that on arrival,
+measured on the robot's clock. Pick it above your link's one-way delay plus
+jitter, or the robot drops most commands; `actions_dropped_stale` in
+[metrics](09-metrics.md) shows when it bites.
+
+Unreliable delivery can also reorder. The receiver drops any state or action
+stamped behind the newest it already took from that sender, so neither stream
+ever goes backwards. A sender that leaves and rejoins, such as a restarted
+robot, starts its sequence over.
+
 ## Time sync
 
-Not tunable. Each peer pings the robot at 4 Hz until synced, then 1 Hz, with
+Not tunable. Each peer pings the robot at 20 Hz until synced, then 1 Hz, with
 packets of 13 and 29 bytes. RTT comes from the same exchange.
 
 ## Seeing what is actually happening

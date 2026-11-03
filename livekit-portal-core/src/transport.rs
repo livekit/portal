@@ -82,8 +82,8 @@ pub enum Delivery {
     /// A newer value supersedes older ones, and a late subscriber starts
     /// from the latest: state, presence.
     LatestOnly,
-    /// Drop rather than deliver later than this.
-    BestEffort { max_age_ms: u32 },
+    /// May be lost. With `max_age_ms`, drop rather than deliver later.
+    BestEffort { max_age_ms: Option<u32> },
 }
 
 /// How a transport carries video.

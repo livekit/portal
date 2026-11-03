@@ -350,10 +350,8 @@ async def main() -> None:
 
     obs = Observer(cfg)
 
-    synced = asyncio.Event()
-    obs.on_time_synced(synced.set)
+    # Returns once synced to the robot's clock, so the recording is on it too.
     await obs.connect(os.environ["LIVEKIT_URL"], mint("recorder"))
-    await synced.wait()   # start on the robot's clock (skip with TimeSyncSource.SYSTEM)
 
     sink = RrdSink("data/sessions")
     obs.record_to(sink)

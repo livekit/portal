@@ -34,7 +34,7 @@ can use, but the core never relies on it.
 |---|---|---|
 | `Reliable` | every message, in order | actions*, keypoints, control, state* |
 | `LatestOnly` | a newer value supersedes older ones; a late subscriber starts from the latest | presence, state when `state_reliable=false` |
-| `BestEffort { max_age_ms }` | drop rather than deliver late | clock (500 ms), actions when `action_reliable=false` (200 ms) |
+| `BestEffort { max_age_ms }` | may be lost; with a max age, dropped rather than delivered late | clock (500 ms), actions when `action_reliable=false` (`action_max_age_ms`) |
 
 \* by default; `state_reliable` and `action_reliable` choose between the rows.
 

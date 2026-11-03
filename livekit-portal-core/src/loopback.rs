@@ -654,7 +654,7 @@ impl Loopback {
                 self.lane_delivered.insert(key, m.seq);
             }
             Delivery::BestEffort { max_age_ms } => {
-                if m.at_us - m.sent_us > max_age_ms as u64 * 1_000 {
+                if max_age_ms.is_some_and(|ms| m.at_us - m.sent_us > ms as u64 * 1_000) {
                     return;
                 }
             }

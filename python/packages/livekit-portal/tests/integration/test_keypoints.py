@@ -97,7 +97,6 @@ async def test_default_timestamp_is_on_the_robot_clock(pair):
     heard = []
     await pair.start()
     pair.robot.on_keypoint(lambda kp: heard.append(kp))
-    assert await wait_for(lambda: pair.operator.metrics().time_sync.synced, timeout_s=3)
 
     await pair.operator.send_keypoint("recording", {"task_description": "t"})
     robot_now = pair.robot.now_us()

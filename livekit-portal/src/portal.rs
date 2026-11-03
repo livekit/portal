@@ -40,7 +40,7 @@ use livekit_portal_core::metrics::{MetricsRegistry, PortalMetrics};
 use livekit_portal_core::transport::{Delivery, Presence, Stream};
 use livekit_portal_core::types::*;
 use livekit_portal_core::{
-    Connect, CoreInit, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
+    Connect, CoreInit, Event, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
     SendKeypoint, SendState, SendVideoFrame, SetActiveOperator, Step, VideoTransport,
 };
 use parking_lot::Mutex;
@@ -58,6 +58,9 @@ use crate::wire;
 
 pub use crate::wire::{ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY};
 pub use livekit_portal_core::SET_ACTIVE_OPERATOR_RPC;
+
+/// How long `connect` waits for the first clock sync with the robot.
+pub const TIME_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 pub use livekit_portal_core::transport::PROTOCOL_VERSION;
 
 /// State shared by `Portal`, the room event actor and the media tasks.
@@ -72,6 +75,8 @@ pub(crate) struct Shared {
     lanes: Mutex<Option<Lanes>>,
     /// The latest `ScheduleWake`, read by the event actor.
     wake: watch::Sender<Option<u64>>,
+    /// Whether `now_us` is on the robot's clock, which `connect` waits for.
+    synced: watch::Sender<bool>,
     /// `set_active_operator` RPCs waiting on the core's reply.
     rpc_waiters: Mutex<HashMap<RpcId, oneshot::Sender<Result<String, RpcError>>>>,
     next_rpc: AtomicU64,
@@ -127,7 +132,12 @@ impl Shared {
                         let _ = tx.send(result);
                     }
                 }
-                Output::Emit(event) => self.sinks.dispatch(event),
+                Output::Emit(event) => {
+                    if matches!(event, Event::TimeSynced) {
+                        self.synced.send_replace(true);
+                    }
+                    self.sinks.dispatch(event)
+                }
                 Output::ScheduleWake { at_us } => {
                     self.wake.send_replace(at_us);
                 }
@@ -199,6 +209,7 @@ impl Portal {
             core: Mutex::new(core),
             lanes: Mutex::new(None),
             wake,
+            synced: watch::channel(false).0,
             rpc_waiters: Mutex::new(HashMap::new()),
             next_rpc: AtomicU64::new(0),
             local_participant: Mutex::new(None),
@@ -319,6 +330,8 @@ impl Portal {
             }
         };
         self.shared.execute(out);
+        let synced = self.shared.core.lock().time_synced();
+        self.shared.synced.send_replace(synced);
 
         if role == Role::Robot
             && let Err(e) = self.setup_robot(&local_participant).await
@@ -341,9 +354,19 @@ impl Portal {
         };
         let event_task = tokio::spawn(event_loop.run());
 
-        let mut state = self.conn.lock();
-        state.room = Some(room);
-        state.event_task = Some(event_task);
+        {
+            let mut state = self.conn.lock();
+            state.room = Some(room);
+            state.event_task = Some(event_task);
+        }
+
+        // Nothing goes out stamped on the wrong clock: actions, keypoints
+        // and recordings all start on the robot's timeline.
+        let mut synced = self.shared.synced.subscribe();
+        if tokio::time::timeout(TIME_SYNC_TIMEOUT, synced.wait_for(|s| *s)).await.is_err() {
+            let _ = self.close().await;
+            return Err(PortalError::TimeSyncTimeout(TIME_SYNC_TIMEOUT.as_millis() as u32));
+        }
         Ok(())
     }
 
@@ -697,6 +720,11 @@ impl Portal {
 
     pub async fn disconnect(&self) -> PortalResult<()> {
         let _lifecycle = self.lifecycle.lock().await;
+        self.close().await
+    }
+
+    /// Leave the room and drop per-connection state. Callers hold `lifecycle`.
+    async fn close(&self) -> PortalResult<()> {
         let room = self.conn.lock().room.take();
         log::info!("disconnecting");
 

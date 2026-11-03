@@ -507,6 +507,7 @@ pub struct TransportMetrics {
     pub states_received: u64,
     pub actions_sent: u64,
     pub actions_received: u64,
+    pub actions_dropped_stale: u64,
     pub frame_jitter_us: HashMap<String, u64>,
     pub state_jitter_us: u64,
     pub action_jitter_us: u64,
@@ -572,6 +573,11 @@ pub enum PortalError {
 
     #[error("portal is not connected")]
     NotConnected,
+
+    #[error(
+        "no clock sync with the robot within {0} ms; is it in the room, with the same E2EE key and Portal version?"
+    )]
+    TimeSyncTimeout(u32),
 
     #[error("no peer in the room")]
     NoPeer,
@@ -642,6 +648,7 @@ impl From<core::PortalError> for PortalError {
             // LiveKit supports every option, so the bindings never see this;
             // mapped rather than given a variant to keep their API unchanged.
             core::PortalError::Unsupported(s) => PortalError::Room(s),
+            core::PortalError::TimeSyncTimeout(ms) => PortalError::TimeSyncTimeout(ms),
         }
     }
 }
@@ -878,6 +885,11 @@ impl PortalConfig {
         self.inner.lock().set_action_reliable(reliable);
     }
 
+    /// Drop lossy actions older than this on arrival. `None` keeps all.
+    pub fn set_action_max_age_ms(&self, ms: Option<u32>) {
+        self.inner.lock().set_action_max_age_ms(ms);
+    }
+
     /// Test hook: shifts this peer's local clock.
     pub fn set_clock_skew_us(&self, skew_us: i64) {
         self.inner.lock().set_clock_skew_us(skew_us);
@@ -1009,6 +1021,10 @@ impl PortalConfig {
     /// Whether action packets are published on the reliable channel.
     pub fn action_reliable(&self) -> bool {
         self.inner.lock().action_reliable()
+    }
+
+    pub fn action_max_age_ms(&self) -> Option<u32> {
+        self.inner.lock().action_max_age_ms()
     }
 
     /// Whether a state past its video match window reuses the last emitted
@@ -1425,6 +1441,11 @@ impl RobotConfig {
         self.inner.set_action_reliable(reliable);
     }
 
+    /// Drop lossy actions older than this on arrival. `None` keeps all.
+    pub fn set_action_max_age_ms(&self, ms: Option<u32>) {
+        self.inner.set_action_max_age_ms(ms);
+    }
+
     /// Test hook: shifts this peer's local clock.
     pub fn set_clock_skew_us(&self, skew_us: i64) {
         self.inner.set_clock_skew_us(skew_us);
@@ -1524,6 +1545,10 @@ impl RobotConfig {
         self.inner.action_reliable()
     }
 
+    pub fn action_max_age_ms(&self) -> Option<u32> {
+        self.inner.action_max_age_ms()
+    }
+
     #[allow(deprecated)]
     pub fn reuse_stale_frames(&self) -> bool {
         self.inner.reuse_stale_frames()
@@ -1618,6 +1643,11 @@ impl OperatorConfig {
 
     pub fn set_action_reliable(&self, reliable: bool) {
         self.inner.set_action_reliable(reliable);
+    }
+
+    /// Drop lossy actions older than this on arrival. `None` keeps all.
+    pub fn set_action_max_age_ms(&self, ms: Option<u32>) {
+        self.inner.set_action_max_age_ms(ms);
     }
 
     /// Test hook: shifts this peer's local clock.
@@ -1725,6 +1755,10 @@ impl OperatorConfig {
 
     pub fn action_reliable(&self) -> bool {
         self.inner.action_reliable()
+    }
+
+    pub fn action_max_age_ms(&self) -> Option<u32> {
+        self.inner.action_max_age_ms()
     }
 
     #[allow(deprecated)]
@@ -2109,6 +2143,11 @@ impl ObserverConfig {
         self.inner.set_action_reliable(reliable);
     }
 
+    /// Drop lossy actions older than this on arrival. `None` keeps all.
+    pub fn set_action_max_age_ms(&self, ms: Option<u32>) {
+        self.inner.set_action_max_age_ms(ms);
+    }
+
     /// Test hook: shifts this peer's local clock.
     pub fn set_clock_skew_us(&self, skew_us: i64) {
         self.inner.set_clock_skew_us(skew_us);
@@ -2214,6 +2253,10 @@ impl ObserverConfig {
 
     pub fn action_reliable(&self) -> bool {
         self.inner.action_reliable()
+    }
+
+    pub fn action_max_age_ms(&self) -> Option<u32> {
+        self.inner.action_max_age_ms()
     }
 
     #[allow(deprecated)]
@@ -2448,6 +2491,7 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             states_received: m.transport.states_received,
             actions_sent: m.transport.actions_sent,
             actions_received: m.transport.actions_received,
+            actions_dropped_stale: m.transport.actions_dropped_stale,
             frame_jitter_us: m.transport.frame_jitter_us,
             state_jitter_us: m.transport.state_jitter_us,
             action_jitter_us: m.transport.action_jitter_us,

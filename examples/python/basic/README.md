@@ -68,7 +68,7 @@ See [Troubleshooting](../../../docs/10-troubleshooting.md#nothing-is-arriving).
 - **Teleoperator:** Claims control with `set_active_operator`, reads typed state
   with `get_observation()`, and calls `send_action`. Passes `in_reply_to_ts_us`
   to enable end-to-end latency measurement.
-- **Observer:** Waits for `on_time_synced`, records with `record_to(RrdSink(...))`,
+- **Observer:** Records with `record_to(RrdSink(...))`,
   and marks takes with `send_keypoint`. See
   [Data recording](../../../docs/03-data-recording.md).
 

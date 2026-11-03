@@ -102,6 +102,7 @@ for every role, except that an observer starts with observation sync off and the
 | `set_tolerance(float)` | 1.5 | Match window, in ticks. |
 | `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
 | `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
+| `set_action_max_age_ms(int \| None)` | `None` | Drop lossy actions older than this on arrival. |
 | `set_stall_behavior(StallBehavior)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |
 | `set_track_stall_behavior(str, StallBehavior)` | — | Per-track override of `set_stall_behavior`. In Python, `add_video(..., stall_behavior=...)` is the shorter equivalent. |
@@ -130,6 +131,7 @@ config you loaded from YAML instead of building by hand:
 | `slack` | `int` | `set_slack`. |
 | `tolerance` | `float` | `set_tolerance`. |
 | `state_reliable` / `action_reliable` | `bool` | The reliability flags. |
+| `action_max_age_ms` | `int \| None` | `set_action_max_age_ms`. |
 | `reuse_stale_frames` | `bool` | `set_reuse_stale_frames`. Deprecated. |
 | `action_subscription` | `ActionSubscription` | `set_action_subscription`. |
 | `observation_sync` | `bool` | `set_observation_sync`. Operator and observer configs only. |
@@ -417,15 +419,14 @@ m = portal.metrics().time_sync
 m.synced, m.offset_us, m.uncertainty_us
 ```
 
-Before the first sync, `now_us()` is local time and `synced` is `False`.
-Anything you send in that window is stamped on your own clock, so a recorder or
-an orchestrator should wait for `on_time_synced` before it starts.
-`on_time_synced` never fires on the robot, whose clock is the reference, or
-with `TimeSyncSource.SYSTEM`. In both cases `metrics().time_sync.synced` is
-`True` from the start, so check that instead of waiting. At the first
-sync `now_us()` switches to the robot's clock in one step, which can go
-backwards once if this host's clock was ahead. From then on it never repeats and
-never goes backwards. It is the default
+On operators and observers, `connect()` returns only after the first sync, so
+everything they send is stamped on the robot's clock. Start the robot first:
+without one in the room, `connect()` raises `PortalError.TimeSyncTimeout` after
+10 s. The first sync takes about 150 ms plus a round trip. `on_time_synced`
+fires during `connect()` and again after each resync, so register it before
+connecting. It never fires on the robot, whose clock is the reference, or with
+`TimeSyncSource.SYSTEM`, where `connect()` doesn't wait. From the first sync on,
+`now_us()` never repeats and never goes backwards. It is the default
 timestamp for everything you send. Details are in
 [Metrics](09-metrics.md#time_sync) and the [wire protocol](reference/wire-protocol.md#clock).
 

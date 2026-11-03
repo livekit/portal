@@ -73,4 +73,9 @@ pub enum PortalError {
     /// The config asks for something the transport cannot do.
     #[error("unsupported by this transport: {0}")]
     Unsupported(String),
+
+    #[error(
+        "no clock sync with the robot within {0} ms; is it in the room, with the same E2EE key and Portal version?"
+    )]
+    TimeSyncTimeout(u32),
 }

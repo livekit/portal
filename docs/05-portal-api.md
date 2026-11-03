@@ -100,8 +100,8 @@ for every role, except that an observer starts with observation sync off and the
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
 | `set_slack(int)` | 5 | Ticks of buffer headroom. |
 | `set_tolerance(float)` | 1.5 | Match window, in ticks. |
-| `set_state_reliable(bool)` | `True` | Reliable delivery for state. |
-| `set_action_reliable(bool)` | `True` | Reliable delivery for actions. |
+| `set_state_reliable(bool)` | `False` | Reliable delivery for state. |
+| `set_action_reliable(bool)` | `False` | Reliable delivery for actions. |
 | `set_action_max_age_ms(int \| None)` | `None` | Drop lossy actions older than this on arrival. |
 | `set_stall_behavior(StallBehavior)` | `DROP` | What to do about a moment a silent track cannot cover: `DROP`, `FREEZE`, or `OMIT`. |
 | `set_max_lag_ms(int)` | `slack / fps` | How long to wait for a silent track first, in sender-clock ms. |

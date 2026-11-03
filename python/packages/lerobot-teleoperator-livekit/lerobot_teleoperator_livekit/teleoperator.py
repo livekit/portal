@@ -84,8 +84,8 @@ class LiveKitTeleoperatorConfig(TeleoperatorConfig):
     # Portal tuning.
     slack: int | None = None
     tolerance: float | None = None
-    state_reliable: bool = True
-    action_reliable: bool = True
+    state_reliable: bool = False
+    action_reliable: bool = False
     reuse_stale_frames: bool = False
 
 

@@ -471,8 +471,8 @@ version: 1
 fps: 60
 slack: 8
 tolerance: 1.0
-state_reliable: false
-action_reliable: false
+state_reliable: true
+action_reliable: true
 action_max_age_ms: 150
 reuse_stale_frames: true
 time_sync_source: system
@@ -515,8 +515,8 @@ action:
         assert_eq!(cfg.fps(), 60);
         assert_eq!(cfg.slack(), 8);
         assert_eq!(cfg.tolerance(), 1.0);
-        assert!(!cfg.state_reliable());
-        assert!(!cfg.action_reliable());
+        assert!(cfg.state_reliable());
+        assert!(cfg.action_reliable());
         assert_eq!(cfg.action_max_age_ms(), Some(150));
         assert!(cfg.reuse_stale_frames());
         assert_eq!(cfg.time_sync_source(), TimeSyncSource::System);
@@ -536,8 +536,8 @@ action:
         assert_eq!(cfg.fps(), 30);
         assert_eq!(cfg.slack(), 5);
         assert_eq!(cfg.tolerance(), 1.5);
-        assert!(cfg.state_reliable());
-        assert!(cfg.action_reliable());
+        assert!(!cfg.state_reliable());
+        assert!(!cfg.action_reliable());
         assert_eq!(cfg.action_max_age_ms(), None);
         assert!(!cfg.reuse_stale_frames());
         assert_eq!(cfg.time_sync_source(), TimeSyncSource::Portal);

@@ -46,8 +46,8 @@ YAML_FULL = textwrap.dedent(
     fps: 60
     slack: 8
     tolerance: 1.0
-    state_reliable: false
-    action_reliable: false
+    state_reliable: true
+    action_reliable: true
     action_max_age_ms: 150
     reuse_stale_frames: true
     action_subscription: all
@@ -233,8 +233,8 @@ def test_yaml_sync_knobs_are_readable(cfg):
     assert cfg.fps == 60
     assert cfg.slack == 8
     assert cfg.tolerance == pytest.approx(1.0)
-    assert cfg.state_reliable is False
-    assert cfg.action_reliable is False
+    assert cfg.state_reliable is True
+    assert cfg.action_reliable is True
     assert cfg.action_max_age_ms == 150
     assert cfg.reuse_stale_frames is True
     assert cfg.action_subscription == ActionSubscription.ALL

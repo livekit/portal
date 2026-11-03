@@ -95,8 +95,8 @@ class LiveKitRobotConfig(RobotConfig):
     # Portal tuning.
     slack: int | None = None
     tolerance: float | None = None
-    state_reliable: bool = True
-    action_reliable: bool = True
+    state_reliable: bool = False
+    action_reliable: bool = False
     action_max_age_ms: int | None = None
     reuse_stale_frames: bool = False
     # `PORTAL` syncs to the robot's clock. `SYSTEM` trusts this host's clock,

@@ -17,8 +17,8 @@ cfg.set_fps(30)                      # capture rate
 cfg.set_slack(5)                     # ticks of buffer headroom
 cfg.set_tolerance(1.5)               # match window, in ticks
 
-cfg.set_state_reliable(True)
-cfg.set_action_reliable(True)
+cfg.set_state_reliable(False)
+cfg.set_action_reliable(False)
 
 cfg.set_stall_behavior(StallBehavior.DROP)   # what to do about a silent track
 cfg.set_max_lag_ms(166)              # how long to wait first; default slack/fps
@@ -210,21 +210,24 @@ only updates while a track is waiting for its first frame.
 
 ## Transport reliability
 
-State and actions use reliable, ordered delivery over SCTP by default.
-WebRTC video uses RTP; RAW, PNG, and MJPEG frame video use reliable byte streams.
+State and actions use unreliable delivery by default. Keypoints and control
+(RPC, presence) are always reliable. WebRTC video uses RTP; RAW, PNG, and MJPEG
+frame video use reliable byte streams.
 
 ```python
-cfg.set_state_reliable(False)   # allow loss, no head-of-line blocking
-cfg.set_action_reliable(True)   # actions usually want ordering
+cfg.set_state_reliable(True)    # every state, in order
+cfg.set_action_reliable(True)   # every action, in order
 ```
 
-Switch state to unreliable for high-frequency control where only the newest
-value matters. Under packet loss, reliable delivery retransmits and everything
-behind the lost packet waits. Unreliable delivery drops it and moves on, which
-is what you want when a fresher reading is already in flight.
+Unreliable suits high-frequency control, where only the newest value matters.
+Under packet loss, reliable delivery retransmits and everything behind the lost
+packet waits, which can stall for seconds on long routes. Unreliable delivery
+drops it and moves on, which is what you want when a fresher sample is already
+in flight.
 
-Actions usually want ordering, because applying a stale action after a newer one
-moves the arm backwards.
+Turn reliability on when every sample matters more than freshness: discrete
+commands that are not resent, or a stream recorded for training that must not
+have gaps.
 
 On a congested link, lossy actions can also arrive in order but late. Set
 `action_max_age_ms` (off by default) to drop actions older than that on arrival,

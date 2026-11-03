@@ -34,8 +34,10 @@ plainly.
 state packet from its own clock, so they are globally ordered within that
 sender. Arrival order is a different matter.
 
-- Reliable data, the default, preserves per-sender order via SCTP.
-- Unreliable data may reorder or drop.
+- Unreliable data, the default, may drop. Portal drops a state or action that
+  arrives behind a newer one from the same sender, so delivery never goes
+  backwards.
+- Reliable data preserves per-sender order via SCTP.
 - Video packets are reassembled in order by the jitter buffer, but a frame can
   still surface late if a keyframe had to be recovered. Frame rate is noisy.
 
@@ -171,10 +173,9 @@ or below `S`. On each sync:
 Across the whole stream each frame is inspected a constant number of times. Total
 work becomes amortized `O(N + M)` instead of `O(N × M)` per call.
 
-**Cursor rewind.** On unreliable transport, states can arrive out of order. If a
-new head state has an earlier timestamp than the last, the cursor rewinds before
-advancing. On reliable transport, the default, this never triggers. It is
-insurance.
+**Cursor rewind.** If a new head state has an earlier timestamp than the last,
+the cursor rewinds before advancing. Portal already drops overtaken states on
+receive, so this only triggers after a sender's clock resets. It is insurance.
 
 **Cursor adjustments on mutation.**
 

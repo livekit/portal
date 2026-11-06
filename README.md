@@ -31,10 +31,11 @@ LiveKit server.
 
 ## Features
 
-- **Low-latency video.** LiveKit advertises [glass-to-glass latency as low as
-  30 ms](https://livekit.com/robotics). Actual latency depends on the network,
-  hardware, codec, and buffering. Use Portal's [metrics](docs/09-metrics.md)
-  to measure the full observation-to-action loop, including policy inference.
+- **Low-latency video.** Built on LiveKit's WebRTC media stack. In our
+  [benchmark](#benchmark), the full capture-to-action loop takes 26 ms round trip
+  within San Francisco, with Portal adding under 2 ms over plain LiveKit. Use
+  Portal's [metrics](docs/09-metrics.md) to measure the loop on your own setup,
+  including policy inference.
 - **Control arbitration.** Keep policies and human operators in the same session.
   The robot accepts actions from one active operator; transfer control with one
   call or let a supervisor coordinate handoffs. [Control handoff](docs/04-arbitration.md).

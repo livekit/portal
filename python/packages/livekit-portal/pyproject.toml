@@ -29,6 +29,12 @@ rerun = [
     "rerun-sdk>=0.24",
     "pillow>=10",
 ]
+# `LanceSink`: record an observer to Lance tables, video as H.264 MP4. Also
+# what `livekit-portal convert` needs to read those recordings.
+lance = [
+    "pylance>=14",
+    "av>=14",
+]
 # `livekit-portal convert`: `.rrd` archives to a LeRobot v3 dataset. The lazy
 # `.rrd` reader it uses arrived in Rerun 0.38, and lerobot needs Python 3.12.
 lerobot = [

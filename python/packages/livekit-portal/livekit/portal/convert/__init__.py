@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Turn `RrdSink` archives into training datasets.
+"""Turn `RrdSink` and `LanceSink` recordings into training datasets.
 
 `read_archive` parses an archive into episodes and aligned rows; an output
 format is a `Writer` over those rows. `livekit-portal convert` wires the two

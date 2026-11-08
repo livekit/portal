@@ -29,17 +29,22 @@
     observer.record_to(MySink())
 
 `RrdSink` writes Rerun archives; it needs `pip install 'livekit-portal[rerun]'`.
+`LanceSink` writes Lance tables; it needs `pip install 'livekit-portal[lance]'`.
 """
 from ._recording import ObserverMetrics, SessionInfo, Sink
 
-__all__ = ["Sink", "SessionInfo", "ObserverMetrics", "RrdSink"]
+__all__ = ["Sink", "SessionInfo", "ObserverMetrics", "RrdSink", "LanceSink"]
 
 
 def __getattr__(name: str):
-    # `RrdSink` pulls in Rerun, which ships as the `[rerun]` extra; importing
-    # this module must keep working without it.
+    # Each sink pulls in its own extra; importing this module must keep
+    # working without them.
     if name == "RrdSink":
         from ._rrd import RrdSink
 
         return RrdSink
+    if name == "LanceSink":
+        from ._lance import LanceSink
+
+        return LanceSink
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -162,3 +162,47 @@ async def test_observer_records_a_session_to_rrd(pair, tmp_path):
     assert len(rows["/action/operator/a"]) >= 28
     assert set(rows) >= {"/keypoints/recording", "/keypoints/idle", "/portal/schema"}
     assert any(e.startswith("/metrics/") for e in rows)
+
+
+async def test_observer_records_a_session_to_lance(pair, tmp_path):
+    lance = pytest.importorskip("lance")
+    pytest.importorskip("av")
+    from livekit.portal.convert import EpisodeRule, Selection, read_archive
+    from livekit.portal.recording import LanceSink
+
+    for cfg in (pair.robot_cfg, pair.operator_cfg):
+        _declare(cfg)
+    await pair.start()
+    cfg = ObserverConfig(pair.room)
+    cfg.add_state_typed([("j", DType.F32)])
+    _declare(cfg)
+    obs = Observer(cfg)
+    sink = LanceSink(tmp_path)
+    await obs.connect(URL, _make_token("recorder", pair.room))
+    assert await wait_for(lambda: obs.active_operator() == "operator")
+    obs.record_to(sink, metrics_interval_s=0.2)
+
+    frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    await pair.operator.send_keypoint("recording", {"task_description": "stack"})
+    for i in range(30):
+        pair.robot.send_state({"j": float(i)})
+        pair.robot.send_video_frame("cam", frame)
+        pair.operator.send_action({"a": float(i)})
+        await asyncio.sleep(1 / 60)
+    await pair.operator.send_keypoint("idle")
+    await asyncio.sleep(0.5)
+    await obs.disconnect()
+
+    def rows(table):
+        return lance.dataset(f"{sink.path}/{table}.lance").to_table().to_pylist()
+
+    assert len(rows("states")) == 30
+    assert len(rows("frames")) >= 25
+    assert len(rows("actions")) >= 28
+    assert [k["type"] for k in rows("keypoints")] == ["recording", "idle"]
+    assert rows("metrics")
+
+    archive = read_archive(sink.path)
+    (episode,) = archive.episodes(EpisodeRule())
+    assert episode.task == "stack"
+    assert list(archive.rows(episode, Selection()))

@@ -15,11 +15,9 @@
 """`RrdSink`: one Rerun `.rrd` archive per recording."""
 from __future__ import annotations
 
-import datetime
 import io
 import json
 import os
-import re
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -35,8 +33,6 @@ except ImportError as e:  # pragma: no cover - exercised without the extra
 if TYPE_CHECKING:
     from . import Action, Keypoint, PortalMetrics, State, VideoFrameData
     from ._recording import SessionInfo
-
-SCHEMA_VERSION = 1
 
 
 def _ts(us: int) -> np.datetime64:
@@ -82,17 +78,14 @@ class RrdSink:
 
     def open(self, session: "SessionInfo") -> None:
         os.makedirs(self.directory, exist_ok=True)
-        started = datetime.datetime.fromtimestamp(
-            session.started_at_us / 1_000_000, tz=datetime.timezone.utc
-        )
-        stem = f"{re.sub(r'[^A-Za-z0-9._-]+', '_', session.session)}-{started:%Y%m%dT%H%M%S}"
+        stem = session.stem()
         self.path = os.path.join(self.directory, f"{stem}.rrd")
         self._rec = rr.RecordingStream("livekit-portal", recording_id=stem)
         self._rec.save(self.path)
         self._now_us = session.now_us
         self._rec.log(
             "portal/schema",
-            rr.TextDocument(json.dumps(_schema(session), indent=2), media_type="application/json"),
+            rr.TextDocument(json.dumps(session.describe(), indent=2), media_type="application/json"),
             static=True,
         )
 
@@ -172,15 +165,3 @@ class RrdSink:
             raise RuntimeError("RrdSink is not open")
         return self._rec
 
-
-def _schema(session: "SessionInfo") -> dict:
-    return {
-        "version": SCHEMA_VERSION,
-        "session": session.session,
-        "recorder": session.local_identity,
-        "started_at_us": session.started_at_us,
-        "time_sync_source": session.time_sync_source.name.lower(),
-        "state": [{"name": f.name, "dtype": f.dtype.name.lower()} for f in session.state_schema],
-        "action": [{"name": f.name, "dtype": f.dtype.name.lower()} for f in session.action_schema],
-        "video": [{"name": t.name, "codec": t.codec.name.lower()} for t in session.video_tracks],
-    }

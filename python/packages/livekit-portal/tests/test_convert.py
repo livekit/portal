@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""`livekit-portal convert`: an `RrdSink` archive back into aligned rows, and
-into a LeRobot v3 dataset.
+"""`livekit-portal convert`: an `RrdSink` or `LanceSink` recording back into
+aligned rows, and into a LeRobot v3 dataset.
 
 Each tick stamps its index into the state, the frame's pixels and the action,
 so a row pairing an action with an observation it did not answer shows up as
@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
-pytest.importorskip("rerun.chunk", reason="needs rerun-sdk>=0.38")
 
 from livekit.portal import (  # noqa: E402
     Action,
@@ -41,7 +39,6 @@ from livekit.portal import (  # noqa: E402
 from livekit.portal._cli import main  # noqa: E402
 from livekit.portal._recording import SessionInfo  # noqa: E402
 from livekit.portal.convert import EpisodeRule, Selection, read_archive  # noqa: E402
-from livekit.portal.recording import RrdSink  # noqa: E402
 
 US = 1_000_000
 TICK_US = US // 30
@@ -80,11 +77,29 @@ def _pixel(tick: int) -> int:
     return (tick * 4) % 256
 
 
-def _record(directory, *, ticks=40, frame_every=2, keypoints=(), jpeg_quality=95,
+def _sink_factory(kind: str):
+    if kind == "lance":
+        pytest.importorskip("lance")
+        pytest.importorskip("av")
+        from livekit.portal.recording import LanceSink
+
+        return LanceSink
+    pytest.importorskip("rerun.chunk", reason="needs rerun-sdk>=0.38")
+    from livekit.portal.recording import RrdSink
+
+    return lambda directory: RrdSink(directory, jpeg_quality=0 if kind == "rrd-raw" else 95)
+
+
+@pytest.fixture(params=["rrd", "lance"])
+def sink(request):
+    return _sink_factory(request.param)
+
+
+def _record(directory, sink, *, ticks=40, frame_every=2, keypoints=(),
             fields=FIELDS, cameras=("wrist",), shadow=False) -> str:
     """Video at half the state rate, two actions per frame: a reader that
     keyed actions by the frame they answered would lose half of them."""
-    sink = RrdSink(directory, jpeg_quality=jpeg_quality)
+    sink = sink(directory)
     sink.open(_session(fields, cameras))
     for tick in range(ticks):
         sink.write_state(State(values={}, raw_values=_values(tick, fields), timestamp_us=ts(tick)))
@@ -119,15 +134,15 @@ TAKES = [
 ]
 
 
-def test_schema_and_field_order(tmp_path):
-    archive = read_archive(_record(tmp_path))
+def test_schema_and_field_order(tmp_path, sink):
+    archive = read_archive(_record(tmp_path, sink))
     assert archive.schema.state == FIELDS
     assert archive.schema.action == FIELDS
     assert archive.schema.cameras == ["wrist"]
 
 
-def test_keypoints_cut_episodes(tmp_path):
-    archive = read_archive(_record(tmp_path, keypoints=TAKES))
+def test_keypoints_cut_episodes(tmp_path, sink):
+    archive = read_archive(_record(tmp_path, sink, keypoints=TAKES))
     episodes = archive.episodes(EpisodeRule())
     assert [(e.task, e.start_us, e.end_us) for e in episodes] == [
         ("pick", ts(4), ts(13)),
@@ -135,15 +150,15 @@ def test_keypoints_cut_episodes(tmp_path):
     ]
 
 
-def test_no_keypoints_is_one_episode(tmp_path):
-    archive = read_archive(_record(tmp_path, ticks=10))
+def test_no_keypoints_is_one_episode(tmp_path, sink):
+    archive = read_archive(_record(tmp_path, sink, ticks=10))
     (episode,) = archive.episodes(EpisodeRule(default_task="demo"))
     assert (episode.task, episode.start_us, episode.end_us) == ("demo", ts(0), ts(9))
 
 
-@pytest.mark.parametrize("jpeg_quality", [95, 0])
-def test_every_action_is_a_row_with_the_observation_it_answered(tmp_path, jpeg_quality):
-    archive = read_archive(_record(tmp_path, keypoints=TAKES, jpeg_quality=jpeg_quality))
+@pytest.mark.parametrize("kind", ["rrd", "rrd-raw", "lance"])
+def test_every_action_is_a_row_with_the_observation_it_answered(tmp_path, kind):
+    archive = read_archive(_record(tmp_path, _sink_factory(kind), keypoints=TAKES))
     episode = archive.episodes(EpisodeRule())[0]
     rows = list(archive.rows(episode, Selection()))
     # Ticks 4..13, one action each, though only every other tick has a frame.
@@ -156,8 +171,16 @@ def test_every_action_is_a_row_with_the_observation_it_answered(tmp_path, jpeg_q
         assert abs(int(row.frames["wrist"].mean()) - _pixel(anchor)) <= 2
 
 
-def test_inactive_actions_only_by_sender(tmp_path):
-    archive = read_archive(_record(tmp_path, ticks=10, shadow=True))
+def test_frames_read_back_out_of_order(tmp_path, sink):
+    archive = read_archive(_record(tmp_path, sink, keypoints=TAKES))
+    for episode in reversed(archive.episodes(EpisodeRule())):
+        for row in archive.rows(episode, Selection()):
+            anchor = (row.timestamp_us - BASE_US) // TICK_US
+            assert abs(int(row.frames["wrist"].mean()) - _pixel(anchor)) <= 2
+
+
+def test_inactive_actions_only_by_sender(tmp_path, sink):
+    archive = read_archive(_record(tmp_path, sink, ticks=10, shadow=True))
     (episode,) = archive.episodes(EpisodeRule())
     assert archive.senders == ["human", "policy"]
     assert {r.sender for r in archive.rows(episode, Selection())} == {"human"}
@@ -166,8 +189,8 @@ def test_inactive_actions_only_by_sender(tmp_path):
     assert all(not r.active for r in shadow)
 
 
-def test_stale_observations_are_not_paired(tmp_path):
-    archive = read_archive(_record(tmp_path, ticks=10, frame_every=6))
+def test_stale_observations_are_not_paired(tmp_path, sink):
+    archive = read_archive(_record(tmp_path, sink, ticks=10, frame_every=6))
     (episode,) = archive.episodes(EpisodeRule())
     # Frames at ticks 0 and 6; anchors are those ticks, so the frame is never
     # stale. A tight bound still drops nothing, a negative one drops all.
@@ -175,9 +198,9 @@ def test_stale_observations_are_not_paired(tmp_path):
     assert list(archive.rows(episode, Selection(max_stale_us=-1))) == []
 
 
-def test_mismatched_archives_are_refused(tmp_path, capsys):
-    _record(tmp_path / "a", ticks=4)
-    _record(tmp_path / "b", ticks=4, fields=["shoulder", "elbow"])
+def test_mismatched_archives_are_refused(tmp_path, capsys, sink):
+    _record(tmp_path / "a", sink, ticks=4)
+    _record(tmp_path / "b", sink, ticks=4, fields=["shoulder", "elbow"])
     with pytest.raises(SystemExit) as exit_:
         main(["convert", str(tmp_path / "a"), str(tmp_path / "b"),
               "--output", "lerobotv3", "--root", str(tmp_path / "out")])
@@ -186,11 +209,11 @@ def test_mismatched_archives_are_refused(tmp_path, capsys):
     assert not (tmp_path / "out").exists()
 
 
-def test_lerobotv3_round_trip(tmp_path):
+def test_lerobotv3_round_trip(tmp_path, sink):
     pytest.importorskip("lerobot.datasets", reason="needs livekit-portal[lerobot]")
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    _record(tmp_path / "sessions", keypoints=TAKES, shadow=True)
+    _record(tmp_path / "sessions", sink, keypoints=TAKES, shadow=True)
     root = tmp_path / "dataset"
     with pytest.raises(SystemExit) as exit_:
         main(["convert", str(tmp_path / "sessions"), "--output", "lerobotv3",
@@ -213,3 +236,14 @@ def test_lerobotv3_round_trip(tmp_path):
         # Video is lossy; the frame only has to be the right tick's.
         pixel = float(item["observation.images.wrist"].mean()) * 255
         assert abs(pixel - _pixel(anchor)) <= 4
+
+
+def test_a_session_recorded_by_both_sinks_converts_once(tmp_path, capsys):
+    rrd = _record(tmp_path, _sink_factory("rrd"), ticks=10)
+    _record(tmp_path, _sink_factory("lance"), ticks=10)
+    with pytest.raises(SystemExit) as exit_:
+        main(["convert", str(tmp_path), "--output", "lerobotv3", "--dry-run"])
+    assert exit_.value.code == 0
+    out = capsys.readouterr().out
+    assert f"skipping {rrd.split('/')[-1]}" in out
+    assert out.count("1 episodes") == 1

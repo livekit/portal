@@ -27,13 +27,13 @@ from ._writer import DatasetSpec
 def add_parser(subparsers) -> None:
     parser = subparsers.add_parser(
         "convert",
-        help="convert .rrd recordings into a training dataset",
-        description="Convert RrdSink .rrd recordings into one training dataset.",
+        help="convert recordings into a training dataset",
+        description="Convert RrdSink .rrd archives and LanceSink directories into one training dataset.",
         epilog="Episodes follow a keypoint convention: 'recording' (payload "
                "{\"task_description\": ...}) opens one, 'idle' closes it, 'discard' "
                "drops it. See docs/03-data-recording.md.",
     )
-    parser.add_argument("paths", nargs="+", help=".rrd files, or directories holding them")
+    parser.add_argument("paths", nargs="+", help=".rrd files, LanceSink recordings, or directories holding either")
     parser.add_argument("--output", required=True, choices=sorted(OUTPUTS), help="dataset format")
     parser.add_argument("--fps", type=int, default=None,
                         help="dataset fps (default: the robot's state rate)")
@@ -59,7 +59,7 @@ def add_parser(subparsers) -> None:
 def run(args: argparse.Namespace) -> int:
     paths = _archives(args.paths)
     if not paths:
-        print("[convert] no .rrd archives found")
+        print("[convert] no recordings found")
         return 1
 
     rule = EpisodeRule(start=args.episode_start, end=args.episode_end,
@@ -97,18 +97,35 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _archives(paths: List[str]) -> List[Path]:
-    """Every `.rrd` named, or inside a directory named. Sorted, because
-    `RrdSink` names them by start time."""
+    """Every recording named, or inside a directory named. Sorted, because
+    both sinks name them by start time."""
     found: List[Path] = []
     for raw in paths:
         path = Path(raw).expanduser()
-        if path.is_dir():
-            found.extend(sorted(path.glob("*.rrd")))
-        elif path.suffix == ".rrd":
+        if _is_lance(path) or path.suffix == ".rrd":
             found.append(path)
+        elif path.is_dir():
+            found.extend(_recordings_in(path))
         else:
-            print(f"[convert] skipping {path}: not a .rrd or a directory")
+            print(f"[convert] skipping {path}: not a recording or a directory")
     return found
+
+
+def _recordings_in(directory: Path) -> List[Path]:
+    """A session recorded by both sinks at once leaves `<stem>.rrd` next to
+    `<stem>/`. Taking both would put every episode in the dataset twice."""
+    lance = {p.name for p in directory.iterdir() if _is_lance(p)}
+    found = []
+    for path in sorted(directory.iterdir()):
+        if path.suffix == ".rrd" and path.stem in lance:
+            print(f"[convert] skipping {path.name}: {path.stem}/ holds the same session")
+        elif path.suffix == ".rrd" or path.name in lance:
+            found.append(path)
+    return found
+
+
+def _is_lance(path: Path) -> bool:
+    return (path / "states.lance").is_dir()
 
 
 def _conflicts(archives: List[Archive]) -> List[str]:

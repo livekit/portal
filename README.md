@@ -46,8 +46,8 @@ LiveKit server.
   actions, recordings, and annotations a common timeline across machines.
   [Time sync](docs/05-portal-api.md#time-sync).
 - **Data recording sinks.** Add an observer to record alongside any operator.
-  Write Rerun archives with `RrdSink`, or implement a sink for your own storage
-  format. [Data recording](docs/03-data-recording.md).
+  Write Rerun archives with `RrdSink`, Lance tables with `LanceSink`, or
+  implement a sink for your own storage format. [Data recording](docs/03-data-recording.md).
 - **Policy evaluation.** Record inactive policies' actions for comparison, mark
   episodes with annotations, and measure observation-to-action latency.
   [Action subscriptions](docs/05-portal-api.md#operator-side-action-subscription)

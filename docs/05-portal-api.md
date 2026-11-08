@@ -900,6 +900,27 @@ Two timelines, both on the robot's clock:
 - **`action/<sender>/active`** is 1 for actions accepted by the local control gate and 0 for
   shadow actions, recorded with `set_action_subscription("all")`.
 
+#### `LanceSink`
+
+Writes one directory of [Lance](https://lancedb.github.io/lance/) tables per
+recording, with video as H.264 MP4 segments. It ships as an extra:
+
+```bash
+pip install 'livekit-portal[lance]'
+```
+
+```python
+from livekit.portal.recording import LanceSink
+
+obs.record_to(LanceSink("data/sessions", crf=23, segment_s=10.0))
+# writes data/sessions/<session>-<UTC start>/<table>.lance
+```
+
+The tables are `states`, `actions`, `keypoints`, `videos`, `frames`,
+`frames_dropped` and `metrics`. Every row carries `session`, and every
+table's schema metadata holds the field order under `portal`. See
+[Recording to Lance](03-data-recording.md#recording-to-lance) for the layout.
+
 For a walkthrough, writing your own sink, and turning archives into training
 datasets, see [Data recording](03-data-recording.md).
 

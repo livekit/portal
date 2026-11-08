@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reading an `RrdSink` archive back: its schema, keypoints, episodes and rows.
+"""Reading a recording back: its schema, keypoints, episodes and rows.
 
 Nothing here knows about an output format. A writer gets `Row`s: one per
 action, with the state and frames it answered.
@@ -26,7 +26,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -111,19 +111,22 @@ class _Action:
     values: Dict[str, float] = field(default_factory=dict)
 
 
+Decode = Callable[[Any], np.ndarray]
+
+
 class _Frames:
-    """One camera's frames, kept as the arrow columns they arrived in and
-    decoded one at a time. Copying every blob into Python up front would hold
-    the archive's video several times over."""
+    """One camera's frames, each kept as a key its archive knows how to
+    decode, and decoded one at a time. Copying every frame into Python up
+    front would hold the archive's video several times over."""
 
-    def __init__(self) -> None:
-        self._index: List[Tuple[int, int, int]] = []  # (ts_us, batch, row)
-        self._batches: List[Any] = []
+    def __init__(self, decode: Decode) -> None:
+        self._decode = decode
+        self._index: List[Tuple[int, int]] = []  # (ts_us, position in _keys)
+        self._keys: List[Any] = []
 
-    def add(self, times: List[int], batch) -> None:
-        number = len(self._batches)
-        self._batches.append(batch)
-        self._index.extend((ts, number, row) for row, ts in enumerate(times) if ts is not None)
+    def add(self, ts_us: int, key: Any) -> None:
+        self._index.append((ts_us, len(self._keys)))
+        self._keys.append(key)
 
     def finish(self) -> None:
         self._index.sort()
@@ -133,29 +136,27 @@ class _Frames:
 
     def at(self, ts_us: int, max_stale_us: int) -> Optional[np.ndarray]:
         """The newest frame at or before `ts_us`, unless it is too old."""
-        i = bisect.bisect_right(self._index, (ts_us, float("inf"), 0)) - 1
+        i = bisect.bisect_right(self._index, (ts_us, float("inf"))) - 1
         if i < 0 or ts_us - self._index[i][0] > max_stale_us:
             return None
-        _, number, row = self._index[i]
-        return _decode(self._batches[number], row)
+        return self._decode(self._keys[self._index[i][1]])
 
     def first(self) -> Optional[np.ndarray]:
         if not self._index:
             return None
-        _, number, row = self._index[0]
-        return _decode(self._batches[number], row)
+        return self._decode(self._keys[self._index[0][1]])
 
 
 class Archive:
-    """One `.rrd` written by `RrdSink`, read back."""
+    """One recording, written by `RrdSink` or `LanceSink`, read back."""
 
-    def __init__(self, path: Path, schema: Schema) -> None:
+    def __init__(self, path: Path, schema: Schema, decode: Decode) -> None:
         self.path = path
         self.schema = schema
         self.keypoints: List[Keypoint] = []
         self._states: List[Tuple[int, Dict[str, float]]] = []
         self._actions: Dict[Tuple[str, int], _Action] = {}
-        self._frames: Dict[str, _Frames] = {camera: _Frames() for camera in schema.cameras}
+        self._frames: Dict[str, _Frames] = {camera: _Frames(decode) for camera in schema.cameras}
 
     @property
     def senders(self) -> List[str]:
@@ -233,9 +234,14 @@ class Archive:
 
 
 def read_archive(path: "str | os.PathLike[str]") -> Archive:
-    """Parse one `.rrd`. Field order comes from its `portal/schema`, which
-    `RrdSink` always writes: Rerun entities are independent, and guessing the
-    order would build a dataset with its joints silently permuted."""
+    """Parse one recording: an `.rrd`, or a `LanceSink` directory. Field
+    order comes from the schema both sinks always write: guessing it would
+    build a dataset with its joints silently permuted."""
+    path = Path(path)
+    if path.is_dir():
+        from ._lance import read_lance
+
+        return read_lance(path)
     try:
         from rerun.chunk import RrdReader
     except ImportError as e:  # pragma: no cover - exercised without the extra
@@ -243,13 +249,12 @@ def read_archive(path: "str | os.PathLike[str]") -> Archive:
             "converting needs Rerun 0.38 or newer: install `livekit-portal[lerobot]`"
         ) from e
 
-    path = Path(path)
     chunks = RrdReader(path).stream().to_chunks()
     schema = next((_schema(c) for c in chunks if c.entity_path == "/portal/schema"), None)
     if schema is None:
         raise ValueError(f"{path.name} has no portal/schema: not written by RrdSink")
 
-    archive = Archive(path, schema)
+    archive = Archive(path, schema, lambda key: _decode(*key))
     states: Dict[int, Dict[str, float]] = {}
     state_fields = set(schema.state)
     action_fields = set(schema.action)
@@ -262,7 +267,9 @@ def read_archive(path: "str | os.PathLike[str]") -> Archive:
         if root == "observation" and len(parts) == 2:
             name = parts[1]
             if name in archive._frames:
-                archive._frames[name].add(_times(batch, "robot_time"), batch)
+                for row, ts in enumerate(_times(batch, "robot_time")):
+                    if ts is not None:
+                        archive._frames[name].add(ts, (batch, row))
             elif name in state_fields:
                 for ts, value in zip(_times(batch, "robot_time"), _scalars(batch)):
                     if ts is not None and value is not None:
@@ -302,7 +309,11 @@ def read_archive(path: "str | os.PathLike[str]") -> Archive:
 def _schema(chunk) -> Schema:
     batch = chunk.to_record_batch()
     (text,) = _texts(batch, "TextDocument:text")
-    doc = json.loads(text)
+    return schema_from(json.loads(text))
+
+
+def schema_from(doc: Dict[str, Any]) -> Schema:
+    """A `SessionInfo.describe()` document, as both sinks store it."""
     return Schema(
         session=doc.get("session", ""),
         state=[f["name"] for f in doc["state"]],

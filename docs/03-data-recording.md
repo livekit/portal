@@ -6,7 +6,8 @@ state, actions, and annotations on a shared timeline.
 
 Use an `Observer` to receive these streams without driving the robot. Attach a
 **sink**, the object that writes incoming data to storage. The built-in `RrdSink`
-writes [Rerun](https://rerun.io) `.rrd` archives; a custom sink can write another
+writes [Rerun](https://rerun.io) `.rrd` archives, and `LanceSink` writes
+[Lance](https://lancedb.github.io/lance/) tables; a custom sink can write another
 format. This guide covers recording, reviewing the archive, and preparing data
 for training.
 
@@ -149,6 +150,72 @@ Two timelines, both on the robot's clock:
   without it anything reading the file would have to guess joint order.
 - **`recorder/frames_dropped`** tells a gap the recorder caused apart from a
   camera that stalled. See [Backpressure](#backpressure).
+
+## Recording to Lance
+
+`LanceSink` writes the same streams as tables you can query with Lance,
+LanceDB, DuckDB or Polars, without opening the video. It ships as an extra:
+
+```bash
+pip install 'livekit-portal[lance]'
+```
+
+```python
+from livekit.portal.recording import LanceSink
+
+sink = LanceSink("data/sessions")
+obs.record_to(sink)
+```
+
+Each recording is a directory, `data/sessions/<session>-<UTC start>/`, with
+one table per stream:
+
+| Table | One row per | Columns |
+|---|---|---|
+| `states` | state | `timestamp_us`, `values` in schema order |
+| `actions` | action | `timestamp_us`, `in_reply_to_ts_us`, `sender`, `active`, `values` |
+| `keypoints` | keypoint | `timestamp_us`, `type`, `sender`, `payload` (JSON) |
+| `videos` | MP4 segment of a track | `track`, `segment`, `start_us`, `end_us`, `width`, `height`, `frames`, `mp4` (blob) |
+| `frames` | encoded frame | `track`, `timestamp_us`, `segment`, `index` within the segment |
+| `frames_dropped` | frame the recorder dropped | `track`, `timestamp_us` |
+| `metrics` | metrics snapshot | observer's `now_us()` as `timestamp_us`, one column per metric |
+
+- **Every row carries `session`**, so recordings can be merged into one table
+  later.
+- **Field order lives in each table's schema metadata** under `portal`, the
+  same document as the `.rrd`'s `portal/schema`.
+- **Video is H.264, cut into segments.** A segment closes after `segment_s`
+  seconds (10 by default) or when the frame size changes. `crf` sets quality:
+  lower is better and larger, 23 by default. Frames keep their timestamps to
+  the microsecond. A frame with an odd width or height loses its last column or
+  row, because H.264 in 4:2:0 needs even dimensions.
+- **`mp4` is a Lance blob.** Scans skip it unless you ask for it, and
+  `take_blobs` reads one segment without the rest.
+- **Rows are appended about once a second**, and a track's frames land
+  together with their segment once it closes. A crash loses the open segment
+  and at most a second of everything else. `close()` compacts each table into
+  one version.
+
+Reading a camera's frames back:
+
+```python
+import io
+
+import av
+import lance
+
+videos = lance.dataset(f"{sink.path}/videos.lance")
+ids = videos.to_table(columns=["track", "segment"], filter="track = 'cam1'", with_row_id=True)
+(blob,) = videos.take_blobs("mp4", ids=[ids["_rowid"][0].as_py()])
+with av.open(io.BytesIO(blob.readall())) as mp4:
+    for frame in mp4.decode(video=0):
+        pixels = frame.to_ndarray(format="rgb24")   # (H, W, 3) uint8
+```
+
+`livekit-portal convert` reads these directories as well as `.rrd` files.
+
+To record both formats at once, use a sink that forwards each call to an
+`RrdSink` and a `LanceSink`. See [Writing a sink](#writing-a-sink).
 
 ## Writing a sink
 
@@ -339,8 +406,9 @@ A training dataset usually needs samples at a fixed rate and a specific episode
 layout. Keep those choices in a conversion step so you can revisit them without
 repeating data collection.
 
-`livekit-portal convert` turns `RrdSink` archives into a dataset. It ships as
-an extra, and needs Python 3.12 because lerobot does.
+`livekit-portal convert` turns `RrdSink` archives and `LanceSink` recordings
+into a dataset. It ships as an extra, and needs Python 3.12 because lerobot
+does. Reading `LanceSink` recordings also needs the `[lance]` extra.
 
 > [!NOTE]
 > The converter is a convention for getting started, not the way recordings
@@ -358,8 +426,9 @@ livekit-portal convert data/sessions --output lerobotv3 --repo-id me/pick-place
 livekit-portal convert a.rrd b.rrd --output lerobotv3 --repo-id me/pick-place --push
 ```
 
-Pass `.rrd` files, directories of them, or both. Directory searches aren't
-recursive. `--dry-run` reports episodes, cameras, and senders and checks schema
+Pass `.rrd` files, `LanceSink` recording directories, directories holding
+either, or a mix. Directory searches aren't recursive. A session recorded by
+both sinks into the same directory is converted once, from its Lance copy. `--dry-run` reports episodes, cameras, and senders and checks schema
 compatibility; it doesn't validate every output row. Every archive goes into one
 dataset, so they must share a schema: the converter refuses archives whose
 state fields, action fields or cameras differ, rather than converting with
@@ -472,7 +541,7 @@ selection it does not offer:
 ```python
 from livekit.portal.convert import EpisodeRule, Selection, read_archive
 
-archive = read_archive("data/sessions/lab-20260101T120000.rrd")
+archive = read_archive("data/sessions/lab-20260101T120000.rrd")   # or a LanceSink directory
 for episode in archive.episodes(EpisodeRule()):
     for row in archive.rows(episode, Selection(max_stale_us=100_000)):
         row.state, row.action, row.frames   # frames: (H, W, 3) uint8 RGB per camera

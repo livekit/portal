@@ -20,7 +20,9 @@ without a cycle; conversions from FFI records are passed in by the caller.
 from __future__ import annotations
 
 import collections
+import datetime
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -34,6 +36,7 @@ _log = logging.getLogger("livekit.portal.recording")
 
 DEFAULT_MAX_QUEUED_FRAMES = 64
 DEFAULT_METRICS_INTERVAL_S = 1.0
+SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,25 @@ class SessionInfo:
     now_us: Callable[[], int]
     """The observer's `now_us()`, for sinks that stamp rows of their own
     (metrics, for example)."""
+
+    def stem(self) -> str:
+        """`<session>-<UTC start>`, safe as a file name."""
+        started = datetime.datetime.fromtimestamp(self.started_at_us / 1_000_000, tz=datetime.timezone.utc)
+        return f"{re.sub(r'[^A-Za-z0-9._-]+', '_', self.session)}-{started:%Y%m%dT%H%M%S}"
+
+    def describe(self) -> Dict[str, Any]:
+        """Field order and dtypes, tracks and clock: what a reader needs to
+        make sense of a recording without guessing."""
+        return {
+            "version": SCHEMA_VERSION,
+            "session": self.session,
+            "recorder": self.local_identity,
+            "started_at_us": self.started_at_us,
+            "time_sync_source": self.time_sync_source.name.lower(),
+            "state": [{"name": f.name, "dtype": f.dtype.name.lower()} for f in self.state_schema],
+            "action": [{"name": f.name, "dtype": f.dtype.name.lower()} for f in self.action_schema],
+            "video": [{"name": t.name, "codec": t.codec.name.lower()} for t in self.video_tracks],
+        }
 
 
 class Sink(Protocol):

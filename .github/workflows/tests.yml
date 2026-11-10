@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
@@ -71,7 +71,7 @@ jobs:
         run: .github/scripts/install-clang.sh
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       # yuv-sys renames libyuv's symbols only when it first copies libyuv into
       # OUT_DIR. A run cancelled mid-rename gets cached (cache-on-failure), and
@@ -107,7 +107,7 @@ jobs:
         run: .github/scripts/install-clang.sh
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       # yuv-sys renames libyuv's symbols only when it first copies libyuv into
       # OUT_DIR. A run cancelled mid-rename gets cached (cache-on-failure), and

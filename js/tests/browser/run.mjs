@@ -33,7 +33,9 @@ const server = await createServer({
   server: { port: 0 },
 });
 await server.listen();
-const browser = await chromium.launch();
+// `PORTAL_TEST_BROWSER_CHANNEL=chrome` uses an installed Chrome instead of
+// Playwright's Chromium (CI runners ship one).
+const browser = await chromium.launch({ channel: process.env.PORTAL_TEST_BROWSER_CHANNEL });
 let failed = 0;
 try {
   const page = await browser.newPage();

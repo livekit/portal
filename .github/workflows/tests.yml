@@ -85,9 +85,6 @@ jobs:
       - name: Test
         run: pnpm test
 
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
-
       - name: Start LiveKit dev server
         uses: livekit/dev-server-action@5d4d5337a875e2d1afd37bed03c601d159dab002 # v1.1.1
         with:
@@ -96,6 +93,8 @@ jobs:
 
       # Real peers in Chromium against the dev server (devkey/secret).
       - name: Browser tests
+        env:
+          PORTAL_TEST_BROWSER_CHANNEL: chrome
         run: pnpm test:browser
 
   rust:

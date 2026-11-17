@@ -1775,7 +1775,7 @@ macro_rules! role_portal_methods {
 /// The receive side shared by the operator and observer facades.
 macro_rules! receiving_portal_methods {
     ($ty:ty) => {
-        #[uniffi::export(async_runtime = "tokio")]
+        #[uniffi::export]
         impl $ty {
             pub fn get_state(&self) -> Option<State> {
                 self.inner.get_state()
@@ -1860,7 +1860,7 @@ pub struct Robot {
     inner: Arc<Portal>,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl Robot {
     #[uniffi::constructor]
     pub fn new(config: Arc<RobotConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
@@ -1900,7 +1900,7 @@ pub struct Operator {
     inner: Arc<Portal>,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl Operator {
     #[uniffi::constructor]
     pub fn new(config: Arc<OperatorConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
@@ -1957,7 +1957,7 @@ pub struct Observer {
     inner: Arc<Portal>,
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl Observer {
     #[uniffi::constructor]
     pub fn new(config: Arc<ObserverConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {

@@ -8,7 +8,7 @@ how each transport maps onto it.
 
 | Transport | Status | Driver |
 |---|---|---|
-| LiveKit | implemented | `livekit-portal` (`src/wire.rs` holds the whole mapping) |
+| LiveKit | implemented | `livekit-portal` (native) and `js/` (browser), sharing the mapping in `livekit_portal_core::livekit` |
 | Loopback | implemented | `livekit_portal_core::loopback`, in-process, for tests |
 | Media over QUIC | design only | — |
 
@@ -105,6 +105,19 @@ before the split.
 | E2EE | the room's shared-key GCM encryption |
 | link restored | `RoomEvent::Reconnected` |
 
+### In the browser
+
+`js/` drives the same core, compiled to wasm (`js/wasm`), over the LiveKit
+browser SDK. The TypeScript side only maps room events to core inputs and
+outputs to `livekit-client` calls, so the wire is identical to the native one.
+
+| Portal | Browser |
+|---|---|
+| WebRTC-codec video (receive) | decoded frames from `MediaStreamTrackProcessor`, or a hidden `<video>`'s `requestVideoFrameCallback` where that is missing; the timestamp comes from `livekit-client`'s frame-metadata worker |
+| WebRTC-codec video (publish) | not yet: `livekit-client` stamps frames at encode time, not with the capture timestamp. A browser robot uses RAW/PNG/MJPEG |
+| frames held by the core | `VideoFrame` handles; the driver keeps each track's newest `slack + 2` open |
+| E2EE | `ExternalE2EEKeyProvider` with the shared key and the SDK's E2EE worker |
+
 ## Loopback (implemented)
 
 An in-process transport on a fake clock (`livekit_portal_core::loopback`), with per-link
@@ -123,7 +136,7 @@ LiveKit driver takes.
 ## Media over QUIC (design only)
 
 MoQ drafts churn (IETF `moq-transport` versus `moq-lite`), so a driver should
-isolate the draft it speaks behind its own module, the way `wire.rs` isolates
+isolate the draft it speaks behind its own module, the way `livekit_portal_core::livekit` isolates
 LiveKit.
 
 | Portal | MoQ |

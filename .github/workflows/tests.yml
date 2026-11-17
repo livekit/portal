@@ -52,6 +52,39 @@ jobs:
       - name: cargo build -p livekit-portal-core (wasm32)
         run: cargo build -p livekit-portal-core --locked --target wasm32-unknown-unknown
 
+  # The browser package: livekit-portal-core compiled to wasm, plus the TS driver.
+  js:
+    name: js (wasm + TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: js
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          target: wasm32-unknown-unknown
+
+      # Must match the `wasm-bindgen` version pinned in js/wasm/Cargo.toml.
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+
+      - name: Install dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
   rust:
     name: cargo test
     runs-on: ubuntu-latest

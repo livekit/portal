@@ -47,7 +47,7 @@ use tokio::task::JoinHandle;
 use crate::clock::anchored_now_us;
 use crate::codec::{Codec, encode_frame_into};
 use crate::portal::Shared;
-use crate::wire::FRAME_VIDEO_TOPIC;
+use livekit_portal_core::livekit::FRAME_VIDEO_TOPIC;
 
 // --- Publisher ---
 

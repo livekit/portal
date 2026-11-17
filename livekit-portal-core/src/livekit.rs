@@ -15,15 +15,16 @@
 //! How Portal's transport model maps onto a LiveKit room: streams are data
 //! topics (the sender is the publisher), presence is participant
 //! attributes, RPC is LiveKit RPC, and video is a published track or a
-//! byte stream per frame. Everything LiveKit names lives here, and none of
-//! it may change without a `PROTOCOL_VERSION` bump.
+//! byte stream per frame. Everything LiveKit names lives here, shared by
+//! the native driver (`livekit-portal`) and the browser one (`js/`), and
+//! none of it may change without a `PROTOCOL_VERSION` bump.
 
 use std::collections::HashMap;
 
-use livekit_portal_core::transport::{
+use crate::transport::{
     PROTOCOL_VERSION, Presence, Stream, TransportCaps, VideoCaps, parse_role, role_name,
 };
-use livekit_portal_core::types::Role;
+use crate::types::Role;
 
 /// Participant attribute keys used by Portal for role discovery and the
 /// multi-controller pointer. Namespaced to avoid colliding with any
@@ -186,10 +187,9 @@ mod tests {
     /// LiveKit topics too; they must agree with what this driver sends.
     #[test]
     fn topics_match_the_golden_fixtures() {
-        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-            "../../livekit-portal-core/tests/fixtures/golden.json"
-        ))
-        .expect("fixtures parse");
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/golden.json"))
+                .expect("fixtures parse");
         for s in [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint, Stream::Telemetry]
         {
             assert_eq!(fixtures["topics"][s.name()].as_str(), topic(s), "{}", s.name());

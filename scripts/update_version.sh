@@ -1,5 +1,6 @@
 #!/bin/sh
-# Set the project version in the workspace Cargo.toml and python/pyproject.toml,
+# Set the project version in the workspace Cargo.toml, python/pyproject.toml and
+# js/package.json,
 # then sync Cargo.lock and uv.lock. The lockfiles must be committed with the
 # bump: a stale Cargo.lock gets rewritten by `cargo build` during the publish
 # workflow, dirtying the tree at the tag, and hatch-vcs then stamps the wheels
@@ -26,9 +27,13 @@ for file in "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/python/pyproject.toml"; do
     echo "updated $file"
 done
 
-# Every crate (livekit-portal-core, livekit-portal, livekit-portal-ffi) inherits the
+sed "s/^  \"version\": \".*\",/  \"version\": \"$VERSION\",/" "$REPO_ROOT/js/package.json" > "$REPO_ROOT/js/package.json.tmp"
+mv "$REPO_ROOT/js/package.json.tmp" "$REPO_ROOT/js/package.json"
+echo "updated $REPO_ROOT/js/package.json"
+
+# Every crate (livekit-portal-core, livekit-portal, livekit-portal-ffi, js/wasm) inherits the
 # workspace version; fail loudly if one stops doing so and would be skipped.
-for crate in livekit-portal-core livekit-portal livekit-portal-ffi; do
+for crate in livekit-portal-core livekit-portal livekit-portal-ffi js/wasm; do
     if ! grep -q '^version = { workspace = true }' "$REPO_ROOT/$crate/Cargo.toml"; then
         echo "error: $crate/Cargo.toml does not inherit the workspace version" >&2
         exit 1

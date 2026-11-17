@@ -55,10 +55,12 @@ use crate::frame_video::{FrameVideoPublisher, FrameVideoPublisherOptions};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
 use crate::sinks::Sinks;
 use crate::video::{VideoPublisher, VideoPublisherOptions, VideoReceiver};
-use crate::wire;
+use livekit_portal_core::livekit as wire;
 
-pub use crate::wire::{ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY};
 pub use livekit_portal_core::SET_ACTIVE_OPERATOR_RPC;
+pub use livekit_portal_core::livekit::{
+    ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION_ATTR_KEY, ROLE_ATTR_KEY,
+};
 
 /// How long `connect` waits for the first clock sync with the robot.
 pub const TIME_SYNC_TIMEOUT: Duration = Duration::from_secs(10);

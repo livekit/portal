@@ -23,7 +23,14 @@ export {
   type StallBehavior,
   type VideoSpec,
 } from './config';
-export { Observer, Operator, Portal, Robot, type ConnectOptions, type RpcOptions } from './portal';
+export {
+  Observer,
+  Operator,
+  Portal,
+  Robot,
+  setLogLevel,
+  type ConnectOptions,
+  type RpcOptions,
+} from './portal';
 export type * from './types';
 export { RpcError } from 'livekit-client';
-export { setLogLevel } from './generated/livekit_portal_wasm';

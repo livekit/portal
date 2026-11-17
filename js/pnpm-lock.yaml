@@ -8,15 +8,27 @@ importers:
 
   .:
     devDependencies:
+      '@types/node':
+        specifier: ^22.20.5
+        version: 22.20.5
       livekit-client:
         specifier: ^2.24.1
         version: 2.24.1(@types/dom-mediacapture-record@1.0.22)
+      livekit-server-sdk:
+        specifier: 2.20.0
+        version: 2.20.0
+      playwright:
+        specifier: 1.58.0
+        version: 1.58.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      vite:
+        specifier: 7.3.8
+        version: 7.3.8(@types/node@22.20.5)
       vitest:
         specifier: ^3.2.4
-        version: 3.2.7
+        version: 3.2.7(@types/node@22.20.5)
 
 packages:
 
@@ -330,6 +342,9 @@ packages:
   '@types/estree@1.0.10':
     resolution: {integrity: sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==}
 
+  '@types/node@22.20.5':
+    resolution: {integrity: sha512-U2+DNr+wSjpsTS/wZGYHq7GcwfuSmKiKvoPvK22zwTlRhU91yOniN4qRR5KhIjvif7ysw/dz/hKmfDH0Ris4aA==}
+
   '@types/sdp-transform@2.15.0':
     resolution: {integrity: sha512-ikIFF0EaYt/2XetIYYVeMj6SB52oVXFasJUXDzWHgzNJS5ep2Pbsu7f8f3Za+dEie8HQtt3Zr9mHYBpWT0XgxQ==}
 
@@ -419,10 +434,18 @@ packages:
       picomatch:
         optional: true
 
+  fsevents@2.3.2:
+    resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
+    engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+    os: [darwin]
+
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   jose@6.2.17:
     resolution: {integrity: sha512-wOuK9V1yujQFH5S0ZWmLcDZN7+IKh9bUCC2ZPCf2HDlol3WWHy+PPyNjEI75FXRLMp3vDKQcupP59xhVU95hcg==}
@@ -434,6 +457,10 @@ packages:
     resolution: {integrity: sha512-8kkpTPuszlkza99XOV/QZVQG7M730i5gH52j0AZzsUMQpQfI9tEgW2JfDge7+Z2ZUUuBEtV3r2MYbALHFJ2HIg==}
     peerDependencies:
       '@types/dom-mediacapture-record': ^1
+
+  livekit-server-sdk@2.20.0:
+    resolution: {integrity: sha512-kkzvWp50q8oPGhJp7gpgGSPx2riQAzTZQXOBKz7ze58Be+dzdArneTbXM9ATZ5BdRFFvN+sxGEfGYyXAczLFig==}
+    engines: {node: '>=19'}
 
   loglevel@1.9.2:
     resolution: {integrity: sha512-HgMmCqIJSAKqo68l0rS2AanEWfkxaZ5wNiEFb5ggm08lDs9Xl2KxBlX3PTcaD2chBM1gXAYf491/M2Rv8Jwayg==}
@@ -470,6 +497,16 @@ packages:
   picomatch@4.0.7:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
+
+  playwright-core@1.58.0:
+    resolution: {integrity: sha512-aaoB1RWrdNi3//rOeKuMiS65UCcgOVljU46At6eFcOFPFHWtd2weHRRow6z/n+Lec0Lvu0k9ZPKJSjPugikirw==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  playwright@1.58.0:
+    resolution: {integrity: sha512-2SVA0sbPktiIY/MCOPX8e86ehA/e+tDNq+e5Y8qjKYti2Z/JG7xnronT/TXTIkKbYGWlCbuucZ6dziEgkoEjQQ==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   postcss@8.5.33:
     resolution: {integrity: sha512-RVHEU9/Pp1Fnjr/MpAJsZoADukCKhfIi15OunEYiGktIkYLkPVvC1sioWolGDS7XByMTx9m/IGbro0Js13zhnQ==}
@@ -538,6 +575,9 @@ packages:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
+
+  undici-types@6.21.0:
+    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
   vite-node@3.2.4:
     resolution: {integrity: sha512-EbKSKh+bh1E1IFxeO0pg1n4dvoOTt0UDiXMd/qn++r98+jPO1xtJilvXldeuQ8giIB5IkpjCgMleHMNEsGH6pg==}
@@ -800,6 +840,10 @@ snapshots:
 
   '@types/estree@1.0.10': {}
 
+  '@types/node@22.20.5':
+    dependencies:
+      undici-types: 6.21.0
+
   '@types/sdp-transform@2.15.0': {}
 
   '@vitest/expect@3.2.7':
@@ -810,13 +854,13 @@ snapshots:
       chai: 5.3.3
       tinyrainbow: 2.0.0
 
-  '@vitest/mocker@3.2.7(vite@7.3.8)':
+  '@vitest/mocker@3.2.7(vite@7.3.8(@types/node@22.20.5))':
     dependencies:
       '@vitest/spy': 3.2.7
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 7.3.8
+      vite: 7.3.8(@types/node@22.20.5)
 
   '@vitest/pretty-format@3.2.7':
     dependencies:
@@ -907,8 +951,13 @@ snapshots:
     optionalDependencies:
       picomatch: 4.0.7
 
+  fsevents@2.3.2:
+    optional: true
+
   fsevents@2.3.3:
     optional: true
+
+  jose@5.10.0: {}
 
   jose@6.2.17: {}
 
@@ -928,6 +977,12 @@ snapshots:
       tslib: 2.8.1
       typed-emitter: 2.1.0
       webrtc-adapter: 9.0.6
+
+  livekit-server-sdk@2.20.0:
+    dependencies:
+      '@bufbuild/protobuf': 1.10.1
+      '@livekit/protocol': 1.53.0
+      jose: 5.10.0
 
   loglevel@1.9.2: {}
 
@@ -950,6 +1005,14 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.7: {}
+
+  playwright-core@1.58.0: {}
+
+  playwright@1.58.0:
+    dependencies:
+      playwright-core: 1.58.0
+    optionalDependencies:
+      fsevents: 2.3.2
 
   postcss@8.5.33:
     dependencies:
@@ -1033,13 +1096,15 @@ snapshots:
 
   typescript@5.9.3: {}
 
-  vite-node@3.2.4:
+  undici-types@6.21.0: {}
+
+  vite-node@3.2.4(@types/node@22.20.5):
     dependencies:
       cac: 6.7.14
       debug: 4.4.3
       es-module-lexer: 1.7.0
       pathe: 2.0.3
-      vite: 7.3.8
+      vite: 7.3.8(@types/node@22.20.5)
     transitivePeerDependencies:
       - '@types/node'
       - jiti
@@ -1054,7 +1119,7 @@ snapshots:
       - tsx
       - yaml
 
-  vite@7.3.8:
+  vite@7.3.8(@types/node@22.20.5):
     dependencies:
       esbuild: 0.28.2
       fdir: 6.5.0(picomatch@4.0.7)
@@ -1063,13 +1128,14 @@ snapshots:
       rollup: 4.68.5
       tinyglobby: 0.2.17
     optionalDependencies:
+      '@types/node': 22.20.5
       fsevents: 2.3.3
 
-  vitest@3.2.7:
+  vitest@3.2.7(@types/node@22.20.5):
     dependencies:
       '@types/chai': 5.2.3
       '@vitest/expect': 3.2.7
-      '@vitest/mocker': 3.2.7(vite@7.3.8)
+      '@vitest/mocker': 3.2.7(vite@7.3.8(@types/node@22.20.5))
       '@vitest/pretty-format': 3.2.7
       '@vitest/runner': 3.2.7
       '@vitest/snapshot': 3.2.7
@@ -1087,9 +1153,11 @@ snapshots:
       tinyglobby: 0.2.17
       tinypool: 1.1.1
       tinyrainbow: 2.0.0
-      vite: 7.3.8
-      vite-node: 3.2.4
+      vite: 7.3.8(@types/node@22.20.5)
+      vite-node: 3.2.4(@types/node@22.20.5)
       why-is-node-running: 2.3.0
+    optionalDependencies:
+      '@types/node': 22.20.5
     transitivePeerDependencies:
       - jiti
       - less

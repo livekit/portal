@@ -41,7 +41,7 @@ import type {
   Values,
   VideoFrameData,
 } from './types';
-import init, { Config, Core, wireNames } from './generated/livekit_portal_wasm';
+import init, { Config, Core, setLogLevel as setWasmLogLevel, wireNames } from './generated/livekit_portal_wasm';
 
 export interface ConnectOptions {
   /**
@@ -97,6 +97,7 @@ type Output =
   | { type: 'wake'; atUs: number | null };
 interface ConfigInfo {
   role: string;
+  observationSync: boolean;
   slack: number;
   videos: { name: string; webrtc: boolean }[];
   timeSyncSource: 'portal' | 'system';
@@ -109,7 +110,18 @@ const MIN_WAKE_DELAY_MS = 1;
 const BUILTIN_RPC = 1500;
 
 let wasmReady: Promise<unknown> | undefined;
-const loadWasm = () => (wasmReady ??= init());
+let logLevel: string | undefined;
+const loadWasm = () =>
+  (wasmReady ??= init().then(() => logLevel && setWasmLogLevel(logLevel)));
+
+/**
+ * Route Portal's logs at or above `level` ("error", "warn", "info", "debug",
+ * "trace" or "off") to the console. Defaults to "warn"; safe to call any time.
+ */
+export function setLogLevel(level: 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'off'): void {
+  logLevel = level;
+  if (wasmReady) void wasmReady.then(() => setWasmLogLevel(level));
+}
 const wire = () => wireNames() as { frameVideoTopic: string; setActiveOperatorRpc: string };
 
 class Callbacks {
@@ -141,6 +153,7 @@ export class Portal {
   private room?: Room;
   private frames?: FrameStore;
   private timer?: ReturnType<typeof setTimeout>;
+  private wakeAtUs?: number;
   private readonly receivers = new Map<string, VideoReceiver>();
   private readonly rpcHandlers = new Map<string, RpcHandler>();
   private readonly rpcWaiters = new Map<number, (r: RpcResult) => void>();
@@ -161,6 +174,7 @@ export class Portal {
     if (this.room) throw new Error('portal is already connected');
     const core = await this.ensureCore();
     const info = this.info!;
+    if (this.cb.observation) this.requireObservationSync();
     if (info.role === 'robot' && info.videos.some((v) => v.webrtc)) {
       throw new Error(
         'a browser robot cannot publish WebRTC video tracks yet; declare them as raw, png or mjpeg',
@@ -209,6 +223,7 @@ export class Portal {
     const room = this.room;
     this.room = undefined;
     if (this.core) this.execute(this.core.disconnect());
+    this.wakeAtUs = undefined;
     clearTimeout(this.timer);
     this.receivers.forEach((r) => r.stop());
     this.receivers.clear();
@@ -278,7 +293,9 @@ export class Portal {
   onTelemetry(cb: (t: Telemetry) => void): void {
     this.cb.telemetry = cb;
   }
+  /** Throws when observation sync is off for this peer (observers by default). */
   onObservation(cb: (o: Observation) => void): void {
+    this.requireObservationSync();
     this.cb.observation = cb;
   }
   onVideoFrame(track: string, cb: (track: string, f: VideoFrameData) => void): void {
@@ -312,6 +329,7 @@ export class Portal {
     return this.latest.state;
   }
   getObservation(): Observation | undefined {
+    this.requireObservationSync();
     return this.latest.observation;
   }
   getTelemetry(sender: string): Telemetry | undefined {
@@ -432,6 +450,15 @@ export class Portal {
     return this.core;
   }
 
+  /** Known once the config is loaded; `connect` checks a callback set before that. */
+  private requireObservationSync(): void {
+    if (this.info && !this.info.observationSync) {
+      throw new Error(
+        'observation sync is off on this peer, so no observations are built; turn it on with observation_sync: true, or use onState and onVideoFrame',
+      );
+    }
+  }
+
   private connected(): Core {
     if (!this.core || !this.room) throw new Error('portal is not connected');
     return this.core;
@@ -483,14 +510,26 @@ export class Portal {
           this.dispatch(o.event);
           break;
         case 'wake':
-          clearTimeout(this.timer);
-          if (o.atUs !== null) {
-            const delay = Math.max(MIN_WAKE_DELAY_MS, (o.atUs - this.rawNowUs()) / 1000);
-            this.timer = setTimeout(() => this.step((c, nowUs) => c.wake(nowUs)), delay);
-          }
+          this.wakeAtUs = o.atUs ?? undefined;
+          this.armWake();
           break;
       }
     }
+  }
+
+  /**
+   * One timer for the core's latest wake-up. Re-armed after every fire: a
+   * timer that fires early leaves the core with nothing to do, and it does
+   * not repeat an unchanged wake-up.
+   */
+  private armWake(): void {
+    clearTimeout(this.timer);
+    if (this.wakeAtUs === undefined) return;
+    const delay = Math.max(MIN_WAKE_DELAY_MS, (this.wakeAtUs - this.rawNowUs()) / 1000);
+    this.timer = setTimeout(() => {
+      if (this.core && this.room) this.step((c, nowUs) => c.wake(nowUs));
+      this.armWake();
+    }, delay);
   }
 
   private async publish(o: Extract<Output, { type: 'publish' }>): Promise<void> {

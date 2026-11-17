@@ -56,7 +56,7 @@ jobs:
   js:
     name: js (wasm + TypeScript)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: js
@@ -84,6 +84,19 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Start LiveKit dev server
+        uses: livekit/dev-server-action@5d4d5337a875e2d1afd37bed03c601d159dab002 # v1.1.1
+        with:
+          github-token: ${{ github.token }}
+          version: v1.13.5
+
+      # Real peers in Chromium against the dev server (devkey/secret).
+      - name: Browser tests
+        run: pnpm test:browser
 
   rust:
     name: cargo test

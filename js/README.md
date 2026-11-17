@@ -9,6 +9,30 @@ format), and a thin TypeScript driver ([`src/portal.ts`](src/portal.ts))
 connects it to [`livekit-client`](https://github.com/livekit/client-sdk-js).
 See [transports](../docs/transports.md#in-the-browser) for how it maps.
 
+## Install
+
+Not on npm yet. Build it from this repo and add it to your app:
+
+```bash
+# Rust with the wasm target, and the wasm-bindgen CLI matching js/wasm/Cargo.toml
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
+
+cd portal/js
+pnpm install
+pnpm build                      # wasm + TypeScript into dist/
+
+cd your-app
+pnpm add /path/to/portal/js livekit-client   # or npm install / yarn add
+```
+
+`livekit-client` (2.24.1 or newer) is a peer dependency. The package is ESM and
+loads its `.wasm` and the frame-metadata worker with `new URL(..., import.meta.url)`,
+which Vite, webpack 5, Rollup and esbuild-based bundlers resolve on their own.
+
+Tokens must allow `canUpdateOwnMetadata` (Portal announces each peer's role in
+its attributes). Mint them on your server, never in the page.
+
 ## Use
 
 ```ts
@@ -43,13 +67,12 @@ tracks as RAW, PNG or MJPEG. With an E2EE key, pass
 Video is read from the decoder with `MediaStreamTrackProcessor` (Chromium),
 or from a hidden `<video>` elsewhere, which adds about 20 ms.
 
-## Build
-
-Needs Rust with the `wasm32-unknown-unknown` target and
-`wasm-bindgen-cli` at the version pinned in `wasm/Cargo.toml`.
+## Develop
 
 ```bash
-pnpm install
-pnpm build   # wasm + TypeScript into dist/
-pnpm test    # the wasm binding, in Node
+pnpm build      # wasm + TypeScript into dist/
+pnpm typecheck
+pnpm test       # the wasm binding, in Node
+pnpm exec playwright install chromium
+pnpm test:browser   # real peers in Chromium against `livekit-server --dev`
 ```

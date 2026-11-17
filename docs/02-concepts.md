@@ -29,8 +29,9 @@ order, and data types must match between senders and receivers. Use a
 [shared YAML file](reference/config-file.md) to keep them consistent.
 
 Roles are fixed at construction. Each class only has its own role's methods:
-`Operator` has no `send_state`, for example. An `Observer`'s `send_*` methods
-exist only to raise `PortalError.WrongRole`.
+`Operator` has no `send_state`, for example. An `Observer`'s `send_state`,
+`send_action` and `send_video_frame` exist only to raise
+`PortalError.WrongRole`. Keypoints and telemetry can be sent by any role.
 
 ## The observation model
 

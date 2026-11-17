@@ -297,6 +297,12 @@ latest-wins, so a slow reader sees the freshest value rather than a backlog.
 |---|---|---|
 | `robot.on_action(cb)` | `robot.get_action()` | `Action` |
 
+**Every role.**
+
+| Callback | Pull | Fires with |
+|---|---|---|
+| `on_telemetry(cb)` | `get_telemetry(sender)` | `Telemetry`, latest per sender. See [Telemetry](#telemetry). |
+
 `on_state` and `on_video_frame` are raw firehoses. They fire on arrival with no
 matching at all. Use them for a preview pane or a debug log. Use
 `on_observation` for anything that needs frames and state to agree.
@@ -507,6 +513,37 @@ op.get_telemetry("robot")                              # latest from that peer, 
 - **Namespace with `/`.** `power/battery_v` nests under `power` in a Rerun
   recording. The `portal/` namespace is reserved for Portal and raises
   `ValueError`.
+
+### Reading the latest sample
+
+`get_telemetry(sender)` returns the newest `Telemetry` from that peer, or
+`None` if nothing has arrived from it yet. It never blocks, so call it from a
+control loop or a UI tick.
+
+```python
+t = op.get_telemetry("robot")
+if t is None:
+    ...                                   # the robot hasn't sent telemetry yet
+elif t.values["estop"]:
+    op.send_action(zero_action)
+
+t.values["power/battery_v"]               # typed per schema: float here, bool for BOOL
+t.raw_values["estop"]                     # every field as float: 1.0
+
+# Timestamps are on the robot's clock, like now_us()
+age_ms = (op.now_us() - t.timestamp_us) / 1000
+if age_ms > 500:
+    print("robot telemetry is stale")
+
+# The robot reads operators and observers alike
+for peer in robot.operators() + robot.observers():
+    if (t := robot.get_telemetry(peer)) is not None:
+        print(peer, t.values)
+```
+
+The slot outlives the sender: after a peer leaves, `get_telemetry` keeps
+returning its last sample. Check the age if that matters. Slots clear on
+`disconnect()` and on a reconnect.
 - **Numbers and booleans only**, the same dtypes as state. Send strings, such
   as a firmware version, over [RPC](#rpc) or a [keypoint](#keypoints) instead.
 - `send_telemetry` raises `PortalError.NoTelemetrySchema` when no telemetry
@@ -759,14 +796,15 @@ sender's side. Check `op.active_operator()`.
 | Variant | Cause |
 |---|---|
 | `AlreadyConnected` | `connect` called on a connected portal. |
-| `NotConnected` | `perform_rpc`, `send_keypoint`, or the robot's `set_active_operator` before `connect` or after `disconnect`. |
+| `NotConnected` | `perform_rpc`, `send_keypoint`, `send_telemetry`, or the robot's `set_active_operator` before `connect` or after `disconnect`. |
+| `NoTelemetrySchema` | `send_telemetry` on a peer that declared no telemetry fields. |
 | `Room` | Connecting or a transport call failed: a bad token, a missing `can_update_own_metadata` grant, or an oversize keypoint. Carries the server's message. |
 | `NoPeer` | `perform_rpc` with no peer discovered and no `destination`. |
 | `AmbiguousPeer` | Several remote participants and no peer identified. Pass `destination`. |
 | `UnknownVideoTrack` | Track name was never declared with `add_video`, or a robot's `send_video_frame` before `connect`. |
 | `WrongFrameSize` | Buffer length is not `width * height * 3`. |
 | `InvalidFrameDimensions` | Width or height is odd. |
-| `WrongRole` | A send the role can't make, such as any `Observer.send_*`. Also `send_state` or `send_action` before `connect` or after `disconnect`, when no publisher exists. |
+| `WrongRole` | A send the role can't make, such as an observer's `send_state`, `send_action` or `send_video_frame`. Also `send_state` or `send_action` before `connect` or after `disconnect`, when no publisher exists. |
 | `ObservationSyncDisabled` | `on_observation` or `get_observation` on a peer with `set_observation_sync(False)`. |
 | `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
 | `Deserialization` | A received payload could not be parsed. |

@@ -192,7 +192,7 @@ of its own, the way `RrdSink` stamps metrics.
 
 The schemas in `SessionInfo` carry field order. Dicts like `values` don't
 promise it, so a sink that writes columns should take the order from
-`state_schema` and `action_schema`.
+`state_schema`, `action_schema` and `telemetry_schema`.
 
 ### Contract
 

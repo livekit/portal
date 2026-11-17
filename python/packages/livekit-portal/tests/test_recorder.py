@@ -67,6 +67,9 @@ class MemorySink:
     def write_metrics(self, metrics):
         self._record("metrics", metrics)
 
+    def write_telemetry(self, telemetry):
+        self._record("telemetry", telemetry)
+
     def close(self):
         self._record("close")
 
@@ -75,7 +78,13 @@ class MemorySink:
             return [c[0] for c in self.calls if not (without_metrics and c[0] == "metrics")]
 
 
-IDENTITY = _Converters(state=lambda x: x, action=lambda x: x, keypoint=lambda x: x, metrics=lambda: "m")
+IDENTITY = _Converters(
+    state=lambda x: x,
+    action=lambda x: x,
+    keypoint=lambda x: x,
+    metrics=lambda: "m",
+    telemetry=lambda x: x,
+)
 SESSION = SessionInfo(
     session="room",
     local_identity="observer",
@@ -105,6 +114,27 @@ def test_open_first_close_last_and_order_is_kept():
     rec.stop()
     assert sink.names() == ["open", "state", "frame", "keypoint", "action", "close"]
     assert sink.calls[0][1] is SESSION
+
+
+def test_telemetry_is_written_in_order():
+    sink = MemorySink()
+    rec = _recorder(sink)
+    rec.enqueue("state", "s1")
+    rec.enqueue("telemetry", "t1")
+    rec.stop()
+    assert sink.names() == ["open", "state", "telemetry", "close"]
+
+
+def test_sinks_without_write_telemetry_still_record():
+    class NoTelemetrySink(MemorySink):
+        write_telemetry = None
+
+    sink = NoTelemetrySink()
+    rec = _recorder(sink)
+    rec.enqueue("telemetry", "t1")
+    rec.enqueue("state", "s1")
+    rec.stop()
+    assert sink.names() == ["open", "state", "close"]
 
 
 def test_stop_writes_everything_already_queued():

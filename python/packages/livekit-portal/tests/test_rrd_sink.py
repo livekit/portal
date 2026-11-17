@@ -36,6 +36,7 @@ from livekit.portal import (  # noqa: E402
     Operator,
     OperatorConfig,
     State,
+    Telemetry,
     TimeSyncSource,
     VideoCodec,
     VideoFrameData,
@@ -57,6 +58,7 @@ def _session(**overrides) -> SessionInfo:
         time_sync_source=TimeSyncSource.SYSTEM,
         started_at_us=1_790_000_000 * US,
         now_us=lambda: 9 * US,
+        telemetry_schema=[FieldSpec(name="power/battery_v", dtype=DType.F32)],
     )
     fields.update(overrides)
     return SessionInfo(**fields)
@@ -102,6 +104,9 @@ def _record(tmp_path, jpeg_quality=95):
     sink.write_action(_action(1 * US + 30, reply=1 * US, sender="policy", active=False, a=3.0))
     sink.write_action(_action(2 * US, reply=None, a=4.0))
     sink.write_keypoint(Keypoint(type="recording", payload={"task_description": "stack"}, timestamp_us=1 * US, sender="teleop"))
+    sink.write_telemetry(
+        Telemetry(values={}, raw_values={"power/battery_v": 24.5}, timestamp_us=1 * US, sender="robot")
+    )
     sink.write_metrics(Operator(OperatorConfig("x")).metrics())
     sink.close()
     return sink.path, _read(sink.path)
@@ -119,6 +124,7 @@ def test_schema_records_field_order_and_clock(tmp_path):
     assert [f["name"] for f in schema["state"]] == ["shoulder", "elbow"]
     assert [f["dtype"] for f in schema["state"]] == ["f32", "f64"]
     assert schema["video"] == [{"name": "cam", "codec": "raw"}]
+    assert schema["telemetry"] == [{"name": "power/battery_v", "dtype": "f32"}]
     assert schema["time_sync_source"] == "system"
     assert schema["recorder"] == "recorder"
 
@@ -189,3 +195,9 @@ def test_recording_module_imports_without_rerun():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     assert "livekit-portal[rerun]" in out
+
+
+def test_telemetry_nests_under_its_sender(tmp_path):
+    _, rows = _record(tmp_path)
+    (row,) = rows["/telemetry/robot/power/battery_v"]
+    assert (_us(row, "robot_time"), row["Scalars:scalars"]) == (1 * US, [24.5])

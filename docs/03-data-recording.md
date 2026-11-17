@@ -132,6 +132,7 @@ Two timelines, both on the robot's clock:
 | `observation/<track>` | frame timestamp (JPEG, or raw) | — |
 | `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
 | `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | — |
+| `telemetry/<sender>/<field>` | telemetry timestamp; a `/` in the field name nests further | — |
 | `recorder/frames_dropped/<track>` | timestamp of a frame the recorder dropped | — |
 | `metrics/*` | observer's `now_us()` | — |
 | `portal/schema` | static: field order and dtypes, tracks, time sync source | — |
@@ -166,6 +167,7 @@ class MySink:
     def write_frame_dropped(self, track, timestamp_us) -> None: ...   # optional
     def write_action(self, action) -> None: ...
     def write_keypoint(self, keypoint) -> None: ...
+    def write_telemetry(self, telemetry) -> None: ...   # optional
     def write_metrics(self, metrics) -> None: ...
     def close(self) -> None: ...
 ```
@@ -174,12 +176,13 @@ class MySink:
 
 | Call | Argument | Fields |
 |---|---|---|
-| `open` | `SessionInfo` | `session` (normally the room name), `local_identity`, `state_schema`, `action_schema`, `video_tracks`, `time_sync_source`, `started_at_us`, `now_us` |
+| `open` | `SessionInfo` | `session` (normally the room name), `local_identity`, `state_schema`, `action_schema`, `telemetry_schema`, `video_tracks`, `time_sync_source`, `started_at_us`, `now_us` |
 | `write_state` | `State` | `values` (typed per schema), `raw_values` (all `f64`), `timestamp_us` |
 | `write_frame` | `str`, `VideoFrameData` | `width`, `height`, `data` (RGB24 `bytes`, `height * width * 3`), `timestamp_us` |
 | `write_frame_dropped` | `str`, `int` | track and timestamp of a frame the recorder dropped |
 | `write_action` | `Action` | `values`, `raw_values`, `timestamp_us`, `sender`, `active`, `in_reply_to_ts_us` |
 | `write_keypoint` | `Keypoint` | `type`, `payload` (a `dict`), `timestamp_us`, `sender` |
+| `write_telemetry` | `Telemetry` | `values`, `raw_values`, `timestamp_us`, `sender`. Only called on sinks that define it |
 | `write_metrics` | `PortalMetrics` | a [`metrics()`](09-metrics.md) snapshot, without the `observer` recording counters |
 
 Every timestamp is in microseconds on the robot's clock, unless

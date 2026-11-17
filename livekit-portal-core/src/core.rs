@@ -31,7 +31,10 @@ use crate::clock::{ClockOptions, ClockPacket, ClockSync, EstimatorEvent, Exchang
 use crate::codec::Codec;
 use crate::config::{FieldSpec, PortalConfig};
 use crate::control::{ControlMessage, decode_presence, encode_presence};
-use crate::data::{ActionOrigin, ActionRecord, DataPublisher, SendMap, build_action, build_state};
+use crate::data::{
+    ActionOrigin, ActionRecord, DataPublisher, SendMap, TelemetryRecord, build_action, build_state,
+    build_telemetry,
+};
 use crate::error::{PortalError, PortalResult};
 use crate::frame::FramePayload;
 use crate::frame_video::FrameVideoTracks;
@@ -45,7 +48,7 @@ use crate::serialization::{
 use crate::sync_buffer::{SyncBuffer, SyncOutput};
 use crate::transport::{Delivery, PeerId, Presence, Stream, TransportCaps, VideoCaps};
 use crate::types::{
-    Action, ActionSubscription, Observation, Role, State, TypedValue, VideoFrameData,
+    Action, ActionSubscription, Observation, Role, State, Telemetry, TypedValue, VideoFrameData,
 };
 
 /// RPC method a robot answers so any peer can request a change to the
@@ -188,6 +191,7 @@ pub enum Output<F> {
 pub enum Event<F> {
     Action(Action),
     State(State),
+    Telemetry(Telemetry),
     VideoFrame {
         track: String,
         frame: F,
@@ -217,6 +221,12 @@ pub enum Event<F> {
 }
 
 pub struct SendState<'a> {
+    pub values: &'a HashMap<String, TypedValue>,
+    pub timestamp_us: Option<u64>,
+    pub now_us: u64,
+}
+
+pub struct SendTelemetry<'a> {
     pub values: &'a HashMap<String, TypedValue>,
     pub timestamp_us: Option<u64>,
     pub now_us: u64,
@@ -314,6 +324,7 @@ pub struct PortalCore<F> {
     frame_tracks: FrameVideoTracks,
     action_fp: u32,
     state_fp: u32,
+    telemetry_fp: u32,
     metrics: Arc<MetricsRegistry>,
     clock: ClockSync,
     roster: Roster,
@@ -326,11 +337,13 @@ pub struct PortalCore<F> {
     next_heartbeat_us: Option<u64>,
     state_publisher: Option<DataPublisher>,
     action_publisher: Option<DataPublisher>,
+    telemetry_publisher: Option<DataPublisher>,
     sync_buffer: Option<SyncBuffer<F>>,
     /// Peer fingerprints already reported as mismatched, per stream. Logged
     /// once per unique offender to surface schema drift without spamming.
     action_mismatch_warned: HashSet<u32>,
     state_mismatch_warned: HashSet<u32>,
+    telemetry_mismatch_warned: HashSet<u32>,
     /// Keypoint senders already warned about for a malformed packet.
     keypoint_warned: HashSet<String>,
     /// Newest timestamp taken per sender on the lossy state and action
@@ -338,6 +351,7 @@ pub struct PortalCore<F> {
     /// go backwards while it stays connected; leaving clears its entry.
     newest_state_us: Option<u64>,
     newest_action_us: HashMap<PeerId, u64>,
+    newest_telemetry_us: HashMap<PeerId, u64>,
     pending: HashMap<OpId, PendingOp>,
     next_op: u64,
     /// Polyfilled RPCs handed to the application, by the id it answers.
@@ -370,6 +384,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         Self {
             action_fp: action_fingerprint(config.action_schema()),
             state_fp: schema_fingerprint(config.state_schema()),
+            telemetry_fp: schema_fingerprint(config.telemetry_schema()),
             metrics: Arc::new(MetricsRegistry::new(&track_names)),
             frame_tracks: FrameVideoTracks::new(&config),
             track_names,
@@ -381,12 +396,15 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             next_heartbeat_us: None,
             state_publisher: None,
             action_publisher: None,
+            telemetry_publisher: None,
             sync_buffer: None,
             action_mismatch_warned: HashSet::new(),
             state_mismatch_warned: HashSet::new(),
+            telemetry_mismatch_warned: HashSet::new(),
             keypoint_warned: HashSet::new(),
             newest_state_us: None,
             newest_action_us: HashMap::new(),
+            newest_telemetry_us: HashMap::new(),
             pending: HashMap::new(),
             next_op: 0,
             inbound: HashMap::new(),
@@ -460,6 +478,14 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                 }
             }
         }
+        let schema = self.config.telemetry_schema();
+        if !schema.is_empty() {
+            log::info!(
+                "[{session}] ready to publish telemetry via unreliable data ({} fields)",
+                schema.len()
+            );
+            self.telemetry_publisher = Some(DataPublisher::new(schema, DataStream::Telemetry));
+        }
         self.clock.start_pinging(now_us);
         if !self.caps.native_presence {
             self.announce_presence();
@@ -477,6 +503,8 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.next_heartbeat_us = None;
         self.state_publisher = None;
         self.action_publisher = None;
+        self.telemetry_publisher = None;
+        self.newest_telemetry_us.clear();
         if let Some(mut sb) = self.sync_buffer.take() {
             sb.clear();
         }
@@ -564,6 +592,27 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             stream: Stream::State,
             payload: encoded.payload,
             delivery,
+            to: None,
+        }])
+    }
+
+    /// Publish a telemetry sample (any role). Lossy, and never bundled into
+    /// observations. `timestamp_us` defaults to `now_us()`. Unsent fields
+    /// carry forward like state.
+    pub fn send_telemetry(&mut self, input: SendTelemetry<'_>) -> PortalResult<Vec<Output<F>>> {
+        let SendTelemetry { values, timestamp_us, now_us } = input;
+        if self.config.telemetry_schema().is_empty() {
+            return Err(PortalError::NoTelemetrySchema);
+        }
+        let publisher = self.telemetry_publisher.as_mut().ok_or(PortalError::NotConnected)?;
+        let timestamp_us = timestamp_us.unwrap_or_else(|| self.clock.now(now_us));
+        let encoded =
+            publisher.send_map(SendMap { values, timestamp_us, in_reply_to_ts_us: None })?;
+        self.metrics.bump_sent(DataStream::Telemetry);
+        Ok(vec![Output::Publish {
+            stream: Stream::Telemetry,
+            payload: encoded.payload,
+            delivery: Delivery::LatestOnly,
             to: None,
         }])
     }
@@ -731,6 +780,10 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.config.action_schema()
     }
 
+    pub fn telemetry_schema(&self) -> &[FieldSpec] {
+        self.config.telemetry_schema()
+    }
+
     /// This peer's identity while connected.
     pub fn local_identity(&self) -> Option<&str> {
         self.local_peer.as_deref()
@@ -853,6 +906,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.peers.remove(peer);
         self.last_heard_us.remove(peer);
         self.newest_action_us.remove(peer);
+        self.newest_telemetry_us.remove(peer);
         for event in self.roster.remove(peer) {
             self.roster_event(event);
         }
@@ -868,6 +922,8 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                 // clock, so the estimate starts over.
                 self.clock.restart();
                 self.newest_state_us = None;
+                // Every peer's stamps are on the robot's clock, which starts over.
+                self.newest_telemetry_us.clear();
                 return;
             }
         };
@@ -924,6 +980,12 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                     return;
                 };
                 self.on_action(payload, origin);
+            }
+            Stream::Telemetry => {
+                let Some(from) = from.filter(|s| self.roster.is_known_peer(s)) else {
+                    return;
+                };
+                self.on_telemetry(payload, from.to_string());
             }
             Stream::State if self.config.role() != Role::Robot => self.on_state(payload),
             Stream::State => {}
@@ -1040,6 +1102,40 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             }
             Err(DecodeError::Malformed(e)) => {
                 log::warn!("[bad-payload] state deserialize failed: {e}");
+            }
+        }
+    }
+
+    fn on_telemetry(&mut self, payload: &[u8], sender: PeerId) {
+        let schema = self.config.telemetry_schema();
+        if schema.is_empty() {
+            return;
+        }
+        match deserialize_values(payload, self.telemetry_fp, schema) {
+            Ok((timestamp_us, values)) => {
+                let newest = self.newest_telemetry_us.get_mut(sender.as_str());
+                if overtaken(newest.as_deref().copied(), timestamp_us) {
+                    return;
+                }
+                match newest {
+                    Some(newest) => *newest = timestamp_us,
+                    None => {
+                        self.newest_telemetry_us.insert(sender.clone(), timestamp_us);
+                    }
+                }
+                self.metrics.record_received(DataStream::Telemetry, timestamp_us, self.now_us);
+                self.out.push(Output::Emit(Event::Telemetry(build_telemetry(TelemetryRecord {
+                    timestamp_us,
+                    schema,
+                    values: &values,
+                    sender,
+                }))));
+            }
+            Err(DecodeError::SchemaMismatch { expected, got }) => {
+                warn_mismatch(&mut self.telemetry_mismatch_warned, Stream::Telemetry, expected, got)
+            }
+            Err(DecodeError::Malformed(e)) => {
+                log::warn!("[bad-payload] telemetry from '{sender}' deserialize failed: {e}");
             }
         }
     }
@@ -1551,6 +1647,108 @@ mod tests {
         assert!(state_at(&mut op, 5_000));
         op.handle(Step { input: Input::PeerLeft { peer: "robot" }, now_us: 2 });
         assert!(state_at(&mut op, 10), "a new robot's clock may start behind the old one");
+    }
+
+    fn telemetry_core(role: Role, local_peer: &str) -> PortalCore<VideoFrameData> {
+        use crate::dtype::DType;
+        let mut config = PortalConfig::new("s", role);
+        config.add_state_typed([("j", DType::F64)]);
+        config.add_telemetry_typed([("power/battery_v", DType::F32), ("ok", DType::Bool)]);
+        let mut core = PortalCore::new(CoreInit { config, caps: caps(true) });
+        let peers = [("robot", Role::Robot), ("alice", Role::Operator), ("bob", Role::Operator)]
+            .into_iter()
+            .filter(|(p, _)| *p != local_peer)
+            .map(|(p, r)| (p.to_string(), Presence::local(r)))
+            .collect();
+        core.connect(Connect {
+            local_peer: local_peer.into(),
+            active_operator: None,
+            peers,
+            now_us: 0,
+        })
+        .expect("connect");
+        core
+    }
+
+    fn telemetry_payload(sender: &mut PortalCore<VideoFrameData>, ts: u64, volts: f32) -> Vec<u8> {
+        let values = HashMap::from([("power/battery_v".to_string(), TypedValue::F32(volts))]);
+        let send = SendTelemetry { values: &values, timestamp_us: Some(ts), now_us: 0 };
+        published(sender.send_telemetry(send).expect("telemetry"))
+    }
+
+    fn telemetry_events(
+        core: &mut PortalCore<VideoFrameData>,
+        from: &str,
+        payload: &[u8],
+    ) -> Vec<Output<VideoFrameData>> {
+        let input = Input::Data { stream: Stream::Telemetry, from: Some(from), payload };
+        core.handle(Step { input, now_us: 1 })
+    }
+
+    #[test]
+    fn telemetry_carries_its_sender_and_skips_observations() {
+        let mut robot = telemetry_core(Role::Robot, "robot");
+        let mut op = telemetry_core(Role::Operator, "alice");
+        let payload = telemetry_payload(&mut robot, 10, 24.5);
+        let out = telemetry_events(&mut op, "robot", &payload);
+        let [Output::Emit(Event::Telemetry(t))] = out.as_slice() else {
+            panic!("expected one telemetry event, got {out:?}");
+        };
+        assert_eq!(t.sender, "robot");
+        assert_eq!(t.timestamp_us, 10);
+        assert_eq!(t.values["power/battery_v"], TypedValue::F32(24.5));
+        assert_eq!(t.values["ok"], TypedValue::Bool(false), "unsent fields start at zero");
+        let metrics = op.metrics();
+        assert_eq!(metrics.buffers.state_fill, 0);
+        assert_eq!(metrics.transport.telemetry_received, 1);
+        assert_eq!(robot.metrics().transport.telemetry_sent, 1);
+    }
+
+    #[test]
+    fn any_role_publishes_telemetry() {
+        let mut robot = telemetry_core(Role::Robot, "robot");
+        let mut op = telemetry_core(Role::Operator, "alice");
+        let payload = telemetry_payload(&mut op, 10, 1.0);
+        let out = telemetry_events(&mut robot, "alice", &payload);
+        assert!(
+            matches!(out.as_slice(), [Output::Emit(Event::Telemetry(t))] if t.sender == "alice")
+        );
+    }
+
+    #[test]
+    fn telemetry_is_ordered_per_sender() {
+        let mut alice = telemetry_core(Role::Operator, "alice");
+        let mut bob = telemetry_core(Role::Operator, "bob");
+        let mut robot = telemetry_core(Role::Robot, "robot");
+        let packets = [("alice", 100), ("bob", 50), ("alice", 90), ("bob", 60)];
+        let mut got = Vec::new();
+        for (from, ts) in packets {
+            let sender = if from == "alice" { &mut alice } else { &mut bob };
+            let payload = telemetry_payload(sender, ts, 0.0);
+            for o in telemetry_events(&mut robot, from, &payload) {
+                if let Output::Emit(Event::Telemetry(t)) = o {
+                    got.push((t.sender, t.timestamp_us));
+                }
+            }
+        }
+        let want = [("alice", 100), ("bob", 50), ("bob", 60)].map(|(p, ts)| (p.to_string(), ts));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn telemetry_from_an_unknown_peer_is_ignored() {
+        let mut robot = telemetry_core(Role::Robot, "robot");
+        let mut op = telemetry_core(Role::Operator, "alice");
+        let payload = telemetry_payload(&mut robot, 10, 1.0);
+        assert!(telemetry_events(&mut op, "stranger", &payload).is_empty());
+    }
+
+    #[test]
+    fn sending_telemetry_needs_a_schema() {
+        let mut robot = connected_robot(true);
+        let values = HashMap::new();
+        let send = SendTelemetry { values: &values, timestamp_us: None, now_us: 0 };
+        assert!(matches!(robot.send_telemetry(send), Err(PortalError::NoTelemetrySchema)));
     }
 
     #[test]

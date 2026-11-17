@@ -125,6 +125,20 @@ def _to_field_specs(schema: Iterable[SchemaEntry]) -> List[FieldSpec]:
     return out
 
 
+RESERVED_TELEMETRY_PREFIX = "portal/"
+
+
+def _to_telemetry_specs(schema: Iterable[SchemaEntry]) -> List[FieldSpec]:
+    specs = _to_field_specs(schema)
+    for f in specs:
+        if f.name.startswith(RESERVED_TELEMETRY_PREFIX):
+            raise ValueError(
+                f"telemetry field {f.name!r} uses the reserved "
+                f"{RESERVED_TELEMETRY_PREFIX!r} namespace"
+            )
+    return specs
+
+
 _INT_DTYPES = frozenset(
     {DType.I32, DType.I16, DType.I8, DType.U32, DType.U16, DType.U8}
 )
@@ -290,6 +304,21 @@ class State:
 
 
 @dataclass(frozen=True, slots=True)
+class Telemetry:
+    """A telemetry sample from any peer: side-channel data such as battery,
+    temperatures or CPU load. Never part of an `Observation`.
+
+    Semantics for `values` / `raw_values` match `State`. `sender` is the
+    identity of the peer that published it.
+    """
+
+    values: Dict[str, TypedScalar]
+    raw_values: Dict[str, float]
+    timestamp_us: int
+    sender: str
+
+
+@dataclass(frozen=True, slots=True)
 class Observation:
     """A synchronized observation: matched video frames + state sample.
 
@@ -342,6 +371,17 @@ def _wrap_state(
     )
 
 
+def _wrap_telemetry(
+    telemetry: _ffi.Telemetry, schema: List[FieldSpec]
+) -> Telemetry:
+    return Telemetry(
+        values=_cast_values(telemetry.values, schema),
+        raw_values=telemetry.values,
+        timestamp_us=telemetry.timestamp_us,
+        sender=telemetry.sender,
+    )
+
+
 def _wrap_observation(
     obs: _ffi.Observation, state_schema: List[FieldSpec]
 ) -> Observation:
@@ -369,6 +409,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self,
         action_schema: List[FieldSpec],
         state_schema: List[FieldSpec],
+        telemetry_schema: List[FieldSpec],
     ) -> None:
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -385,6 +426,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
         self._time_synced_cb: Optional[Callable[[], Any]] = None
         self._keypoint_cb: Optional[Callable[[Keypoint], Any]] = None
+        self._telemetry_cb: Optional[Callable[[Telemetry], Any]] = None
         # Recording tap: sees every raw record on the delivering thread,
         # ahead of (and independent of) the user callbacks.
         self._tap: Optional[Callable[[str, Any], None]] = None
@@ -392,6 +434,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         # helpers below on every delivery.
         self._action_schema = action_schema
         self._state_schema = state_schema
+        self._telemetry_schema = telemetry_schema
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         with self._lock:
@@ -474,6 +517,14 @@ class _Dispatcher(_ffi.PortalCallbacks):
         if cb is not None:
             self._schedule(cb, _wrap_keypoint(keypoint))
 
+    def on_telemetry(self, telemetry: _ffi.Telemetry) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("telemetry", telemetry)
+        cb = self._telemetry_cb
+        if cb is not None:
+            self._schedule(cb, _wrap_telemetry(telemetry, self._telemetry_schema))
+
     # --- Registration (from Python user thread) -----------------------------
 
     def set_action(self, cb: Callable[[Action], Any]) -> None:
@@ -508,6 +559,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
 
     def set_keypoint(self, cb: Callable[[Keypoint], Any]) -> None:
         self._keypoint_cb = cb
+
+    def set_telemetry(self, cb: Callable[[Telemetry], Any]) -> None:
+        self._telemetry_cb = cb
 
 
 _uniffi_bound_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -606,6 +660,7 @@ class PortalConfig:
         "_video_track_specs",
         "_state_schema",
         "_action_schema",
+        "_telemetry_schema",
     )
 
     def __init__(self, session: str, role: Role) -> None:
@@ -615,6 +670,7 @@ class PortalConfig:
         self._video_track_specs: List[VideoTrackSpec] = []
         self._state_schema: List[FieldSpec] = []
         self._action_schema: List[FieldSpec] = []
+        self._telemetry_schema: List[FieldSpec] = []
 
     @classmethod
     def from_yaml_str(
@@ -670,6 +726,7 @@ class PortalConfig:
         instance._video_track_specs = list(inner.video_track_specs())
         instance._state_schema = list(inner.state_schema())
         instance._action_schema = list(inner.action_schema())
+        instance._telemetry_schema = list(inner.telemetry_schema())
         return instance
 
     @property
@@ -725,6 +782,14 @@ class PortalConfig:
     @property
     def action_schema(self) -> List[FieldSpec]:
         return list(self._action_schema)
+
+    @property
+    def telemetry_fields(self) -> List[str]:
+        return [f.name for f in self._telemetry_schema]
+
+    @property
+    def telemetry_schema(self) -> List[FieldSpec]:
+        return list(self._telemetry_schema)
 
     # Sync / transport knobs are not mirrored Python-side — read them back
     # from the FFI config, which owns the authoritative value.
@@ -898,6 +963,19 @@ class PortalConfig:
         specs = _to_field_specs(schema)
         self._inner.add_action_typed(specs)
         self._action_schema.extend(specs)
+
+    def add_telemetry_typed(self, schema: Iterable[SchemaEntry]) -> None:
+        """Declare telemetry fields with per-field dtype.
+
+        Telemetry is side-channel data any peer may publish with
+        `send_telemetry`: lossy, and never bundled into observations.
+        Names may be namespaced with `/` (`"power/battery_v"`); the
+        `portal/` namespace is reserved and raises `ValueError`. Order is
+        significant and must match on every peer.
+        """
+        specs = _to_telemetry_specs(schema)
+        self._inner.add_telemetry_typed(specs)
+        self._telemetry_schema.extend(specs)
 
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
@@ -1073,6 +1151,7 @@ class Portal:
         "_action_fields",
         "_state_schema",
         "_action_schema",
+        "_telemetry_schema",
         "_video_tracks",
     )
 
@@ -1085,6 +1164,7 @@ class Portal:
             lambda dispatcher: _ffi.Portal(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
+            config.telemetry_schema,
         )
 
     @classmethod
@@ -1093,6 +1173,7 @@ class Portal:
         inner_factory: Callable[["_Dispatcher"], Any],
         state_schema: List[FieldSpec],
         action_schema: List[FieldSpec],
+        telemetry_schema: List[FieldSpec],
     ) -> "Portal":
         """Build a Portal over a prebuilt FFI object. `inner_factory`
         receives the dispatcher and must return the FFI object constructed
@@ -1101,7 +1182,7 @@ class Portal:
         while this ergonomic layer stays shared.
         """
         self = cls.__new__(cls)
-        self._init(inner_factory, state_schema, action_schema)
+        self._init(inner_factory, state_schema, action_schema, telemetry_schema)
         return self
 
     def _init(
@@ -1109,13 +1190,17 @@ class Portal:
         inner_factory: Callable[["_Dispatcher"], Any],
         state_schema: List[FieldSpec],
         action_schema: List[FieldSpec],
+        telemetry_schema: List[FieldSpec],
     ) -> None:
         # Schema snapshots let delivery records reconstruct Python types
         # per declared dtype — the FFI boundary delivers everything as
         # `Dict[str, float]` (the core pipeline is f64 throughout).
         self._state_schema: List[FieldSpec] = list(state_schema)
         self._action_schema: List[FieldSpec] = list(action_schema)
-        self._dispatcher = _Dispatcher(self._action_schema, self._state_schema)
+        self._telemetry_schema: List[FieldSpec] = list(telemetry_schema)
+        self._dispatcher = _Dispatcher(
+            self._action_schema, self._state_schema, self._telemetry_schema
+        )
         self._inner = inner_factory(self._dispatcher)
         # Snapshot what the Rust side confirmed it was built with.
         self._state_fields: List[str] = list(self._inner.state_fields())
@@ -1181,6 +1266,20 @@ class Portal:
         _validate_send_values(values, self._action_schema)
         self._inner.send_action(values, timestamp_us, in_reply_to_ts_us)
 
+    def send_telemetry(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        """Publish a telemetry sample (any role). Call it at whatever rate
+        suits you; Portal never sends telemetry on its own. Fields left out
+        carry forward their last sent value. Same validation rules as
+        `send_state`. Raises `PortalError.NoTelemetrySchema` when no
+        telemetry fields were declared.
+        """
+        _validate_send_values(values, self._telemetry_schema)
+        self._inner.send_telemetry(values, timestamp_us)
+
     # -- pull (sync, latest-wins) --------------------------------------------
 
     def get_observation(self) -> Optional[Observation]:
@@ -1194,6 +1293,11 @@ class Portal:
     def get_state(self) -> Optional[State]:
         raw = self._inner.get_state()
         return None if raw is None else _wrap_state(raw, self._state_schema)
+
+    def get_telemetry(self, sender: str) -> Optional[Telemetry]:
+        """Latest telemetry received from `sender`, or `None`."""
+        raw = self._inner.get_telemetry(sender)
+        return None if raw is None else _wrap_telemetry(raw, self._telemetry_schema)
 
     def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
         return self._inner.get_video_frame(track_name)
@@ -1344,6 +1448,11 @@ class Portal:
         """Fire on every keypoint in the room, this peer's own included."""
         self._dispatcher.set_keypoint(callback)
 
+    def on_telemetry(self, callback: Callable[[Telemetry], Any]) -> None:
+        """Fire on every telemetry sample from another peer. Check
+        `telemetry.sender` to tell peers apart."""
+        self._dispatcher.set_telemetry(callback)
+
     def register_rpc_method(
         self,
         method: str,
@@ -1478,6 +1587,10 @@ class _RoleConfigBase:
         return list(self._inner.action_schema())
 
     @property
+    def telemetry_schema(self) -> List[FieldSpec]:
+        return list(self._inner.telemetry_schema())
+
+    @property
     def fps(self) -> int:
         """Unified observation rate in Hz. Defaults to 30."""
         return self._inner.fps()
@@ -1563,6 +1676,10 @@ class _RoleConfigBase:
 
     def add_action_typed(self, schema: Iterable[SchemaEntry]) -> None:
         self._inner.add_action_typed(_to_field_specs(schema))
+
+    def add_telemetry_typed(self, schema: Iterable[SchemaEntry]) -> None:
+        """Declare telemetry fields. See `PortalConfig.add_telemetry_typed`."""
+        self._inner.add_telemetry_typed(_to_telemetry_specs(schema))
 
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
@@ -1774,6 +1891,7 @@ class Robot:
             lambda dispatcher: _ffi.Robot(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
+            config.telemetry_schema,
         )
 
     # -- lifecycle -----------------------------------------------------------
@@ -1868,6 +1986,24 @@ class Robot:
         """Fire on every keypoint in the room, this peer's own included."""
         self._portal.on_keypoint(callback)
 
+    # -- telemetry -----------------------------------------------------------
+
+    def send_telemetry(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        """Publish a telemetry sample. See `Portal.send_telemetry`."""
+        self._portal.send_telemetry(values, timestamp_us)
+
+    def on_telemetry(self, callback: Callable[[Telemetry], Any]) -> None:
+        """Fire on every telemetry sample from another peer."""
+        self._portal.on_telemetry(callback)
+
+    def get_telemetry(self, sender: str) -> Optional[Telemetry]:
+        """Latest telemetry received from `sender`, or `None`."""
+        return self._portal.get_telemetry(sender)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -1918,6 +2054,7 @@ class Operator:
             lambda dispatcher: _ffi.Operator(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
+            config.telemetry_schema,
         )
 
     # -- lifecycle -----------------------------------------------------------
@@ -2048,6 +2185,24 @@ class Operator:
         """Fire on every keypoint in the room, this peer's own included."""
         self._portal.on_keypoint(callback)
 
+    # -- telemetry -----------------------------------------------------------
+
+    def send_telemetry(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        """Publish a telemetry sample. See `Portal.send_telemetry`."""
+        self._portal.send_telemetry(values, timestamp_us)
+
+    def on_telemetry(self, callback: Callable[[Telemetry], Any]) -> None:
+        """Fire on every telemetry sample from another peer."""
+        self._portal.on_telemetry(callback)
+
+    def get_telemetry(self, sender: str) -> Optional[Telemetry]:
+        """Latest telemetry received from `sender`, or `None`."""
+        return self._portal.get_telemetry(sender)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -2099,6 +2254,7 @@ class Observer:
             lambda dispatcher: _ffi.Observer(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
+            config.telemetry_schema,
         )
         self._config = config
         self._recorder: Optional[Recorder] = None
@@ -2130,8 +2286,9 @@ class Observer:
         metrics_interval_s: Optional[float] = 1.0,
     ) -> None:
         """Write everything this observer hears to `sink`: state, video
-        frames, actions (per the action subscription) and keypoints, in the
-        order they arrive, plus `metrics()` every `metrics_interval_s`
+        frames, actions (per the action subscription), keypoints and
+        telemetry (to sinks that define `write_telemetry`), in the order
+        they arrive, plus `metrics()` every `metrics_interval_s`
         seconds (`None` turns that off).
 
         Calls `sink.open` right away and raises what it raises. The sink is
@@ -2149,6 +2306,7 @@ class Observer:
             _Converters(
                 state=lambda raw: _wrap_state(raw, portal._state_schema),
                 action=lambda raw: _wrap_action(raw, portal._action_schema),
+                telemetry=lambda raw: _wrap_telemetry(raw, portal._telemetry_schema),
                 keypoint=_wrap_keypoint,
                 metrics=portal.metrics,
             ),
@@ -2161,6 +2319,7 @@ class Observer:
                 local_identity=portal.local_identity(),
                 state_schema=list(self._config.state_schema),
                 action_schema=list(self._config.action_schema),
+                telemetry_schema=list(self._config.telemetry_schema),
                 video_tracks=list(self._config.video_track_specs),
                 time_sync_source=self._config.time_sync_source,
                 started_at_us=portal.now_us(),
@@ -2299,6 +2458,24 @@ class Observer:
         """Fire on every keypoint in the room, this peer's own included."""
         self._portal.on_keypoint(callback)
 
+    # -- telemetry -----------------------------------------------------------
+
+    def send_telemetry(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        """Publish a telemetry sample. See `Portal.send_telemetry`."""
+        self._portal.send_telemetry(values, timestamp_us)
+
+    def on_telemetry(self, callback: Callable[[Telemetry], Any]) -> None:
+        """Fire on every telemetry sample from another peer."""
+        self._portal.on_telemetry(callback)
+
+    def get_telemetry(self, sender: str) -> Optional[Telemetry]:
+        """Latest telemetry received from `sender`, or `None`."""
+        return self._portal.get_telemetry(sender)
+
     # -- rpc -----------------------------------------------------------------
 
     def register_rpc_method(
@@ -2346,6 +2523,7 @@ __all__ = [
     "FrameVideoSpec",
     "TypedScalar",
     "DEFAULT_MJPEG_QUALITY",
+    "RESERVED_TELEMETRY_PREFIX",
     "PortalConfig",
     "Portal",
     "RobotConfig",
@@ -2357,6 +2535,7 @@ __all__ = [
     "Observation",
     "Action",
     "State",
+    "Telemetry",
     "Keypoint",
     "VideoFrameData",
     "PortalMetrics",

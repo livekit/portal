@@ -474,6 +474,25 @@ pub struct State {
     pub timestamp_us: u64,
 }
 
+/// A telemetry sample from any peer. Never part of an `Observation`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Telemetry {
+    pub values: HashMap<String, f64>,
+    pub timestamp_us: u64,
+    /// Identity of the peer that sent it.
+    pub sender: String,
+}
+
+impl From<&core::Telemetry> for Telemetry {
+    fn from(t: &core::Telemetry) -> Self {
+        Self {
+            values: t.raw_values.clone(),
+            timestamp_us: t.timestamp_us,
+            sender: t.sender.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct SyncMetrics {
     pub observations_emitted: u64,
@@ -508,6 +527,8 @@ pub struct TransportMetrics {
     pub actions_sent: u64,
     pub actions_received: u64,
     pub actions_dropped_stale: u64,
+    pub telemetry_sent: u64,
+    pub telemetry_received: u64,
     pub frame_jitter_us: HashMap<String, u64>,
     pub state_jitter_us: u64,
     pub action_jitter_us: u64,
@@ -609,6 +630,9 @@ pub enum PortalError {
     #[error("invalid keypoint: {0}")]
     InvalidKeypoint(String),
 
+    #[error("no telemetry fields declared; declare them with add_telemetry_typed")]
+    NoTelemetrySchema,
+
     #[error("field '{field}' declared as {expected:?} but sent as {got}")]
     DtypeMismatch { field: String, expected: DType, got: String },
 
@@ -635,6 +659,7 @@ impl From<core::PortalError> for PortalError {
             core::PortalError::Codec(s) => PortalError::Codec(s),
             core::PortalError::WrongRole(r) => PortalError::WrongRole(r.into()),
             core::PortalError::ObservationSyncDisabled => PortalError::ObservationSyncDisabled,
+            core::PortalError::NoTelemetrySchema => PortalError::NoTelemetrySchema,
             core::PortalError::DtypeMismatch { field, expected, got } => {
                 PortalError::DtypeMismatch {
                     field,
@@ -771,6 +796,8 @@ pub trait PortalCallbacks: Send + Sync {
     fn on_time_synced(&self);
     /// Every keypoint in the room, this peer's own included.
     fn on_keypoint(&self, keypoint: Keypoint);
+    /// Telemetry from any other peer.
+    fn on_telemetry(&self, telemetry: Telemetry);
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +890,20 @@ impl PortalConfig {
 
     pub fn add_action_typed(&self, schema: Vec<FieldSpec>) {
         self.inner.lock().add_action_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
+    }
+
+    /// Declare telemetry fields. Names may be namespaced with `/`; a name
+    /// in the reserved `portal/` namespace is rejected and nothing is added.
+    pub fn add_telemetry_typed(&self, schema: Vec<FieldSpec>) -> Result<(), ConfigFileError> {
+        if let Some(f) = schema.iter().find(|f| core::config::is_reserved_telemetry_name(&f.name)) {
+            return Err(ConfigFileError::Invalid(format!(
+                "telemetry '{}': the '{}' namespace is reserved",
+                f.name,
+                core::RESERVED_TELEMETRY_PREFIX
+            )));
+        }
+        self.inner.lock().add_telemetry_typed(schema.into_iter().map(|f| (f.name, f.dtype.into())));
+        Ok(())
     }
 
     pub fn set_fps(&self, fps: u32) {
@@ -988,6 +1029,16 @@ impl PortalConfig {
             .collect()
     }
 
+    /// Declared telemetry schema, in declaration order.
+    pub fn telemetry_schema(&self) -> Vec<FieldSpec> {
+        self.inner
+            .lock()
+            .telemetry_schema()
+            .iter()
+            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
+            .collect()
+    }
+
     /// Session name this config was built for.
     pub fn session(&self) -> String {
         self.inner.lock().session().to_string()
@@ -1058,6 +1109,7 @@ pub struct Portal {
     _callbacks: Arc<dyn PortalCallbacks>,
     state_fields: Vec<String>,
     action_fields: Vec<String>,
+    telemetry_fields: Vec<String>,
     video_tracks: Vec<String>,
     video_track_specs: Vec<VideoTrackSpec>,
 }
@@ -1072,6 +1124,7 @@ impl Portal {
         let cfg = config.inner.lock().clone();
         let state_fields: Vec<String> = cfg.state_fields().map(String::from).collect();
         let action_fields: Vec<String> = cfg.action_fields().map(String::from).collect();
+        let telemetry_fields: Vec<String> = cfg.telemetry_fields().map(String::from).collect();
         let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
         let video_track_specs: Vec<VideoTrackSpec> =
             cfg.video_tracks().iter().map(videotrackspec_from_core).collect();
@@ -1144,12 +1197,15 @@ impl Portal {
         inner.on_time_synced(move || cb.on_time_synced());
         let cb = callbacks.clone();
         inner.on_keypoint(move |kp| cb.on_keypoint(kp.into()));
+        let cb = callbacks.clone();
+        inner.on_telemetry(move |t| cb.on_telemetry(t.into()));
 
         Arc::new(Self {
             inner,
             _callbacks: callbacks,
             state_fields,
             action_fields,
+            telemetry_fields,
             video_tracks,
             video_track_specs,
         })
@@ -1200,6 +1256,20 @@ impl Portal {
 
     pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
         Ok(self.inner.get_observation()?.as_ref().map(observation_from_core))
+    }
+
+    pub fn send_telemetry(
+        &self,
+        values: HashMap<String, f64>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        let typed = f64_to_typed(&values, self.inner.telemetry_schema());
+        self.inner.send_telemetry(&typed, timestamp_us).map_err(Into::into)
+    }
+
+    /// Latest telemetry received from `sender`, or `None`.
+    pub fn get_telemetry(&self, sender: String) -> Option<Telemetry> {
+        self.inner.get_telemetry(&sender).as_ref().map(Into::into)
     }
 
     pub fn observation_sync(&self) -> bool {
@@ -1254,6 +1324,10 @@ impl Portal {
 
     pub fn action_fields(&self) -> Vec<String> {
         self.action_fields.clone()
+    }
+
+    pub fn telemetry_fields(&self) -> Vec<String> {
+        self.telemetry_fields.clone()
     }
 
     /// Names of every declared video track, in declaration order, whatever
@@ -1421,6 +1495,10 @@ impl RobotConfig {
         self.inner.add_action_typed(schema);
     }
 
+    pub fn add_telemetry_typed(&self, schema: Vec<FieldSpec>) -> Result<(), ConfigFileError> {
+        self.inner.add_telemetry_typed(schema)
+    }
+
     pub fn set_fps(&self, fps: u32) {
         self.inner.set_fps(fps);
     }
@@ -1515,6 +1593,10 @@ impl RobotConfig {
 
     pub fn action_schema(&self) -> Vec<FieldSpec> {
         self.inner.action_schema()
+    }
+
+    pub fn telemetry_schema(&self) -> Vec<FieldSpec> {
+        self.inner.telemetry_schema()
     }
 
     pub fn session(&self) -> String {
@@ -1625,6 +1707,10 @@ impl OperatorConfig {
         self.inner.add_action_typed(schema);
     }
 
+    pub fn add_telemetry_typed(&self, schema: Vec<FieldSpec>) -> Result<(), ConfigFileError> {
+        self.inner.add_telemetry_typed(schema)
+    }
+
     pub fn set_fps(&self, fps: u32) {
         self.inner.set_fps(fps);
     }
@@ -1727,6 +1813,10 @@ impl OperatorConfig {
 
     pub fn action_schema(&self) -> Vec<FieldSpec> {
         self.inner.action_schema()
+    }
+
+    pub fn telemetry_schema(&self) -> Vec<FieldSpec> {
+        self.inner.telemetry_schema()
     }
 
     pub fn session(&self) -> String {
@@ -1833,6 +1923,22 @@ impl Robot {
 
     pub fn action_fields(&self) -> Vec<String> {
         self.inner.action_fields()
+    }
+
+    pub fn telemetry_fields(&self) -> Vec<String> {
+        self.inner.telemetry_fields()
+    }
+
+    pub fn send_telemetry(
+        &self,
+        values: HashMap<String, f64>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_telemetry(values, timestamp_us)
+    }
+
+    pub fn get_telemetry(&self, sender: String) -> Option<Telemetry> {
+        self.inner.get_telemetry(sender)
     }
 
     pub fn video_tracks(&self) -> Vec<String> {
@@ -1982,6 +2088,22 @@ impl Operator {
         self.inner.action_fields()
     }
 
+    pub fn telemetry_fields(&self) -> Vec<String> {
+        self.inner.telemetry_fields()
+    }
+
+    pub fn send_telemetry(
+        &self,
+        values: HashMap<String, f64>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_telemetry(values, timestamp_us)
+    }
+
+    pub fn get_telemetry(&self, sender: String) -> Option<Telemetry> {
+        self.inner.get_telemetry(sender)
+    }
+
     pub fn video_tracks(&self) -> Vec<String> {
         self.inner.video_tracks()
     }
@@ -2123,6 +2245,10 @@ impl ObserverConfig {
         self.inner.add_action_typed(schema);
     }
 
+    pub fn add_telemetry_typed(&self, schema: Vec<FieldSpec>) -> Result<(), ConfigFileError> {
+        self.inner.add_telemetry_typed(schema)
+    }
+
     pub fn set_fps(&self, fps: u32) {
         self.inner.set_fps(fps);
     }
@@ -2227,6 +2353,10 @@ impl ObserverConfig {
         self.inner.action_schema()
     }
 
+    pub fn telemetry_schema(&self) -> Vec<FieldSpec> {
+        self.inner.telemetry_schema()
+    }
+
     pub fn session(&self) -> String {
         self.inner.session()
     }
@@ -2328,6 +2458,22 @@ impl Observer {
 
     pub fn action_fields(&self) -> Vec<String> {
         self.inner.action_fields()
+    }
+
+    pub fn telemetry_fields(&self) -> Vec<String> {
+        self.inner.telemetry_fields()
+    }
+
+    pub fn send_telemetry(
+        &self,
+        values: HashMap<String, f64>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        self.inner.send_telemetry(values, timestamp_us)
+    }
+
+    pub fn get_telemetry(&self, sender: String) -> Option<Telemetry> {
+        self.inner.get_telemetry(sender)
     }
 
     pub fn video_tracks(&self) -> Vec<String> {
@@ -2492,6 +2638,8 @@ fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
             actions_sent: m.transport.actions_sent,
             actions_received: m.transport.actions_received,
             actions_dropped_stale: m.transport.actions_dropped_stale,
+            telemetry_sent: m.transport.telemetry_sent,
+            telemetry_received: m.transport.telemetry_received,
             frame_jitter_us: m.transport.frame_jitter_us,
             state_jitter_us: m.transport.state_jitter_us,
             action_jitter_us: m.transport.action_jitter_us,

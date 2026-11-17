@@ -38,6 +38,9 @@ pub enum PortalError {
     )]
     AmbiguousPeer,
 
+    #[error("no telemetry fields declared; declare them with add_telemetry_typed")]
+    NoTelemetrySchema,
+
     #[error("unknown video track: {name}")]
     UnknownVideoTrack { name: String },
 

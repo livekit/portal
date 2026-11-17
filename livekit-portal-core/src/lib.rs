@@ -52,13 +52,13 @@ pub use crate::core::{
     PRESENCE_HEARTBEAT_US, PRESENCE_TIMEOUT_US, PerformRpc, PortalCore, RPC_CALLER_ROSTER_WAIT_US,
     RPC_NOT_AUTHORIZED, RPC_NOT_CONNECTED, RPC_PRESENCE_FAILED, RPC_RECIPIENT_DISCONNECTED,
     RPC_RESPONSE_TIMEOUT, RPC_UNSUPPORTED_METHOD, ReplyRpc, RpcId, RpcRequest,
-    SET_ACTIVE_OPERATOR_RPC, SendAction, SendKeypoint, SendState, SendVideoFrame,
+    SET_ACTIVE_OPERATOR_RPC, SendAction, SendKeypoint, SendState, SendTelemetry, SendVideoFrame,
     SetActiveOperator, Step, VideoRoute, VideoTransport,
 };
 pub use codec::Codec;
 pub use config::{
-    DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, Resolution, VideoOptions,
-    VideoTrackSpec,
+    DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, RESERVED_TELEMETRY_PREFIX, Resolution,
+    VideoOptions, VideoTrackSpec,
 };
 pub use config_file::ConfigFileError;
 pub use dtype::DType;
@@ -75,5 +75,5 @@ pub use transport::{
 };
 pub use types::{
     Action, ActionSubscription, FrameSource, Observation, Role, StallBehavior, StallConfig, State,
-    SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,
+    SyncConfig, Telemetry, TimeSyncSource, TypedValue, VideoFrameData,
 };

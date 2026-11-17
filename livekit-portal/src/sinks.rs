@@ -23,7 +23,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use livekit_portal_core::Event;
 use livekit_portal_core::keypoint::Keypoint;
-use livekit_portal_core::types::{Action, Observation, State, TypedValue, VideoFrameData};
+use livekit_portal_core::types::{
+    Action, Observation, State, Telemetry, TypedValue, VideoFrameData,
+};
 use parking_lot::Mutex;
 
 type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
@@ -31,6 +33,7 @@ type IdentityCb = Box<dyn Fn(&str) + Send + Sync>;
 type OptIdentityCb = Box<dyn Fn(Option<&str>) + Send + Sync>;
 type KeypointCb = Box<dyn Fn(&Keypoint) + Send + Sync>;
 type TimeSyncedCb = Box<dyn Fn() + Send + Sync>;
+type TelemetryCb = Box<dyn Fn(&Telemetry) + Send + Sync>;
 pub(crate) type VideoCb = Box<dyn Fn(&str, &VideoFrameData) + Send + Sync>;
 
 /// Push callback + latest-wins slot for one record type.
@@ -77,9 +80,36 @@ impl VideoTrackSlots {
     }
 }
 
+/// Push callback + latest-wins slot per sender, since any peer publishes
+/// telemetry.
+pub(crate) struct TelemetrySlots {
+    pub cb: Mutex<Option<TelemetryCb>>,
+    pub latest: Mutex<HashMap<String, Telemetry>>,
+}
+
+impl TelemetrySlots {
+    fn new() -> Self {
+        Self { cb: Mutex::new(None), latest: Mutex::new(HashMap::new()) }
+    }
+
+    fn deliver(&self, telemetry: Telemetry) {
+        if let Some(cb) = self.cb.lock().as_ref()
+            && catch_unwind(AssertUnwindSafe(|| cb(&telemetry))).is_err()
+        {
+            log::error!("[callback-panic] telemetry callback panicked, receive loop continues");
+        }
+        self.latest.lock().insert(telemetry.sender.clone(), telemetry);
+    }
+
+    pub fn get(&self, sender: &str) -> Option<Telemetry> {
+        self.latest.lock().get(sender).cloned()
+    }
+}
+
 pub(crate) struct Sinks {
     pub action: Slot<Action>,
     pub state: Slot<State>,
+    pub telemetry: TelemetrySlots,
     /// Latest-wins. Consumers that want history register `on_observation`
     /// and buffer on their own side.
     pub observation: Slot<Observation>,
@@ -98,6 +128,7 @@ impl Sinks {
         Self {
             action: Slot::new(),
             state: Slot::new(),
+            telemetry: TelemetrySlots::new(),
             observation: Slot::new(),
             drop_cb: Mutex::new(None),
             video: track_names.map(|n| (n.to_string(), VideoTrackSlots::new())).collect(),
@@ -113,6 +144,7 @@ impl Sinks {
         match event {
             Event::Action(action) => self.action.deliver(action, "action"),
             Event::State(state) => self.state.deliver(state, "state"),
+            Event::Telemetry(telemetry) => self.telemetry.deliver(telemetry),
             Event::Observation(obs) => self.observation.deliver(obs, "observation"),
             Event::VideoFrame { track, frame } => self.video_frame(&track, &frame),
             Event::Drops(drops) => {
@@ -181,6 +213,7 @@ impl Sinks {
         self.observation.clear();
         self.action.clear();
         self.state.clear();
+        self.telemetry.latest.lock().clear();
         for slots in self.video.values() {
             *slots.latest.lock() = None;
         }
@@ -228,6 +261,24 @@ mod tests {
         assert_eq!(sinks.state.get().map(|s| s.timestamp_us), Some(7));
         sinks.clear_latest();
         assert!(sinks.state.get().is_none());
+    }
+
+    #[test]
+    fn latest_telemetry_is_kept_per_sender() {
+        let sinks = Sinks::new(std::iter::empty());
+        let telemetry = |sender: &str, ts| Telemetry {
+            values: HashMap::new(),
+            raw_values: HashMap::new(),
+            timestamp_us: ts,
+            sender: sender.into(),
+        };
+        sinks.dispatch(Event::Telemetry(telemetry("robot", 1)));
+        sinks.dispatch(Event::Telemetry(telemetry("teleop", 2)));
+        sinks.dispatch(Event::Telemetry(telemetry("robot", 3)));
+        assert_eq!(sinks.telemetry.get("robot").map(|t| t.timestamp_us), Some(3));
+        assert_eq!(sinks.telemetry.get("teleop").map(|t| t.timestamp_us), Some(2));
+        sinks.clear_latest();
+        assert!(sinks.telemetry.get("robot").is_none());
     }
 
     #[test]

@@ -33,7 +33,10 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::codec::Codec;
-use crate::config::{DEFAULT_MJPEG_QUALITY, PortalConfig, Resolution, VideoOptions};
+use crate::config::{
+    DEFAULT_MJPEG_QUALITY, PortalConfig, RESERVED_TELEMETRY_PREFIX, Resolution, VideoOptions,
+    is_reserved_telemetry_name,
+};
 use crate::dtype::DType;
 use crate::types::{ActionSubscription, Role, StallBehavior, TimeSyncSource};
 
@@ -152,6 +155,10 @@ struct ConfigFileV1 {
     state: Vec<FieldEntry>,
     #[serde(default)]
     action: Vec<FieldEntry>,
+    /// Side-channel fields any peer may publish. Never bundled into
+    /// observations. Names may be namespaced with `/`; `portal/` is reserved.
+    #[serde(default)]
+    telemetry: Vec<FieldEntry>,
     /// Removed in v0.3. Accepted by the parser only so its presence
     /// surfaces as `ActionChunksRemoved` rather than a generic unknown-key
     /// parse error.
@@ -304,6 +311,9 @@ impl PortalConfig {
         if !parsed.action.is_empty() {
             cfg.add_action_typed(parsed.action.iter().map(|f| (f.name.clone(), f.dtype)));
         }
+        if !parsed.telemetry.is_empty() {
+            cfg.add_telemetry_typed(parsed.telemetry.iter().map(|f| (f.name.clone(), f.dtype)));
+        }
 
         if let Some(v) = parsed.fps {
             cfg.set_fps(v);
@@ -439,6 +449,22 @@ fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
         }
     }
 
+    let mut seen_telemetry = std::collections::HashSet::new();
+    for f in &p.telemetry {
+        if is_reserved_telemetry_name(&f.name) {
+            return Err(ConfigFileError::Invalid(format!(
+                "telemetry '{}': the '{RESERVED_TELEMETRY_PREFIX}' namespace is reserved",
+                f.name
+            )));
+        }
+        if !seen_telemetry.insert(f.name.as_str()) {
+            return Err(ConfigFileError::Invalid(format!(
+                "duplicate telemetry field '{}'",
+                f.name
+            )));
+        }
+    }
+
     if let Some(fps) = p.fps
         && fps == 0
     {
@@ -486,6 +512,9 @@ state:
   - { name: gripper, dtype: bool }
 action:
   - { name: joint_pos, dtype: f32 }
+telemetry:
+  - { name: power/battery_v, dtype: f32 }
+  - { name: motors/left/overheated, dtype: bool }
 "#
     }
 
@@ -509,6 +538,10 @@ action:
 
         let action: Vec<&str> = cfg.action_fields().collect();
         assert_eq!(action, vec!["joint_pos"]);
+
+        let telemetry: Vec<&str> = cfg.telemetry_fields().collect();
+        assert_eq!(telemetry, vec!["power/battery_v", "motors/left/overheated"]);
+        assert_eq!(cfg.telemetry_schema()[1].dtype, DType::Bool);
 
         assert_eq!(cfg.session(), "demo");
         assert_eq!(cfg.role(), Role::Robot);
@@ -803,6 +836,20 @@ action_chunks:
             let err = PortalConfig::from_yaml_str(yaml, "demo", Role::Robot).unwrap_err();
             assert!(matches!(err, ConfigFileError::ActionChunksRemoved), "got {err:?}");
         }
+    }
+
+    #[test]
+    fn reserved_telemetry_namespace_rejected() {
+        let yaml = "version: 1\ntelemetry:\n  - { name: portal/rtt_us, dtype: f64 }\n";
+        let err = PortalConfig::from_yaml_str(yaml, "s", Role::Robot).unwrap_err();
+        assert!(matches!(err, ConfigFileError::Invalid(ref m) if m.contains("reserved")), "{err}");
+    }
+
+    #[test]
+    fn duplicate_telemetry_field_rejected() {
+        let yaml = "version: 1\ntelemetry:\n  - { name: cpu, dtype: f32 }\n  - { name: cpu, dtype: f64 }\n";
+        let err = PortalConfig::from_yaml_str(yaml, "s", Role::Robot).unwrap_err();
+        assert!(matches!(err, ConfigFileError::Invalid(ref m) if m.contains("duplicate")), "{err}");
     }
 
     #[test]

@@ -82,6 +82,8 @@ pub struct TransportMetrics {
     /// Lossy actions dropped on arrival for being older than
     /// `action_max_age_ms`.
     pub actions_dropped_stale: u64,
+    pub telemetry_sent: u64,
+    pub telemetry_received: u64,
     /// Per-stream RFC 3550 inter-arrival jitter estimate (EWMA, α=1/16).
     pub frame_jitter_us: HashMap<String, u64>,
     pub state_jitter_us: u64,
@@ -146,6 +148,7 @@ const SAMPLE_RING_CAP: usize = 256;
 pub enum DataStream {
     State,
     Action,
+    Telemetry,
 }
 
 #[doc(hidden)]
@@ -158,6 +161,8 @@ pub struct MetricsRegistry {
     actions_sent: AtomicU64,
     actions_received: AtomicU64,
     actions_dropped_stale: AtomicU64,
+    telemetry_sent: AtomicU64,
+    telemetry_received: AtomicU64,
     state_jitter: Mutex<JitterState>,
     action_jitter: Mutex<JitterState>,
     e2e_samples: Mutex<SampleRing>,
@@ -190,6 +195,8 @@ impl MetricsRegistry {
             actions_sent: AtomicU64::new(0),
             actions_received: AtomicU64::new(0),
             actions_dropped_stale: AtomicU64::new(0),
+            telemetry_sent: AtomicU64::new(0),
+            telemetry_received: AtomicU64::new(0),
             state_jitter: Mutex::new(JitterState::default()),
             action_jitter: Mutex::new(JitterState::default()),
             e2e_samples: Mutex::new(SampleRing::new(SAMPLE_RING_CAP)),
@@ -214,6 +221,7 @@ impl MetricsRegistry {
         match stream {
             DataStream::State => self.states_sent.fetch_add(1, Ordering::Relaxed),
             DataStream::Action => self.actions_sent.fetch_add(1, Ordering::Relaxed),
+            DataStream::Telemetry => self.telemetry_sent.fetch_add(1, Ordering::Relaxed),
         };
     }
 
@@ -233,6 +241,9 @@ impl MetricsRegistry {
             DataStream::Action => {
                 self.actions_received.fetch_add(1, Ordering::Relaxed);
                 self.action_jitter.lock().sample(send_ts_us, recv_ts_us);
+            }
+            DataStream::Telemetry => {
+                self.telemetry_received.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -344,6 +355,8 @@ impl MetricsRegistry {
                 actions_sent: self.actions_sent.load(Ordering::Relaxed),
                 actions_received: self.actions_received.load(Ordering::Relaxed),
                 actions_dropped_stale: self.actions_dropped_stale.load(Ordering::Relaxed),
+                telemetry_sent: self.telemetry_sent.load(Ordering::Relaxed),
+                telemetry_received: self.telemetry_received.load(Ordering::Relaxed),
                 frame_jitter_us,
                 state_jitter_us: self.state_jitter.lock().jitter_us,
                 action_jitter_us: self.action_jitter.lock().jitter_us,
@@ -372,6 +385,8 @@ impl MetricsRegistry {
         self.actions_sent.store(0, Ordering::Relaxed);
         self.actions_received.store(0, Ordering::Relaxed);
         self.actions_dropped_stale.store(0, Ordering::Relaxed);
+        self.telemetry_sent.store(0, Ordering::Relaxed);
+        self.telemetry_received.store(0, Ordering::Relaxed);
         *self.state_jitter.lock() = JitterState::default();
         *self.action_jitter.lock() = JitterState::default();
         self.e2e_samples.lock().clear();

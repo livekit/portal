@@ -1,0 +1,23 @@
+[package]
+name = "livekit-portal-wasm"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+description = "WebAssembly binding of livekit-portal-core for the browser driver in js/"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+livekit-portal-core = { path = "../../livekit-portal-core" }
+bytes = "1"
+log = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+serde-wasm-bindgen = "0.6"
+# Must match the `wasm-bindgen` CLI that generates the JS glue (see js/package.json).
+wasm-bindgen = "=0.2.126"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }

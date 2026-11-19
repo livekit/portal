@@ -1,0 +1,39 @@
+{
+  "name": "@livekit/portal",
+  "version": "0.3.0",
+  "description": "LiveKit Portal in the browser: teleoperate robots, run remote policies and record sessions",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build:wasm": "cargo build -p livekit-portal-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir src/generated ../target/wasm32-unknown-unknown/release/livekit_portal_wasm.wasm",
+    "build": "pnpm build:wasm && tsc -p tsconfig.build.json && cp -R src/generated dist/",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:browser": "node tests/browser/run.mjs"
+  },
+  "peerDependencies": {
+    "livekit-client": "^2.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "livekit-client": "^2.24.1",
+    "livekit-server-sdk": "2.20.0",
+    "playwright": "1.58.0",
+    "typescript": "^5.9.3",
+    "vite": "7.3.8",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@10.18.0"
+}

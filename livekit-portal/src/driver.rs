@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use crate::frame_video::spawn_receive;
 use crate::portal::Shared;
 use crate::video::{VideoReceiver, VideoReceiverOptions};
-use crate::wire;
+use livekit_portal_core::livekit as wire;
 
 /// Floor on a wake-up's delay. The core's times are on the raw local clock
 /// and the timer on tokio's; this keeps a rounding gap between the two

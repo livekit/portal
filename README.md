@@ -136,6 +136,7 @@ Follow the [quickstart](docs/01-quickstart.md) to run your first control loop
 without physical hardware. Then add [control handoff](docs/04-arbitration.md)
 and [data recording](docs/03-data-recording.md).
 For an existing LeRobot application, use the [LeRobot plugins](docs/reference/lerobot.md).
+To teleoperate or observe from a web page, use the [browser package](js/README.md).
 
 ## Examples
 

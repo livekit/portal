@@ -35,3 +35,7 @@ build/
 
 # OS
 .DS_Store
+
+# Generated wasm-bindgen glue (js/: pnpm build:wasm) and JS build output.
+js/src/generated/
+node_modules/

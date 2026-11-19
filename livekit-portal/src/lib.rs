@@ -22,7 +22,6 @@ mod portal;
 pub mod rpc;
 mod sinks;
 mod video;
-mod wire;
 
 pub use livekit_portal_core::{config, config_file, dtype, error, metrics, types};
 
@@ -35,6 +34,7 @@ pub use livekit_portal_core::config_file::ConfigFileError;
 pub use livekit_portal_core::dtype::DType;
 pub use livekit_portal_core::error::{PortalError, PortalResult};
 pub use livekit_portal_core::keypoint::Keypoint;
+pub use livekit_portal_core::livekit::BYTE_STREAM_CHUNK_SIZE;
 pub use livekit_portal_core::metrics::{
     BufferMetrics, PolicyMetrics, PortalMetrics, RttMetrics, SyncMetrics, TimeSyncMetrics,
     TransportMetrics,
@@ -48,4 +48,3 @@ pub use portal::{
     SET_ACTIVE_OPERATOR_RPC,
 };
 pub use rpc::{RpcError, RpcHandler, RpcInvocationData};
-pub use wire::BYTE_STREAM_CHUNK_SIZE;

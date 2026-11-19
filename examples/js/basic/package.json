@@ -1,0 +1,16 @@
+{
+  "name": "portal-example-basic-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@livekit/portal": "link:../../../js",
+    "livekit-client": "^2.24.1"
+  },
+  "devDependencies": {
+    "vite": "^7.1.12"
+  }
+}

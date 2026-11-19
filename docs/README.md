@@ -18,9 +18,11 @@ without physical hardware. Then use the guides below for your application.
 | Configure roles, send data, and register callbacks | [Portal API](05-portal-api.md) |
 | Share camera and field definitions between processes | [Config from YAML](reference/config-file.md) |
 | Connect an existing LeRobot robot or teleoperator | [LeRobot plugins](reference/lerobot.md) |
+| Teleoperate or observe from a web page | [`js/`](../js/README.md) |
 
 Runnable projects are in [`examples/python/`](../examples/python): start with
 `basic`, then try `so101` for hardware or `benchmark` to measure latency.
+[`examples/js/basic`](../examples/js/basic) is a browser teleoperator for `basic`.
 
 ## Tune and debug
 

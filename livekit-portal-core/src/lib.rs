@@ -17,7 +17,8 @@
 //! tasks or timers, so it builds for `wasm32-unknown-unknown` as well as
 //! native. It speaks Portal's own transport model (`transport`), which a
 //! driver maps onto its transport: `livekit-portal` drives it over the
-//! LiveKit Rust SDK, and `loopback` runs it in-process for tests.
+//! LiveKit Rust SDK, `js/` over the LiveKit browser SDK (both share the
+//! names in `livekit`), and `loopback` runs it in-process for tests.
 
 #[doc(hidden)]
 pub mod clock;
@@ -34,6 +35,7 @@ pub mod frame;
 pub mod frame_video;
 #[doc(hidden)]
 pub mod keypoint;
+pub mod livekit;
 pub mod loopback;
 pub mod metrics;
 #[doc(hidden)]

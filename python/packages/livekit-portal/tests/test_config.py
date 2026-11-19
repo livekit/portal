@@ -25,6 +25,7 @@ from livekit.portal import (
     Portal,
     PortalConfig,
     PortalError,
+    Robot,
     RobotConfig,
     Role,
     StallBehavior,
@@ -542,3 +543,43 @@ def test_action_subscription_accepts_enum_and_name():
     assert cfg.action_subscription == ActionSubscription.ALL
     with pytest.raises(ValueError):
         cfg.set_action_subscription("sometimes")
+
+
+@pytest.mark.parametrize("make", [lambda: PortalConfig("s", Role.ROBOT), lambda: RobotConfig("s")])
+def test_telemetry_schema_round_trips(make):
+    cfg = make()
+    cfg.add_telemetry_typed([("power/battery_v", DType.F32), ("ok", DType.BOOL)])
+    assert cfg.telemetry_schema == [
+        FieldSpec(name="power/battery_v", dtype=DType.F32),
+        FieldSpec(name="ok", dtype=DType.BOOL),
+    ]
+
+
+@pytest.mark.parametrize("make", [lambda: PortalConfig("s", Role.ROBOT), lambda: OperatorConfig("s")])
+def test_reserved_telemetry_namespace_raises(make):
+    cfg = make()
+    with pytest.raises(ValueError, match="reserved"):
+        cfg.add_telemetry_typed([("portal/rtt_us", DType.F64)])
+    assert cfg.telemetry_schema == []
+
+
+def test_send_telemetry_validates_dtypes():
+    cfg = RobotConfig("s")
+    cfg.add_telemetry_typed([("ok", DType.BOOL)])
+    with pytest.raises(PortalError.DtypeMismatch):
+        Robot(cfg).send_telemetry({"ok": 1.0})
+
+
+def test_send_telemetry_without_schema_raises():
+    with pytest.raises(PortalError.NoTelemetrySchema):
+        Robot(RobotConfig("s")).send_telemetry({})
+
+
+def test_telemetry_wrapper_values_are_typed():
+    from livekit.portal import _wrap_telemetry, _ffi
+
+    schema = [FieldSpec(name="ok", dtype=DType.BOOL), FieldSpec(name="v", dtype=DType.F32)]
+    raw = _ffi.Telemetry(values={"ok": 1.0, "v": 0.5}, timestamp_us=3, sender="robot")
+    t = _wrap_telemetry(raw, schema)
+    assert t.values == {"ok": True, "v": 0.5}
+    assert (t.sender, t.timestamp_us) == ("robot", 3)

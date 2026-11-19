@@ -164,6 +164,17 @@ pub struct State {
     pub timestamp_us: u64,
 }
 
+/// One telemetry sample from any peer. Surfaces in `on_telemetry` and
+/// `Portal::get_telemetry`. Never part of an `Observation`.
+#[derive(Debug, Clone)]
+pub struct Telemetry {
+    pub values: HashMap<String, TypedValue>,
+    pub raw_values: HashMap<String, f64>,
+    pub timestamp_us: u64,
+    /// Identity of the peer that sent it.
+    pub sender: String,
+}
+
 /// A synchronized observation: one state matched with one frame from every
 /// registered video track. `F` is the frame payload: decoded RGB natively,
 /// or whatever handle a driver feeds the core (see `FramePayload`).

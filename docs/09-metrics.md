@@ -114,6 +114,7 @@ dicts keyed by track name.
 | `actions_sent` | `int` | Action packets published. |
 | `actions_received` | `int` | Action packets arrived. |
 | `actions_dropped_stale` | `int` | Lossy actions dropped for being older than `action_max_age_ms`. Climbing steadily means the threshold is tighter than the link. |
+| `telemetry_sent` / `telemetry_received` | `int` | Telemetry samples this peer published, and accepted from every other peer combined. |
 | `frame_jitter_us` | `dict[str, int]` | Inter-arrival jitter per video track. |
 | `state_jitter_us` | `int` | Inter-arrival jitter for state. |
 | `action_jitter_us` | `int` | Inter-arrival jitter for actions. |

@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Deque, Dict, List, Optional, Protocol, Tuple
 
 if TYPE_CHECKING:
-    from . import Action, FieldSpec, Keypoint, PortalMetrics, State, TimeSyncSource, VideoFrameData
+    from . import Action, FieldSpec, Keypoint, PortalMetrics, State, Telemetry, TimeSyncSource
+    from . import VideoFrameData
     from . import VideoTrackSpec
 
 _log = logging.getLogger("livekit.portal.recording")
@@ -54,6 +55,7 @@ class SessionInfo:
     now_us: Callable[[], int]
     """The observer's `now_us()`, for sinks that stamp rows of their own
     (metrics, for example)."""
+    telemetry_schema: List["FieldSpec"] = field(default_factory=list)
 
 
 class Sink(Protocol):
@@ -65,7 +67,8 @@ class Sink(Protocol):
 
     Optionally, a sink can define `write_frame_dropped(track, timestamp_us)`
     to hear about each frame the recorder dropped because the sink fell
-    behind, so a reader can tell a gap in the recording from a stalled camera.
+    behind, so a reader can tell a gap in the recording from a stalled camera,
+    and `write_telemetry(telemetry)` to record telemetry from every peer.
     """
 
     def open(self, session: SessionInfo) -> None: ...
@@ -96,6 +99,7 @@ class _Converters:
     action: Callable[[Any], "Action"]
     keypoint: Callable[[Any], "Keypoint"]
     metrics: Callable[[], "PortalMetrics"]
+    telemetry: Callable[[Any], "Telemetry"]
 
 
 _Item = Tuple[str, Any]
@@ -130,6 +134,7 @@ class Recorder:
             raise ValueError("max_queued_frames must be at least 1")
         self._sink = sink
         self._write_frame_dropped = getattr(sink, "write_frame_dropped", None)
+        self._write_telemetry = getattr(sink, "write_telemetry", None)
         self._convert = convert
         self._max_queued_frames = max_queued_frames
         self._metrics_interval_s = metrics_interval_s
@@ -146,6 +151,8 @@ class Recorder:
         self._thread.start()
 
     def enqueue(self, kind: str, item: Any) -> None:
+        if kind == "telemetry" and self._write_telemetry is None:
+            return
         with self._cond:
             if self._stopping:
                 return
@@ -216,6 +223,8 @@ class Recorder:
                 self._sink.write_action(self._convert.action(item))
             elif kind == "keypoint":
                 self._sink.write_keypoint(self._convert.keypoint(item))
+            elif kind == "telemetry":
+                self._write_telemetry(self._convert.telemetry(item))
             elif kind == "metrics":
                 self._sink.write_metrics(self._convert.metrics())
         except Exception:  # noqa: BLE001

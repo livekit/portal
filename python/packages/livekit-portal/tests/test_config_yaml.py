@@ -60,6 +60,9 @@ YAML_FULL = textwrap.dedent(
       - { name: gripper, dtype: bool }
     action:
       - { name: joint_pos, dtype: f32 }
+    telemetry:
+      - { name: power/battery_v, dtype: f32 }
+      - { name: motors/overheated, dtype: bool }
     """
 )
 
@@ -311,3 +314,19 @@ def test_time_sync_source_rejects_unknown_value():
 def test_action_subscription_bool_is_rejected():
     with pytest.raises(ConfigFileError, match="none, active, all"):
         PortalConfig.from_yaml_str("version: 1\naction_subscription: true\n", "demo", Role.OPERATOR)
+
+
+def test_from_yaml_str_reads_telemetry():
+    expected = [
+        FieldSpec(name="power/battery_v", dtype=DType.F32),
+        FieldSpec(name="motors/overheated", dtype=DType.BOOL),
+    ]
+    assert PortalConfig.from_yaml_str(YAML_FULL, "demo", Role.ROBOT).telemetry_schema == expected
+    assert RobotConfig.from_yaml_str(YAML_FULL, "demo").telemetry_schema == expected
+    assert OperatorConfig.from_yaml_str(YAML_FULL, "demo").telemetry_schema == expected
+
+
+def test_reserved_telemetry_namespace_rejected_in_yaml():
+    yaml = "version: 1\ntelemetry:\n  - { name: portal/rtt_us, dtype: f64 }\n"
+    with pytest.raises(ConfigFileError):
+        RobotConfig.from_yaml_str(yaml, "demo")

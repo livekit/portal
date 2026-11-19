@@ -45,6 +45,9 @@ pub enum Stream {
     Action,
     Clock,
     Keypoint,
+    /// User-defined telemetry. Any peer may publish; never bundled into
+    /// observations.
+    Telemetry,
     /// Polyfilled RPC requests and responses.
     Control,
     /// Polyfilled presence: role, protocol version, active operator.
@@ -58,6 +61,7 @@ impl Stream {
             Stream::Action => "action",
             Stream::Clock => "clock",
             Stream::Keypoint => "keypoint",
+            Stream::Telemetry => "telemetry",
             Stream::Control => "control",
             Stream::Presence => "presence",
         }

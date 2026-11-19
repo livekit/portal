@@ -36,6 +36,7 @@ const STATE_TOPIC: &str = "portal_state";
 const ACTION_TOPIC: &str = "portal_action";
 const CLOCK_TOPIC: &str = "portal_clock";
 const KEYPOINT_TOPIC: &str = "portal_keypoint";
+const TELEMETRY_TOPIC: &str = "portal_telemetry";
 /// One byte-stream topic multiplexes every frame-video track; the frame
 /// envelope carries the track name.
 pub const FRAME_VIDEO_TOPIC: &str = "portal_frame_video";
@@ -66,6 +67,7 @@ pub fn topic(stream: Stream) -> Option<&'static str> {
         Stream::Action => Some(ACTION_TOPIC),
         Stream::Clock => Some(CLOCK_TOPIC),
         Stream::Keypoint => Some(KEYPOINT_TOPIC),
+        Stream::Telemetry => Some(TELEMETRY_TOPIC),
         Stream::Control | Stream::Presence => None,
     }
 }
@@ -76,6 +78,7 @@ pub fn stream(topic: &str) -> Option<Stream> {
         ACTION_TOPIC => Some(Stream::Action),
         CLOCK_TOPIC => Some(Stream::Clock),
         KEYPOINT_TOPIC => Some(Stream::Keypoint),
+        TELEMETRY_TOPIC => Some(Stream::Telemetry),
         _ => None,
     }
 }
@@ -117,14 +120,17 @@ mod tests {
     /// The wire is frozen: these names are what every deployed peer reads.
     #[test]
     fn names_on_the_wire_are_unchanged() {
-        let topics = [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint].map(topic);
+        let topics =
+            [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint, Stream::Telemetry]
+                .map(topic);
         assert_eq!(
             topics,
             [
                 Some("portal_state"),
                 Some("portal_action"),
                 Some("portal_clock"),
-                Some("portal_keypoint")
+                Some("portal_keypoint"),
+                Some("portal_telemetry")
             ]
         );
         assert_eq!(FRAME_VIDEO_TOPIC, "portal_frame_video");
@@ -133,7 +139,8 @@ mod tests {
             ("lk.portal.role", "lk.portal.active_operator", "lk.portal.version")
         );
         assert_eq!(PROTOCOL_VERSION, "3");
-        for s in [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint] {
+        for s in [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint, Stream::Telemetry]
+        {
             assert_eq!(topic(s).and_then(stream), Some(s));
         }
         assert_eq!(topic(Stream::Control), None);
@@ -183,7 +190,8 @@ mod tests {
             "../../livekit-portal-core/tests/fixtures/golden.json"
         ))
         .expect("fixtures parse");
-        for s in [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint] {
+        for s in [Stream::State, Stream::Action, Stream::Clock, Stream::Keypoint, Stream::Telemetry]
+        {
             assert_eq!(fixtures["topics"][s.name()].as_str(), topic(s), "{}", s.name());
         }
     }

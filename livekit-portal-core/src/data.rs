@@ -23,7 +23,7 @@ use crate::metrics::DataStream;
 use crate::serialization::{
     action_fingerprint, schema_fingerprint, serialize_action, serialize_values,
 };
-use crate::types::{Action, State, TypedValue, to_value_maps};
+use crate::types::{Action, State, Telemetry, TypedValue, to_value_maps};
 
 /// Encodes one stream's packets. Keeps the per-field carry-forward
 /// snapshot, so it lives as long as the connection.
@@ -68,6 +68,7 @@ impl DataPublisher {
         let (fingerprint, name) = match stream {
             DataStream::State => (schema_fingerprint(&schema), "state"),
             DataStream::Action => (action_fingerprint(&schema), "action"),
+            DataStream::Telemetry => (schema_fingerprint(&schema), "telemetry"),
         };
         let last_values = vec![0.0; schema.len()];
         Self {
@@ -96,7 +97,7 @@ impl DataPublisher {
         self.warn_unknown_keys(values);
         apply_carry_forward(&self.schema, &mut self.last_values, values);
         let out = match self.stream {
-            DataStream::State => {
+            DataStream::State | DataStream::Telemetry => {
                 serialize_values(self.fingerprint, timestamp_us, &self.last_values, &self.schema)
             }
             DataStream::Action => serialize_action(
@@ -205,6 +206,19 @@ pub fn build_action(record: ActionRecord<'_>) -> Action {
 pub fn build_state(timestamp_us: u64, schema: &[FieldSpec], values: &[f64]) -> State {
     let (typed, raw) = to_value_maps(schema, values);
     State { values: typed, raw_values: raw, timestamp_us }
+}
+
+pub struct TelemetryRecord<'a> {
+    pub timestamp_us: u64,
+    pub schema: &'a [FieldSpec],
+    pub values: &'a [f64],
+    pub sender: String,
+}
+
+pub fn build_telemetry(record: TelemetryRecord<'_>) -> Telemetry {
+    let TelemetryRecord { timestamp_us, schema, values, sender } = record;
+    let (typed, raw) = to_value_maps(schema, values);
+    Telemetry { values: typed, raw_values: raw, timestamp_us, sender }
 }
 
 #[cfg(test)]

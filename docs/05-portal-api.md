@@ -97,6 +97,7 @@ for every role, except that an observer starts with observation sync off and the
 | `add_video(name, codec=..., quality=..., max_bitrate_kbps=..., simulcast=..., screencast=..., width=..., height=...)` | H264 | Declare a camera track. See [Frame video](07-frame-video.md). |
 | `add_state_typed([(name, dtype), ...])` | none | Declare the state schema. |
 | `add_action_typed([(name, dtype), ...])` | none | Declare the action schema. |
+| `add_telemetry_typed([(name, dtype), ...])` | none | Declare the telemetry schema. See [Telemetry](#telemetry). |
 | `set_fps(int)` | 30 | Capture rate. Drives the match window. |
 | `set_slack(int)` | 5 | Ticks of buffer headroom. |
 | `set_tolerance(float)` | 1.5 | Match window, in ticks. |
@@ -126,7 +127,7 @@ config you loaded from YAML instead of building by hand:
 | `video_tracks` | `list[str]` | Names of every declared track, in declaration order, whatever the codec. |
 | `video_track_specs` | `list[VideoTrackSpec]` | Those same tracks with codec, quality, and encoder options. |
 | `frame_video_tracks` | `list[VideoTrackSpec]` | The byte-stream subset of `video_track_specs`. A filter, not a rival list. |
-| `state_schema` / `action_schema` | `list[FieldSpec]` | Declared schemas, in order. |
+| `state_schema` / `action_schema` / `telemetry_schema` | `list[FieldSpec]` | Declared schemas, in order. |
 | `fps` | `int` | `set_fps`. |
 | `slack` | `int` | `set_slack`. |
 | `tolerance` | `float` | `set_tolerance`. |
@@ -295,6 +296,12 @@ latest-wins, so a slow reader sees the freshest value rather than a backlog.
 | Callback | Pull | Fires with |
 |---|---|---|
 | `robot.on_action(cb)` | `robot.get_action()` | `Action` |
+
+**Every role.**
+
+| Callback | Pull | Fires with |
+|---|---|---|
+| `on_telemetry(cb)` | `get_telemetry(sender)` | `Telemetry`, latest per sender. See [Telemetry](#telemetry). |
 
 `on_state` and `on_video_frame` are raw firehoses. They fire on arrival with no
 matching at all. Use them for a preview pane or a debug log. Use
@@ -474,6 +481,73 @@ obs.on_keypoint(lambda kp: ...)   # kp.type, kp.payload, kp.timestamp_us, kp.sen
   the server's message, for example `exceeds the negotiated maximum message
   size (64000 bytes)`. Keep bulky data, such as images or long transcripts, out
   of the payload and reference it instead.
+
+## Telemetry
+
+Side-channel data that is not part of the control loop: battery, temperatures,
+CPU load, error counters. Declare it like state, and send it whenever you like.
+
+```python
+cfg.add_telemetry_typed([
+    ("power/battery_v", DType.F32),
+    ("motors/left/temp_c", DType.F32),
+    ("estop", DType.BOOL),
+])
+
+# Your loop, your rate. Portal never sends telemetry on its own.
+robot.send_telemetry({"power/battery_v": 24.1, "estop": False})
+
+op.on_telemetry(lambda t: print(t.sender, t.values))   # t.timestamp_us, t.raw_values
+op.get_telemetry("robot")                              # latest from that peer, or None
+```
+
+- **Any role can send, every other role receives.** `t.sender` says who sent
+  it, and `get_telemetry(sender)` keeps the latest sample per peer.
+- **Never bundled into observations.** It doesn't touch the sync buffer, so a
+  slow telemetry rate can't hold up `on_observation`.
+- **Lossy, newest wins.** A sample overtaken in flight by a newer one from the
+  same sender is dropped, as with lossy state.
+- **Fields carry forward.** Send only what changed; the rest keeps its last
+  sent value, starting at zero. Every peer shares one telemetry schema, so a
+  field one peer never sets reads as zero in its samples.
+- **Namespace with `/`.** `power/battery_v` nests under `power` in a Rerun
+  recording. The `portal/` namespace is reserved for Portal and raises
+  `ValueError`.
+
+### Reading the latest sample
+
+`get_telemetry(sender)` returns the newest `Telemetry` from that peer, or
+`None` if nothing has arrived from it yet. It never blocks, so call it from a
+control loop or a UI tick.
+
+```python
+t = op.get_telemetry("robot")
+if t is None:
+    ...                                   # the robot hasn't sent telemetry yet
+elif t.values["estop"]:
+    op.send_action(zero_action)
+
+t.values["power/battery_v"]               # typed per schema: float here, bool for BOOL
+t.raw_values["estop"]                     # every field as float: 1.0
+
+# Timestamps are on the robot's clock, like now_us()
+age_ms = (op.now_us() - t.timestamp_us) / 1000
+if age_ms > 500:
+    print("robot telemetry is stale")
+
+# The robot reads operators and observers alike
+for peer in robot.operators() + robot.observers():
+    if (t := robot.get_telemetry(peer)) is not None:
+        print(peer, t.values)
+```
+
+The slot outlives the sender: after a peer leaves, `get_telemetry` keeps
+returning its last sample. Check the age if that matters. Slots clear on
+`disconnect()` and on a reconnect.
+- **Numbers and booleans only**, the same dtypes as state. Send strings, such
+  as a firmware version, over [RPC](#rpc) or a [keypoint](#keypoints) instead.
+- `send_telemetry` raises `PortalError.NoTelemetrySchema` when no telemetry
+  fields were declared, and `PortalError.DtypeMismatch` like `send_state`.
 
 ## Multi-operator patterns
 
@@ -722,14 +796,15 @@ sender's side. Check `op.active_operator()`.
 | Variant | Cause |
 |---|---|
 | `AlreadyConnected` | `connect` called on a connected portal. |
-| `NotConnected` | `perform_rpc`, `send_keypoint`, or the robot's `set_active_operator` before `connect` or after `disconnect`. |
+| `NotConnected` | `perform_rpc`, `send_keypoint`, `send_telemetry`, or the robot's `set_active_operator` before `connect` or after `disconnect`. |
+| `NoTelemetrySchema` | `send_telemetry` on a peer that declared no telemetry fields. |
 | `Room` | Connecting or a transport call failed: a bad token, a missing `can_update_own_metadata` grant, or an oversize keypoint. Carries the server's message. |
 | `NoPeer` | `perform_rpc` with no peer discovered and no `destination`. |
 | `AmbiguousPeer` | Several remote participants and no peer identified. Pass `destination`. |
 | `UnknownVideoTrack` | Track name was never declared with `add_video`, or a robot's `send_video_frame` before `connect`. |
 | `WrongFrameSize` | Buffer length is not `width * height * 3`. |
 | `InvalidFrameDimensions` | Width or height is odd. |
-| `WrongRole` | A send the role can't make, such as any `Observer.send_*`. Also `send_state` or `send_action` before `connect` or after `disconnect`, when no publisher exists. |
+| `WrongRole` | A send the role can't make, such as an observer's `send_state`, `send_action` or `send_video_frame`. Also `send_state` or `send_action` before `connect` or after `disconnect`, when no publisher exists. |
 | `ObservationSyncDisabled` | `on_observation` or `get_observation` on a peer with `set_observation_sync(False)`. |
 | `DtypeMismatch` | A sent value's Python type disagrees with the declared dtype. |
 | `Deserialization` | A received payload could not be parsed. |
@@ -757,9 +832,10 @@ robot.operators() / robot.observers() / robot.local_identity()
 robot.on_operator_joined(cb) / robot.on_operator_left(cb)
 robot.on_active_operator_changed(cb)
 
-# time sync, keypoints
+# time sync, keypoints, telemetry
 robot.now_us() / robot.on_time_synced(cb)
 await robot.send_keypoint(type, payload=None, timestamp_us=None) / robot.on_keypoint(cb)
+robot.send_telemetry(values, timestamp_us=None) / robot.on_telemetry(cb) / robot.get_telemetry(sender)
 
 # rpc, metrics, lifecycle
 robot.register_rpc_method(name, handler) / robot.unregister_rpc_method(name)
@@ -784,9 +860,10 @@ op.operators() / op.observers() / op.robot_identity() / op.local_identity()
 op.on_operator_joined(cb) / op.on_operator_left(cb)
 op.on_active_operator_changed(cb)
 
-# time sync, keypoints
+# time sync, keypoints, telemetry
 op.now_us() / op.on_time_synced(cb)
 await op.send_keypoint(type, payload=None, timestamp_us=None) / op.on_keypoint(cb)
+op.send_telemetry(values, timestamp_us=None) / op.on_telemetry(cb) / op.get_telemetry(sender)
 
 # rpc, metrics, lifecycle
 op.register_rpc_method(name, handler) / op.unregister_rpc_method(name)
@@ -815,8 +892,9 @@ obs.on_active_operator_changed(cb)
 obs.record_to(sink, max_queued_frames=64, metrics_interval_s=1.0) / obs.stop_recording()
 obs.metrics().observer          # recording, frames_written, frames_dropped, queued
 
-# keypoints, time sync, rpc, metrics, lifecycle: as on the operator
+# keypoints, telemetry, time sync, rpc, metrics, lifecycle: as on the operator
 await obs.send_keypoint(type, payload=None, timestamp_us=None) / obs.on_keypoint(cb)
+obs.send_telemetry(values, timestamp_us=None) / obs.on_telemetry(cb) / obs.get_telemetry(sender)
 ```
 
 `ObserverConfig` has the same declarative surface as `OperatorConfig` but

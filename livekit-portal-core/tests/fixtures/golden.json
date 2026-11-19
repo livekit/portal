@@ -256,6 +256,7 @@
     "action": "portal_action",
     "clock": "portal_clock",
     "keypoint": "portal_keypoint",
-    "state": "portal_state"
+    "state": "portal_state",
+    "telemetry": "portal_telemetry"
   }
 }

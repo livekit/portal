@@ -161,6 +161,7 @@ fn generate() -> Value {
             "action": "portal_action",
             "clock": "portal_clock",
             "keypoint": "portal_keypoint",
+            "telemetry": "portal_telemetry",
         },
         "state": [
             state_vector("empty", Vec::new(), TS, Vec::new()),

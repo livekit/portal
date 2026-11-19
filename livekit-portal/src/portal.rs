@@ -41,7 +41,8 @@ use livekit_portal_core::transport::{Delivery, Presence, Stream};
 use livekit_portal_core::types::*;
 use livekit_portal_core::{
     Connect, CoreInit, Event, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
-    SendKeypoint, SendState, SendVideoFrame, SetActiveOperator, Step, VideoTransport,
+    SendKeypoint, SendState, SendTelemetry, SendVideoFrame, SetActiveOperator, Step,
+    VideoTransport,
 };
 use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
@@ -426,6 +427,24 @@ impl Portal {
         Ok(())
     }
 
+    /// Publish a telemetry sample (any role). Lossy and never bundled into
+    /// observations. Fields left out carry forward their last sent value.
+    /// `timestamp_us` defaults to `now_us()`.
+    pub fn send_telemetry(
+        &self,
+        values: &HashMap<String, TypedValue>,
+        timestamp_us: Option<u64>,
+    ) -> PortalResult<()> {
+        let now_us = self.shared.now_us();
+        let out = self.shared.core.lock().send_telemetry(SendTelemetry {
+            values,
+            timestamp_us,
+            now_us,
+        })?;
+        self.shared.execute(out);
+        Ok(())
+    }
+
     /// Publish an action (operator only).
     ///
     /// `in_reply_to_ts_us` is the timestamp of the observation this action
@@ -460,6 +479,11 @@ impl Portal {
     /// Declared action schema, same semantics as `state_schema`.
     pub fn action_schema(&self) -> &[FieldSpec] {
         self.config.action_schema()
+    }
+
+    /// Declared telemetry schema, same semantics as `state_schema`.
+    pub fn telemetry_schema(&self) -> &[FieldSpec] {
+        self.config.telemetry_schema()
     }
 
     // --- Multi-controller surface (v0.2) ---
@@ -773,6 +797,11 @@ impl Portal {
         self.shared.sinks.state.get()
     }
 
+    /// Clone of the latest telemetry received from `sender`, or `None`.
+    pub fn get_telemetry(&self, sender: &str) -> Option<Telemetry> {
+        self.shared.sinks.telemetry.get(sender)
+    }
+
     /// Clone of the latest frame received for `track_name`, or `None`.
     pub fn get_video_frame(&self, track_name: &str) -> Option<VideoFrameData> {
         self.shared.sinks.video.get(track_name).and_then(|s| s.latest.lock().clone())
@@ -805,6 +834,11 @@ impl Portal {
     /// Fire on every received state. Semantics mirror `on_action`.
     pub fn on_state(&self, callback: impl Fn(&State) + Send + Sync + 'static) {
         *self.shared.sinks.state.cb.lock() = Some(Box::new(callback));
+    }
+
+    /// Fire on every telemetry sample received from any peer.
+    pub fn on_telemetry(&self, callback: impl Fn(&Telemetry) + Send + Sync + 'static) {
+        *self.shared.sinks.telemetry.cb.lock() = Some(Box::new(callback));
     }
 
     pub fn on_video_frame(

@@ -28,8 +28,8 @@ pub use livekit_portal_core::{config, config_file, dtype, error, metrics, types}
 
 pub use codec::Codec;
 pub use livekit_portal_core::config::{
-    DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, Resolution, VideoOptions,
-    VideoTrackSpec,
+    DEFAULT_H264_MAX_BITRATE_KBPS, FieldSpec, PortalConfig, RESERVED_TELEMETRY_PREFIX, Resolution,
+    VideoOptions, VideoTrackSpec,
 };
 pub use livekit_portal_core::config_file::ConfigFileError;
 pub use livekit_portal_core::dtype::DType;
@@ -41,7 +41,7 @@ pub use livekit_portal_core::metrics::{
 };
 pub use livekit_portal_core::types::{
     Action, ActionSubscription, FrameSource, Observation, Role, StallBehavior, StallConfig, State,
-    SyncConfig, TimeSyncSource, TypedValue, VideoFrameData,
+    SyncConfig, Telemetry, TimeSyncSource, TypedValue, VideoFrameData,
 };
 pub use portal::{
     ACTIVE_OPERATOR_ATTR_KEY, PROTOCOL_VERSION, PROTOCOL_VERSION_ATTR_KEY, Portal, ROLE_ATTR_KEY,

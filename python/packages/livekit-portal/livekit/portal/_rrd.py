@@ -33,7 +33,7 @@ except ImportError as e:  # pragma: no cover - exercised without the extra
     ) from e
 
 if TYPE_CHECKING:
-    from . import Action, Keypoint, PortalMetrics, State, VideoFrameData
+    from . import Action, Keypoint, PortalMetrics, State, Telemetry, VideoFrameData
     from ._recording import SessionInfo
 
 SCHEMA_VERSION = 1
@@ -64,6 +64,7 @@ class RrdSink:
     | `observation/<track>` | frame timestamp (JPEG, or raw) | |
     | `action/<sender>/<field>`, `action/<sender>/active` | `in_reply_to_ts_us`, else the action's own timestamp | action timestamp |
     | `keypoints/<type>` | keypoint timestamp (`payload` as JSON, `sender`) | |
+    | `telemetry/<sender>/<field>` | telemetry timestamp; `/` in a field name nests | |
     | `recorder/frames_dropped/<track>` | timestamp of a frame the recorder dropped | |
     | `metrics/...` | observer's `now_us()` | |
     | `portal/schema` | static: field order and dtypes, tracks, clock source | |
@@ -142,6 +143,15 @@ class RrdSink:
             rr.AnyValues(payload=json.dumps(keypoint.payload), sender=keypoint.sender),
         )
 
+    def write_telemetry(self, telemetry: "Telemetry") -> None:
+        rec = self._stream()
+        rec.reset_time()
+        rec.set_time("robot_time", timestamp=_ts(telemetry.timestamp_us))
+        prefix = f"telemetry/{_part(telemetry.sender)}"
+        for name, value in telemetry.raw_values.items():
+            path = "/".join(_part(p) for p in name.split("/"))
+            rec.log(f"{prefix}/{path}", rr.Scalars(value))
+
     def write_metrics(self, metrics: "PortalMetrics") -> None:
         rec = self._stream()
         rec.reset_time()
@@ -182,5 +192,8 @@ def _schema(session: "SessionInfo") -> dict:
         "time_sync_source": session.time_sync_source.name.lower(),
         "state": [{"name": f.name, "dtype": f.dtype.name.lower()} for f in session.state_schema],
         "action": [{"name": f.name, "dtype": f.dtype.name.lower()} for f in session.action_schema],
+        "telemetry": [
+            {"name": f.name, "dtype": f.dtype.name.lower()} for f in session.telemetry_schema
+        ],
         "video": [{"name": t.name, "codec": t.codec.name.lower()} for t in session.video_tracks],
     }

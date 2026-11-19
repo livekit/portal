@@ -130,6 +130,11 @@ action:
   - { name: joint_pos, dtype: f32 }
   - { name: gripper, dtype: bool }
   - { name: mode, dtype: i8 }
+
+# Side-channel data any peer may publish. Never part of an observation.
+telemetry:
+  - { name: power/battery_v, dtype: f32 }
+  - { name: motors/left/temp_c, dtype: f32 }
 ```
 
 ## Top level
@@ -226,6 +231,24 @@ any rename, reorder, or dtype change drops packets at the receiver with a
 
 Values cast to and from the declared dtype at the wire boundary. Integer overflow
 saturates, so `mode: 500` into an `i8` arrives as `127`.
+
+## `telemetry`
+
+```yaml
+telemetry:
+  - { name: power/battery_v,    dtype: f32 }
+  - { name: motors/left/temp_c, dtype: f32 }
+  - { name: estop,              dtype: bool }
+```
+
+Same entry format and ordering rules as `state`. Telemetry is for data that
+isn't part of the control loop: battery, temperatures, CPU load, error
+counters. Any peer can publish it with `send_telemetry`, and it is never
+bundled into an observation. See [Telemetry](../05-portal-api.md#telemetry).
+
+Names may contain `/` to group related fields, and the recorder nests them
+that way in Rerun. Names starting with `portal/` are reserved for Portal and
+are rejected, as are duplicate names.
 
 ## What is deliberately not in the file
 

@@ -125,6 +125,20 @@ def _to_field_specs(schema: Iterable[SchemaEntry]) -> List[FieldSpec]:
     return out
 
 
+RESERVED_TELEMETRY_PREFIX = "portal/"
+
+
+def _to_telemetry_specs(schema: Iterable[SchemaEntry]) -> List[FieldSpec]:
+    specs = _to_field_specs(schema)
+    for f in specs:
+        if f.name.startswith(RESERVED_TELEMETRY_PREFIX):
+            raise ValueError(
+                f"telemetry field {f.name!r} uses the reserved "
+                f"{RESERVED_TELEMETRY_PREFIX!r} namespace"
+            )
+    return specs
+
+
 _INT_DTYPES = frozenset(
     {DType.I32, DType.I16, DType.I8, DType.U32, DType.U16, DType.U8}
 )
@@ -290,6 +304,21 @@ class State:
 
 
 @dataclass(frozen=True, slots=True)
+class Telemetry:
+    """A telemetry sample from any peer: side-channel data such as battery,
+    temperatures or CPU load. Never part of an `Observation`.
+
+    Semantics for `values` / `raw_values` match `State`. `sender` is the
+    identity of the peer that published it.
+    """
+
+    values: Dict[str, TypedScalar]
+    raw_values: Dict[str, float]
+    timestamp_us: int
+    sender: str
+
+
+@dataclass(frozen=True, slots=True)
 class Observation:
     """A synchronized observation: matched video frames + state sample.
 
@@ -342,6 +371,17 @@ def _wrap_state(
     )
 
 
+def _wrap_telemetry(
+    telemetry: _ffi.Telemetry, schema: List[FieldSpec]
+) -> Telemetry:
+    return Telemetry(
+        values=_cast_values(telemetry.values, schema),
+        raw_values=telemetry.values,
+        timestamp_us=telemetry.timestamp_us,
+        sender=telemetry.sender,
+    )
+
+
 def _wrap_observation(
     obs: _ffi.Observation, state_schema: List[FieldSpec]
 ) -> Observation:
@@ -369,6 +409,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self,
         action_schema: List[FieldSpec],
         state_schema: List[FieldSpec],
+        telemetry_schema: List[FieldSpec],
     ) -> None:
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -385,6 +426,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         self._active_operator_changed_cb: Optional[Callable[[Optional[str]], Any]] = None
         self._time_synced_cb: Optional[Callable[[], Any]] = None
         self._keypoint_cb: Optional[Callable[[Keypoint], Any]] = None
+        self._telemetry_cb: Optional[Callable[[Telemetry], Any]] = None
         # Recording tap: sees every raw record on the delivering thread,
         # ahead of (and independent of) the user callbacks.
         self._tap: Optional[Callable[[str, Any], None]] = None
@@ -392,6 +434,7 @@ class _Dispatcher(_ffi.PortalCallbacks):
         # helpers below on every delivery.
         self._action_schema = action_schema
         self._state_schema = state_schema
+        self._telemetry_schema = telemetry_schema
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         with self._lock:
@@ -474,6 +517,14 @@ class _Dispatcher(_ffi.PortalCallbacks):
         if cb is not None:
             self._schedule(cb, _wrap_keypoint(keypoint))
 
+    def on_telemetry(self, telemetry: _ffi.Telemetry) -> None:
+        tap = self._tap
+        if tap is not None:
+            tap("telemetry", telemetry)
+        cb = self._telemetry_cb
+        if cb is not None:
+            self._schedule(cb, _wrap_telemetry(telemetry, self._telemetry_schema))
+
     # --- Registration (from Python user thread) -----------------------------
 
     def set_action(self, cb: Callable[[Action], Any]) -> None:
@@ -508,6 +559,9 @@ class _Dispatcher(_ffi.PortalCallbacks):
 
     def set_keypoint(self, cb: Callable[[Keypoint], Any]) -> None:
         self._keypoint_cb = cb
+
+    def set_telemetry(self, cb: Callable[[Telemetry], Any]) -> None:
+        self._telemetry_cb = cb
 
 
 _uniffi_bound_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -606,6 +660,7 @@ class PortalConfig:
         "_video_track_specs",
         "_state_schema",
         "_action_schema",
+        "_telemetry_schema",
     )
 
     def __init__(self, session: str, role: Role) -> None:
@@ -615,6 +670,7 @@ class PortalConfig:
         self._video_track_specs: List[VideoTrackSpec] = []
         self._state_schema: List[FieldSpec] = []
         self._action_schema: List[FieldSpec] = []
+        self._telemetry_schema: List[FieldSpec] = []
 
     @classmethod
     def from_yaml_str(
@@ -670,6 +726,7 @@ class PortalConfig:
         instance._video_track_specs = list(inner.video_track_specs())
         instance._state_schema = list(inner.state_schema())
         instance._action_schema = list(inner.action_schema())
+        instance._telemetry_schema = list(inner.telemetry_schema())
         return instance
 
     @property
@@ -725,6 +782,14 @@ class PortalConfig:
     @property
     def action_schema(self) -> List[FieldSpec]:
         return list(self._action_schema)
+
+    @property
+    def telemetry_fields(self) -> List[str]:
+        return [f.name for f in self._telemetry_schema]
+
+    @property
+    def telemetry_schema(self) -> List[FieldSpec]:
+        return list(self._telemetry_schema)
 
     # Sync / transport knobs are not mirrored Python-side — read them back
     # from the FFI config, which owns the authoritative value.
@@ -898,6 +963,19 @@ class PortalConfig:
         specs = _to_field_specs(schema)
         self._inner.add_action_typed(specs)
         self._action_schema.extend(specs)
+
+    def add_telemetry_typed(self, schema: Iterable[SchemaEntry]) -> None:
+        """Declare telemetry fields with per-field dtype.
+
+        Telemetry is side-channel data any peer may publish with
+        `send_telemetry`: lossy, and never bundled into observations.
+        Names may be namespaced with `/` (`"power/battery_v"`); the
+        `portal/` namespace is reserved and raises `ValueError`. Order is
+        significant and must match on every peer.
+        """
+        specs = _to_telemetry_specs(schema)
+        self._inner.add_telemetry_typed(specs)
+        self._telemetry_schema.extend(specs)
 
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
@@ -1073,6 +1151,7 @@ class Portal:
         "_action_fields",
         "_state_schema",
         "_action_schema",
+        "_telemetry_schema",
         "_video_tracks",
     )
 
@@ -1085,6 +1164,7 @@ class Portal:
             lambda dispatcher: _ffi.Portal(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
+            config.telemetry_schema,
         )
 
     @classmethod
@@ -1093,6 +1173,7 @@ class Portal:
         inner_factory: Callable[["_Dispatcher"], Any],
         state_schema: List[FieldSpec],
         action_schema: List[FieldSpec],
+        telemetry_schema: List[FieldSpec],
     ) -> "Portal":
         """Build a Portal over a prebuilt FFI object. `inner_factory`
         receives the dispatcher and must return the FFI object constructed
@@ -1101,7 +1182,7 @@ class Portal:
         while this ergonomic layer stays shared.
         """
         self = cls.__new__(cls)
-        self._init(inner_factory, state_schema, action_schema)
+        self._init(inner_factory, state_schema, action_schema, telemetry_schema)
         return self
 
     def _init(
@@ -1109,13 +1190,17 @@ class Portal:
         inner_factory: Callable[["_Dispatcher"], Any],
         state_schema: List[FieldSpec],
         action_schema: List[FieldSpec],
+        telemetry_schema: List[FieldSpec],
     ) -> None:
         # Schema snapshots let delivery records reconstruct Python types
         # per declared dtype — the FFI boundary delivers everything as
         # `Dict[str, float]` (the core pipeline is f64 throughout).
         self._state_schema: List[FieldSpec] = list(state_schema)
         self._action_schema: List[FieldSpec] = list(action_schema)
-        self._dispatcher = _Dispatcher(self._action_schema, self._state_schema)
+        self._telemetry_schema: List[FieldSpec] = list(telemetry_schema)
+        self._dispatcher = _Dispatcher(
+            self._action_schema, self._state_schema, self._telemetry_schema
+        )
         self._inner = inner_factory(self._dispatcher)
         # Snapshot what the Rust side confirmed it was built with.
         self._state_fields: List[str] = list(self._inner.state_fields())
@@ -1181,6 +1266,20 @@ class Portal:
         _validate_send_values(values, self._action_schema)
         self._inner.send_action(values, timestamp_us, in_reply_to_ts_us)
 
+    def send_telemetry(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        """Publish a telemetry sample (any role). Call it at whatever rate
+        suits you; Portal never sends telemetry on its own. Fields left out
+        carry forward their last sent value. Same validation rules as
+        `send_state`. Raises `PortalError.NoTelemetrySchema` when no
+        telemetry fields were declared.
+        """
+        _validate_send_values(values, self._telemetry_schema)
+        self._inner.send_telemetry(values, timestamp_us)
+
     # -- pull (sync, latest-wins) --------------------------------------------
 
     def get_observation(self) -> Optional[Observation]:
@@ -1194,6 +1293,11 @@ class Portal:
     def get_state(self) -> Optional[State]:
         raw = self._inner.get_state()
         return None if raw is None else _wrap_state(raw, self._state_schema)
+
+    def get_telemetry(self, sender: str) -> Optional[Telemetry]:
+        """Latest telemetry received from `sender`, or `None`."""
+        raw = self._inner.get_telemetry(sender)
+        return None if raw is None else _wrap_telemetry(raw, self._telemetry_schema)
 
     def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
         return self._inner.get_video_frame(track_name)
@@ -1344,6 +1448,11 @@ class Portal:
         """Fire on every keypoint in the room, this peer's own included."""
         self._dispatcher.set_keypoint(callback)
 
+    def on_telemetry(self, callback: Callable[[Telemetry], Any]) -> None:
+        """Fire on every telemetry sample from another peer. Check
+        `telemetry.sender` to tell peers apart."""
+        self._dispatcher.set_telemetry(callback)
+
     def register_rpc_method(
         self,
         method: str,
@@ -1478,6 +1587,10 @@ class _RoleConfigBase:
         return list(self._inner.action_schema())
 
     @property
+    def telemetry_schema(self) -> List[FieldSpec]:
+        return list(self._inner.telemetry_schema())
+
+    @property
     def fps(self) -> int:
         """Unified observation rate in Hz. Defaults to 30."""
         return self._inner.fps()
@@ -1563,6 +1676,10 @@ class _RoleConfigBase:
 
     def add_action_typed(self, schema: Iterable[SchemaEntry]) -> None:
         self._inner.add_action_typed(_to_field_specs(schema))
+
+    def add_telemetry_typed(self, schema: Iterable[SchemaEntry]) -> None:
+        """Declare telemetry fields. See `PortalConfig.add_telemetry_typed`."""
+        self._inner.add_telemetry_typed(_to_telemetry_specs(schema))
 
     def set_fps(self, fps: int) -> None:
         self._inner.set_fps(fps)
@@ -1652,24 +1769,14 @@ class RobotConfig(_RoleConfigBase):
             return cls.from_yaml_str(f.read(), session)
 
 
-class OperatorConfig(_RoleConfigBase):
-    """Operator-side session config. Same declarative surface as
-    `RobotConfig`; the Role is pinned to `Role.OPERATOR` by the underlying
-    `_ffi.OperatorConfig`.
+class _ReceivingRoleConfigBase(_RoleConfigBase):
+    """Observation-sync knobs, on the configs of roles that receive state."""
 
-    Identity is set on the LiveKit access token (`with_identity(...)` at
-    mint time) and read back via `Operator.local_identity()` after
-    `connect()`. There is no config-level identity field — the token is
-    the only source of truth, and accepting one here would only let the
-    two disagree.
-    """
-
-    def __init__(self, session: str) -> None:
-        super().__init__(_ffi.OperatorConfig(session), session, Role.OPERATOR)
+    __slots__ = ()
 
     def set_observation_sync(self, enable: bool) -> None:
         """Bundle state and frames into observations. On by default for
-        operators. Only a peer that consumes bundles live needs it, in
+        operators, off for observers. Only a peer that consumes bundles live needs it, in
         practice a policy: a teleoperator flies on the newest frame and a
         recorder stores raw streams for offline alignment.
 
@@ -1685,6 +1792,22 @@ class OperatorConfig(_RoleConfigBase):
     @property
     def observation_sync(self) -> bool:
         return self._inner.observation_sync()
+
+
+class OperatorConfig(_ReceivingRoleConfigBase):
+    """Operator-side session config. Same declarative surface as
+    `RobotConfig`; the Role is pinned to `Role.OPERATOR` by the underlying
+    `_ffi.OperatorConfig`.
+
+    Identity is set on the LiveKit access token (`with_identity(...)` at
+    mint time) and read back via `Operator.local_identity()` after
+    `connect()`. There is no config-level identity field — the token is
+    the only source of truth, and accepting one here would only let the
+    two disagree.
+    """
+
+    def __init__(self, session: str) -> None:
+        super().__init__(_ffi.OperatorConfig(session), session, Role.OPERATOR)
 
     @classmethod
     def from_yaml_str(cls, yaml: str, session: str) -> "OperatorConfig":
@@ -1707,7 +1830,7 @@ class OperatorConfig(_RoleConfigBase):
 
 
 
-class ObserverConfig(_RoleConfigBase):
+class ObserverConfig(_ReceivingRoleConfigBase):
     """Observer-side session config. Same declarative surface as
     `OperatorConfig`, but defaults to `action_subscription="active"` and
     observation sync off: an observer records raw streams and the actions
@@ -1716,25 +1839,6 @@ class ObserverConfig(_RoleConfigBase):
 
     def __init__(self, session: str) -> None:
         super().__init__(_ffi.ObserverConfig(session), session, Role.OBSERVER)
-
-    def set_observation_sync(self, enable: bool) -> None:
-        """Bundle state and frames into observations. On by default for
-        operators. Only a peer that consumes bundles live needs it, in
-        practice a policy: a teleoperator flies on the newest frame and a
-        recorder stores raw streams for offline alignment.
-
-        Off means the sync buffer never runs: `on_observation` and
-        `get_observation` raise `PortalError.ObservationSyncDisabled`,
-        `on_drop` never fires, `metrics().sync` stays empty, and `slack`,
-        `tolerance`, `stall_behavior` and `max_lag_ms` do nothing (Portal
-        warns once if you set them). Frames and states still arrive through
-        `on_video_frame` and `on_state`.
-        """
-        self._inner.set_observation_sync(enable)
-
-    @property
-    def observation_sync(self) -> bool:
-        return self._inner.observation_sync()
 
     @classmethod
     def from_yaml_str(cls, yaml: str, session: str) -> "ObserverConfig":
@@ -1755,28 +1859,15 @@ class ObserverConfig(_RoleConfigBase):
         with open(path, "r", encoding="utf-8") as f:
             return cls.from_yaml_str(f.read(), session)
 
-class Robot:
-    """Robot-side Portal facade.
 
-    Wraps a `Portal` instance constructed with `Role.ROBOT` and exposes only
-    the methods that make sense on the robot side (publish state and video,
-    receive actions, control plane). Callers who want the
-    unified surface can keep using `Portal` directly.
+
+class _RoleBase:
+    """What every role facade shares: lifecycle, actions received, the
+    control plane, keypoints, telemetry, RPC and metrics. Each facade backs
+    itself with a `Portal` built over its role's FFI object.
     """
 
     __slots__ = ("_portal",)
-
-    def __init__(self, config: RobotConfig) -> None:
-        # Back the facade with `_ffi.Robot` — the role-split surface defined
-        # in Rust. `Portal._over` layers the shared ergonomics (typed values,
-        # numpy, asyncio callback hopping) on top.
-        self._portal = Portal._over(
-            lambda dispatcher: _ffi.Robot(config._inner, dispatcher),
-            config.state_schema,
-            config.action_schema,
-        )
-
-    # -- lifecycle -----------------------------------------------------------
 
     async def connect(self, url: str, token: str) -> None:
         await self._portal.connect(url, token)
@@ -1787,34 +1878,22 @@ class Robot:
     def close(self) -> None:
         self._portal.close()
 
-    # -- publish (robot-side) ------------------------------------------------
-
-    def send_video_frame(
-        self,
-        track_name: str,
-        frame: Any,
-        width: Optional[int] = None,
-        height: Optional[int] = None,
-        timestamp_us: Optional[int] = None,
-    ) -> None:
-        self._portal.send_video_frame(track_name, frame, width, height, timestamp_us)
-
-    def send_state(
-        self,
-        values: Dict[str, Any],
-        timestamp_us: Optional[int] = None,
-    ) -> None:
-        self._portal.send_state(values, timestamp_us)
-
-    # -- receive (robot-side) ------------------------------------------------
+    def metrics(self) -> PortalMetrics:
+        return self._portal.metrics()
 
     def on_action(self, callback: Callable[[Action], Any]) -> None:
+        """Fire on each action this peer receives. The robot gets the active
+        operator's. An operator or observer gets what its action subscription
+        lets through (`"active"` or `"all"`); operators default to `"none"`,
+        observers to `"active"`. `action.sender` and `action.active` are
+        stamped at gate time; use them for dataset row labels rather than
+        `active_operator()` to avoid handoff races.
+        """
         self._portal.on_action(callback)
 
     def get_action(self) -> Optional[Action]:
+        """Latest delivered action, or `None` if none received."""
         return self._portal.get_action()
-
-    # -- multi-controller ----------------------------------------------------
 
     def local_identity(self) -> Optional[str]:
         return self._portal.local_identity()
@@ -1843,8 +1922,6 @@ class Robot:
     ) -> None:
         self._portal.on_active_operator_changed(callback)
 
-    # -- time sync -----------------------------------------------------------
-
     def now_us(self) -> int:
         """Now, in microseconds on the robot's clock."""
         return self._portal.now_us()
@@ -1852,8 +1929,6 @@ class Robot:
     def on_time_synced(self, callback: Callable[[], Any]) -> None:
         """Fire on the first sync with the robot's clock, and after each resync."""
         self._portal.on_time_synced(callback)
-
-    # -- keypoints -----------------------------------------------------------
 
     async def send_keypoint(
         self,
@@ -1868,7 +1943,21 @@ class Robot:
         """Fire on every keypoint in the room, this peer's own included."""
         self._portal.on_keypoint(callback)
 
-    # -- rpc -----------------------------------------------------------------
+    def send_telemetry(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        """Publish a telemetry sample. See `Portal.send_telemetry`."""
+        self._portal.send_telemetry(values, timestamp_us)
+
+    def on_telemetry(self, callback: Callable[[Telemetry], Any]) -> None:
+        """Fire on every telemetry sample from another peer."""
+        self._portal.on_telemetry(callback)
+
+    def get_telemetry(self, sender: str) -> Optional[Telemetry]:
+        """Latest telemetry received from `sender`, or `None`."""
+        return self._portal.get_telemetry(sender)
 
     def register_rpc_method(
         self,
@@ -1891,59 +1980,21 @@ class Robot:
             method, payload, destination, response_timeout_ms
         )
 
-    # -- metrics -------------------------------------------------------------
-
-    def metrics(self) -> PortalMetrics:
-        return self._portal.metrics()
-
     def reset_metrics(self) -> None:
         self._portal.reset_metrics()
 
 
-class Operator:
-    """Operator-side Portal facade.
-
-    Wraps a `Portal` instance constructed with `Role.OPERATOR` and exposes
-    only the methods that make sense on the operator side (publish actions,
-    receive observations and video, control plane). Callers who
-    want the unified surface can keep using `Portal` directly.
+class _ReceivingRoleBase(_RoleBase):
+    """The receive side the operator and observer share: state, video and
+    observations, which the robot only publishes.
     """
 
-    __slots__ = ("_portal",)
-
-    def __init__(self, config: OperatorConfig) -> None:
-        # Back the facade with `_ffi.Operator` — the role-split surface
-        # defined in Rust. `Portal._over` layers the shared ergonomics on top.
-        self._portal = Portal._over(
-            lambda dispatcher: _ffi.Operator(config._inner, dispatcher),
-            config.state_schema,
-            config.action_schema,
-        )
-
-    # -- lifecycle -----------------------------------------------------------
+    __slots__ = ()
 
     async def connect(self, url: str, token: str) -> None:
         """Join the room. Returns once synced to the robot's clock; raises
         `PortalError.TimeSyncTimeout` if no robot answers within 10 s."""
         await self._portal.connect(url, token)
-
-    async def disconnect(self) -> None:
-        await self._portal.disconnect()
-
-    def close(self) -> None:
-        self._portal.close()
-
-    # -- publish (operator-side) ---------------------------------------------
-
-    def send_action(
-        self,
-        values: Dict[str, Any],
-        timestamp_us: Optional[int] = None,
-        in_reply_to_ts_us: Optional[int] = None,
-    ) -> None:
-        self._portal.send_action(values, timestamp_us, in_reply_to_ts_us)
-
-    # -- receive (operator-side) ---------------------------------------------
 
     def on_state(self, callback: Callable[[State], Any]) -> None:
         self._portal.on_state(callback)
@@ -1973,115 +2024,85 @@ class Operator:
     def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
         return self._portal.get_video_frame(track_name)
 
-    # -- action subscription (HITL recording, shadow eval) -------------------
-
-    def on_action(self, callback: Callable[[Action], Any]) -> None:
-        """Fire on each action the `OperatorConfig`'s action subscription
-        lets through (`"active"` or `"all"`). `action.sender` and
-        `action.active` are stamped at gate time; use them for dataset row
-        labels rather than `active_operator()` to avoid handoff races.
-
-        Never fires with the default `"none"` subscription.
-        """
-        self._portal.on_action(callback)
-
-    def get_action(self) -> Optional[Action]:
-        """Latest delivered action, or `None` if none received. Requires an
-        action subscription other than `"none"` for any value to land here.
-        """
-        return self._portal.get_action()
-
-    # -- multi-controller ----------------------------------------------------
-
-    def local_identity(self) -> Optional[str]:
-        return self._portal.local_identity()
-
-    def active_operator(self) -> Optional[str]:
-        return self._portal.active_operator()
-
-    async def set_active_operator(self, identity: Optional[str]) -> None:
-        await self._portal.set_active_operator(identity)
-
-    def operators(self) -> List[str]:
-        return self._portal.operators()
-
-    def observers(self) -> List[str]:
-        return self._portal.observers()
-
     def robot_identity(self) -> Optional[str]:
         return self._portal.robot_identity()
 
-    def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
-        self._portal.on_operator_joined(callback)
 
-    def on_operator_left(self, callback: Callable[[str], Any]) -> None:
-        self._portal.on_operator_left(callback)
+class Robot(_RoleBase):
+    """Robot-side Portal facade.
 
-    def on_active_operator_changed(
-        self,
-        callback: Callable[[Optional[str]], Any],
-    ) -> None:
-        self._portal.on_active_operator_changed(callback)
+    Wraps a `Portal` instance constructed with `Role.ROBOT` and exposes only
+    the methods that make sense on the robot side (publish state and video,
+    receive actions, control plane). Callers who want the
+    unified surface can keep using `Portal` directly.
+    """
 
-    # -- time sync -----------------------------------------------------------
+    __slots__ = ()
 
-    def now_us(self) -> int:
-        """Now, in microseconds on the robot's clock."""
-        return self._portal.now_us()
-
-    def on_time_synced(self, callback: Callable[[], Any]) -> None:
-        """Fire on the first sync with the robot's clock, and after each resync."""
-        self._portal.on_time_synced(callback)
-
-    # -- keypoints -----------------------------------------------------------
-
-    async def send_keypoint(
-        self,
-        type: str,
-        payload: Optional[Dict[str, Any]] = None,
-        timestamp_us: Optional[int] = None,
-    ) -> List[str]:
-        """Send an annotation to the room. See `Portal.send_keypoint`."""
-        return await self._portal.send_keypoint(type, payload, timestamp_us)
-
-    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
-        """Fire on every keypoint in the room, this peer's own included."""
-        self._portal.on_keypoint(callback)
-
-    # -- rpc -----------------------------------------------------------------
-
-    def register_rpc_method(
-        self,
-        method: str,
-        handler: Callable[[RpcInvocationData], Any],
-    ) -> None:
-        self._portal.register_rpc_method(method, handler)
-
-    def unregister_rpc_method(self, method: str) -> None:
-        self._portal.unregister_rpc_method(method)
-
-    async def perform_rpc(
-        self,
-        method: str,
-        payload: str = "",
-        destination: Optional[str] = None,
-        response_timeout_ms: Optional[int] = None,
-    ) -> str:
-        return await self._portal.perform_rpc(
-            method, payload, destination, response_timeout_ms
+    def __init__(self, config: RobotConfig) -> None:
+        # Back the facade with `_ffi.Robot` — the role-split surface defined
+        # in Rust. `Portal._over` layers the shared ergonomics (typed values,
+        # numpy, asyncio callback hopping) on top.
+        self._portal = Portal._over(
+            lambda dispatcher: _ffi.Robot(config._inner, dispatcher),
+            config.state_schema,
+            config.action_schema,
+            config.telemetry_schema,
         )
 
-    # -- metrics -------------------------------------------------------------
+    # -- publish (robot-side) ------------------------------------------------
 
-    def metrics(self) -> PortalMetrics:
-        return self._portal.metrics()
+    def send_video_frame(
+        self,
+        track_name: str,
+        frame: Any,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_video_frame(track_name, frame, width, height, timestamp_us)
 
-    def reset_metrics(self) -> None:
-        self._portal.reset_metrics()
+    def send_state(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_state(values, timestamp_us)
 
 
+class Operator(_ReceivingRoleBase):
+    """Operator-side Portal facade.
 
-class Observer:
+    Wraps a `Portal` instance constructed with `Role.OPERATOR` and exposes
+    only the methods that make sense on the operator side (publish actions,
+    receive observations and video, control plane). Callers who
+    want the unified surface can keep using `Portal` directly.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, config: OperatorConfig) -> None:
+        # Back the facade with `_ffi.Operator` — the role-split surface
+        # defined in Rust. `Portal._over` layers the shared ergonomics on top.
+        self._portal = Portal._over(
+            lambda dispatcher: _ffi.Operator(config._inner, dispatcher),
+            config.state_schema,
+            config.action_schema,
+            config.telemetry_schema,
+        )
+
+    # -- publish (operator-side) ---------------------------------------------
+
+    def send_action(
+        self,
+        values: Dict[str, Any],
+        timestamp_us: Optional[int] = None,
+        in_reply_to_ts_us: Optional[int] = None,
+    ) -> None:
+        self._portal.send_action(values, timestamp_us, in_reply_to_ts_us)
+
+
+class Observer(_ReceivingRoleBase):
     """Observer-side Portal facade.
 
     An observer sees everything in the room but never sends state or
@@ -2090,25 +2111,21 @@ class Observer:
     operators and observers alike.
     """
 
-    __slots__ = ("_portal", "_config", "_recorder")
+    __slots__ = ("_config", "_recorder")
 
     def __init__(self, config: ObserverConfig) -> None:
-        # Back the facade with `_ffi.Operator` — the role-split surface
+        # Back the facade with `_ffi.Observer` — the role-split surface
         # defined in Rust. `Portal._over` layers the shared ergonomics on top.
         self._portal = Portal._over(
             lambda dispatcher: _ffi.Observer(config._inner, dispatcher),
             config.state_schema,
             config.action_schema,
+            config.telemetry_schema,
         )
         self._config = config
         self._recorder: Optional[Recorder] = None
 
     # -- lifecycle -----------------------------------------------------------
-
-    async def connect(self, url: str, token: str) -> None:
-        """Join the room. Returns once synced to the robot's clock; raises
-        `PortalError.TimeSyncTimeout` if no robot answers within 10 s."""
-        await self._portal.connect(url, token)
 
     async def disconnect(self) -> None:
         """Disconnect, then finish any recording: queued records are written
@@ -2130,8 +2147,9 @@ class Observer:
         metrics_interval_s: Optional[float] = 1.0,
     ) -> None:
         """Write everything this observer hears to `sink`: state, video
-        frames, actions (per the action subscription) and keypoints, in the
-        order they arrive, plus `metrics()` every `metrics_interval_s`
+        frames, actions (per the action subscription), keypoints and
+        telemetry (to sinks that define `write_telemetry`), in the order
+        they arrive, plus `metrics()` every `metrics_interval_s`
         seconds (`None` turns that off).
 
         Calls `sink.open` right away and raises what it raises. The sink is
@@ -2149,6 +2167,7 @@ class Observer:
             _Converters(
                 state=lambda raw: _wrap_state(raw, portal._state_schema),
                 action=lambda raw: _wrap_action(raw, portal._action_schema),
+                telemetry=lambda raw: _wrap_telemetry(raw, portal._telemetry_schema),
                 keypoint=_wrap_keypoint,
                 metrics=portal.metrics,
             ),
@@ -2161,6 +2180,7 @@ class Observer:
                 local_identity=portal.local_identity(),
                 state_schema=list(self._config.state_schema),
                 action_schema=list(self._config.action_schema),
+                telemetry_schema=list(self._config.telemetry_schema),
                 video_tracks=list(self._config.video_track_specs),
                 time_sync_source=self._config.time_sync_source,
                 started_at_us=portal.now_us(),
@@ -2194,134 +2214,6 @@ class Observer:
         """Observers never publish video: always raises `PortalError.WrongRole`."""
         raise PortalError.WrongRole("an observer cannot send video")
 
-    # -- receive ---------------------------------------------
-
-    def on_state(self, callback: Callable[[State], Any]) -> None:
-        self._portal.on_state(callback)
-
-    def on_observation(self, callback: Callable[[Observation], Any]) -> None:
-        self._portal.on_observation(callback)
-
-    def on_video_frame(
-        self,
-        track_name: str,
-        callback: Callable[[str, VideoFrameData], Any],
-    ) -> None:
-        self._portal.on_video_frame(track_name, callback)
-
-    def on_drop(
-        self,
-        callback: Callable[[List[Dict[str, Any]]], Any],
-    ) -> None:
-        self._portal.on_drop(callback)
-
-    def get_state(self) -> Optional[State]:
-        return self._portal.get_state()
-
-    def get_observation(self) -> Optional[Observation]:
-        return self._portal.get_observation()
-
-    def get_video_frame(self, track_name: str) -> Optional[VideoFrameData]:
-        return self._portal.get_video_frame(track_name)
-
-    # -- action subscription (HITL recording, shadow eval) -------------------
-
-    def on_action(self, callback: Callable[[Action], Any]) -> None:
-        """Fire on each action the `ObserverConfig`'s action subscription
-        lets through (`"active"` or `"all"`). `action.sender` and
-        `action.active` are stamped at gate time; use them for dataset row
-        labels rather than `active_operator()` to avoid handoff races.
-
-        Observers default to `"active"`: what the robot executes.
-        """
-        self._portal.on_action(callback)
-
-    def get_action(self) -> Optional[Action]:
-        """Latest delivered action, or `None` if none received. Requires an
-        action subscription other than `"none"` for any value to land here.
-        """
-        return self._portal.get_action()
-
-    # -- multi-controller ----------------------------------------------------
-
-    def local_identity(self) -> Optional[str]:
-        return self._portal.local_identity()
-
-    def active_operator(self) -> Optional[str]:
-        return self._portal.active_operator()
-
-    async def set_active_operator(self, identity: Optional[str]) -> None:
-        await self._portal.set_active_operator(identity)
-
-    def operators(self) -> List[str]:
-        return self._portal.operators()
-
-    def observers(self) -> List[str]:
-        return self._portal.observers()
-
-    def robot_identity(self) -> Optional[str]:
-        return self._portal.robot_identity()
-
-    def on_operator_joined(self, callback: Callable[[str], Any]) -> None:
-        self._portal.on_operator_joined(callback)
-
-    def on_operator_left(self, callback: Callable[[str], Any]) -> None:
-        self._portal.on_operator_left(callback)
-
-    def on_active_operator_changed(
-        self,
-        callback: Callable[[Optional[str]], Any],
-    ) -> None:
-        self._portal.on_active_operator_changed(callback)
-
-    # -- time sync -----------------------------------------------------------
-
-    def now_us(self) -> int:
-        """Now, in microseconds on the robot's clock."""
-        return self._portal.now_us()
-
-    def on_time_synced(self, callback: Callable[[], Any]) -> None:
-        """Fire on the first sync with the robot's clock, and after each resync."""
-        self._portal.on_time_synced(callback)
-
-    # -- keypoints -----------------------------------------------------------
-
-    async def send_keypoint(
-        self,
-        type: str,
-        payload: Optional[Dict[str, Any]] = None,
-        timestamp_us: Optional[int] = None,
-    ) -> List[str]:
-        """Send an annotation to the room. See `Portal.send_keypoint`."""
-        return await self._portal.send_keypoint(type, payload, timestamp_us)
-
-    def on_keypoint(self, callback: Callable[[Keypoint], Any]) -> None:
-        """Fire on every keypoint in the room, this peer's own included."""
-        self._portal.on_keypoint(callback)
-
-    # -- rpc -----------------------------------------------------------------
-
-    def register_rpc_method(
-        self,
-        method: str,
-        handler: Callable[[RpcInvocationData], Any],
-    ) -> None:
-        self._portal.register_rpc_method(method, handler)
-
-    def unregister_rpc_method(self, method: str) -> None:
-        self._portal.unregister_rpc_method(method)
-
-    async def perform_rpc(
-        self,
-        method: str,
-        payload: str = "",
-        destination: Optional[str] = None,
-        response_timeout_ms: Optional[int] = None,
-    ) -> str:
-        return await self._portal.perform_rpc(
-            method, payload, destination, response_timeout_ms
-        )
-
     # -- metrics -------------------------------------------------------------
 
     def metrics(self) -> PortalMetrics:
@@ -2331,8 +2223,7 @@ class Observer:
         m.observer = recorder.metrics() if recorder is not None else ObserverMetrics()
         return m
 
-    def reset_metrics(self) -> None:
-        self._portal.reset_metrics()
+
 
 __all__ = [
     "Role",
@@ -2346,6 +2237,7 @@ __all__ = [
     "FrameVideoSpec",
     "TypedScalar",
     "DEFAULT_MJPEG_QUALITY",
+    "RESERVED_TELEMETRY_PREFIX",
     "PortalConfig",
     "Portal",
     "RobotConfig",
@@ -2357,6 +2249,7 @@ __all__ = [
     "Observation",
     "Action",
     "State",
+    "Telemetry",
     "Keypoint",
     "VideoFrameData",
     "PortalMetrics",

@@ -32,6 +32,10 @@ pub const DEFAULT_MJPEG_QUALITY: u8 = 90;
 /// motion.
 pub const DEFAULT_H264_MAX_BITRATE_KBPS: u32 = 10_000;
 
+/// Telemetry field names starting with this are reserved for fields Portal
+/// itself publishes. `/` otherwise namespaces freely: `power/battery_v`.
+pub const RESERVED_TELEMETRY_PREFIX: &str = "portal/";
+
 /// A single schema entry: field name plus declared on-wire dtype.
 ///
 /// Named for parity with the UniFFI-facing `FieldSpec` record the
@@ -181,6 +185,7 @@ pub struct PortalConfig {
     pub(crate) video_tracks: Vec<VideoTrackSpec>,
     pub(crate) state_schema: Vec<FieldSpec>,
     pub(crate) action_schema: Vec<FieldSpec>,
+    pub(crate) telemetry_schema: Vec<FieldSpec>,
     pub(crate) state_reliable: bool,
     pub(crate) action_reliable: bool,
     /// Lossy actions older than this on arrival are dropped. `None` keeps all.
@@ -224,6 +229,7 @@ impl PortalConfig {
             video_tracks: Vec::new(),
             state_schema: Vec::new(),
             action_schema: Vec::new(),
+            telemetry_schema: Vec::new(),
             state_reliable: false,
             action_reliable: false,
             action_max_age_ms: None,
@@ -423,6 +429,29 @@ impl PortalConfig {
         I: IntoIterator<Item = F>,
     {
         self.action_schema.extend(schema.into_iter().map(Into::into));
+    }
+
+    /// Declare telemetry fields with per-field dtype. Order is significant
+    /// and must match on every peer. Appends to any previous declaration.
+    ///
+    /// Telemetry is side-channel data any peer may publish (battery, temps,
+    /// CPU): lossy, never bundled into observations. Names may be
+    /// namespaced with `/`. Same input flexibility as `add_state_typed`.
+    ///
+    /// Panics on a name starting with `RESERVED_TELEMETRY_PREFIX` (`portal/`).
+    pub fn add_telemetry_typed<F, I>(&mut self, schema: I)
+    where
+        F: Into<FieldSpec>,
+        I: IntoIterator<Item = F>,
+    {
+        for field in schema.into_iter().map(Into::into) {
+            assert!(
+                !is_reserved_telemetry_name(&field.name),
+                "telemetry field '{}' uses the reserved '{RESERVED_TELEMETRY_PREFIX}' namespace",
+                field.name
+            );
+            self.telemetry_schema.push(field);
+        }
     }
 
     /// Unified observation rate (set to the video capture rate if state and
@@ -677,6 +706,17 @@ impl PortalConfig {
         self.action_schema.iter().map(|f| f.name.as_str())
     }
 
+    /// Ordered telemetry field names. Derived from `telemetry_schema`; does
+    /// not allocate.
+    pub fn telemetry_fields(&self) -> impl Iterator<Item = &str> {
+        self.telemetry_schema.iter().map(|f| f.name.as_str())
+    }
+
+    /// Full telemetry schema.
+    pub fn telemetry_schema(&self) -> &[FieldSpec] {
+        &self.telemetry_schema
+    }
+
     /// Full state schema.
     pub fn state_schema(&self) -> &[FieldSpec] {
         &self.state_schema
@@ -763,9 +803,28 @@ impl PortalConfig {
     }
 }
 
+/// Whether `name` falls in the namespace reserved for Portal's own telemetry.
+pub fn is_reserved_telemetry_name(name: &str) -> bool {
+    name.starts_with(RESERVED_TELEMETRY_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "reserved")]
+    fn reserved_telemetry_namespace_panics() {
+        let mut cfg = PortalConfig::new("s", Role::Robot);
+        cfg.add_telemetry_typed([("portal/rtt_us", DType::F64)]);
+    }
+
+    #[test]
+    fn telemetry_names_namespace_with_slashes() {
+        let mut cfg = PortalConfig::new("s", Role::Robot);
+        cfg.add_telemetry_typed([("power/battery_v", DType::F32), ("portalish", DType::U8)]);
+        assert_eq!(cfg.telemetry_fields().collect::<Vec<_>>(), ["power/battery_v", "portalish"]);
+    }
 
     fn cfg() -> PortalConfig {
         PortalConfig::new("demo", Role::Robot)

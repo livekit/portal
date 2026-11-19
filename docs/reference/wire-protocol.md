@@ -19,6 +19,7 @@ Each logical channel maps to one LiveKit primitive on one reserved topic.
 | Frame video | `portal_frame_video` | byte stream | yes | robot |
 | Clock | `portal_clock` | data packet | no | robot answers, others ping |
 | Keypoint | `portal_keypoint` | data packet | yes | any role |
+| Telemetry | `portal_telemetry` | data packet | no | any role |
 | WebRTC video | the track name | media track | n/a | robot |
 
 \* by default; `state_reliable` and `action_reliable` make them reliable.
@@ -73,6 +74,10 @@ pointer is set before anyone connects.
 Both are LiveKit data packets, lossy unless `state_reliable` / `action_reliable`
 is set, sharing a little-endian layout. Action
 carries one extra header field.
+
+Telemetry, on `portal_telemetry`, uses the state layout exactly, with the
+fingerprint computed from the telemetry schema. It is always lossy, and a
+receiver keys its overtaken check by the sending participant.
 
 State, on `portal_state`:
 

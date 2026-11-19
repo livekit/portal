@@ -59,6 +59,7 @@ impl Drop for Lane {
 pub(crate) struct Lanes {
     state: Lane,
     action: Lane,
+    telemetry: Lane,
     clock: Lane,
 }
 
@@ -74,6 +75,7 @@ impl Lanes {
         Self {
             state: Lane::spawn(local_participant.clone(), PUBLISH_QUEUE_CAP),
             action: Lane::spawn(local_participant.clone(), PUBLISH_QUEUE_CAP),
+            telemetry: Lane::spawn(local_participant.clone(), PUBLISH_QUEUE_CAP),
             clock: Lane::spawn(local_participant.clone(), CLOCK_QUEUE_CAP),
         }
     }
@@ -84,6 +86,7 @@ impl Lanes {
         let lane = match stream {
             Stream::State => &self.state,
             Stream::Action => &self.action,
+            Stream::Telemetry => &self.telemetry,
             Stream::Clock => &self.clock,
             Stream::Keypoint | Stream::Control | Stream::Presence => {
                 log::warn!("[publish-failed] no queue for stream '{}'", stream.name());

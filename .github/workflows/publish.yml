@@ -89,7 +89,7 @@ jobs:
         run: .github/scripts/install-clang.sh
 
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
 
       # yuv-sys renames libyuv's symbols only when it first copies libyuv into
       # OUT_DIR. A run cancelled mid-rename gets cached (cache-on-failure), and
@@ -99,7 +99,7 @@ jobs:
         run: rm -rf target/*/build/yuv-sys-*/out/libyuv
         shell: bash
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -142,7 +142,7 @@ jobs:
         with:
           fetch-depth: 0  # full history so hatch-vcs resolves the version tag
 
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 

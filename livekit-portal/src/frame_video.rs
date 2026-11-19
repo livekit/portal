@@ -33,7 +33,7 @@
 
 use std::sync::Arc;
 
-use livekit::StreamByteOptions;
+use livekit::SendByteOptions;
 use livekit::prelude::*;
 use livekit_portal_core::Input;
 use livekit_portal_core::config::VideoTrackSpec;
@@ -85,7 +85,7 @@ impl FrameVideoPublisher {
                 let Some(payload) = slot.frame.lock().take() else { continue };
                 task_metrics.record_sent_bytes(payload.len());
                 let options =
-                    StreamByteOptions::new_with_topic(FRAME_VIDEO_TOPIC).with_compress(compress);
+                    SendByteOptions::new_with_topic(FRAME_VIDEO_TOPIC).with_compress(compress);
                 if let Err(e) = local_participant.send_bytes(payload, options).await {
                     log::warn!(
                         "[publish-failed] frame_video '{track_name}' byte stream failed: {e}"

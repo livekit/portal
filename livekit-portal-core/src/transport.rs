@@ -16,9 +16,6 @@
 //! subscribers receive them tagged with the publisher, and every publish
 //! carries a delivery intent. A transport declares what it can do natively
 //! in `TransportCaps`; the core polyfills the rest.
-//!
-//! See `docs/transports.md` for how LiveKit, the loopback and MoQ map onto
-//! this.
 
 use crate::config::PortalConfig;
 use crate::error::{PortalError, PortalResult};

@@ -88,6 +88,7 @@ def _make_token(
     room: str,
     *,
     attributes: Optional[dict] = None,
+    can_update_own_metadata: bool = True,
 ) -> str:
     # Imported lazily so the regular test suite doesn't need livekit-api
     # installed when integration tests are skipped.
@@ -100,7 +101,7 @@ def _make_token(
         can_subscribe=True,
         # v0.2 multi-controller relies on Portal self-setting the `role`
         # attribute on connect; the grant must permit it.
-        can_update_own_metadata=True,
+        can_update_own_metadata=can_update_own_metadata,
     )
     builder = (
         api.AccessToken(API_KEY, API_SECRET)

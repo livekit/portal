@@ -296,8 +296,16 @@ impl Portal {
 
         // Self-set the role attribute so other participants can discover us.
         // Token-mint may also have set this key; in that case `set_attributes`
-        // is effectively a no-op for the same value.
-        if let Err(e) = local_participant.set_attributes(wire::role_attributes(role)).await {
+        // is effectively a no-op for the same value. The SDK registers for the
+        // reply only after sending, so a fast server's reply can be missed and
+        // the call times out although it applied: trust the server's echo.
+        let role_attributes = wire::role_attributes(role);
+        let failed = local_participant.set_attributes(role_attributes.clone()).await.err();
+        let applied = || {
+            let current = local_participant.attributes();
+            role_attributes.iter().all(|(k, v)| current.get(k) == Some(v))
+        };
+        if let Some(e) = failed.filter(|_| !applied()) {
             // Most common cause: the token grant did not include
             // `canUpdateOwnMetadata`. Surface a clear error so callers fix
             // their token-mint script rather than silently leaving the

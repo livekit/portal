@@ -176,18 +176,19 @@ pub struct SyncBuffer<F> {
     now_us: u64,
 }
 
+pub struct SyncBufferOptions<'a> {
+    pub video_track_names: &'a [String],
+    pub state_schema: Vec<FieldSpec>,
+    pub config: SyncConfig,
+    /// Per-track, parallel to `video_track_names`. A length mismatch (or an
+    /// empty vec) falls back to `config.default_stall` for every track.
+    pub stall: Vec<StallConfig>,
+    pub metrics: Arc<MetricsRegistry>,
+}
+
 impl<F: FramePayload> SyncBuffer<F> {
-    /// `stall` is the per-track stall configuration, parallel to
-    /// `video_track_names`. A length mismatch (or an empty vec) falls back to
-    /// `config.default_stall` for every track, so test and embedding callers
-    /// that do not care can pass `Vec::new()`.
-    pub fn new(
-        video_track_names: &[String],
-        state_schema: Vec<FieldSpec>,
-        config: SyncConfig,
-        stall: Vec<StallConfig>,
-        metrics: Arc<MetricsRegistry>,
-    ) -> Self {
+    pub fn new(options: SyncBufferOptions<'_>) -> Self {
+        let SyncBufferOptions { video_track_names, state_schema, config, stall, metrics } = options;
         let n = video_track_names.len();
         let track_index =
             video_track_names.iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
@@ -633,7 +634,13 @@ mod tests {
         // so the internal observation builder has a dtype per position.
         let schema: Vec<FieldSpec> =
             fields.into_iter().map(|n| FieldSpec::new(n, DType::F64)).collect();
-        SyncBuffer::new(names, schema, config, Vec::new(), metrics)
+        SyncBuffer::new(SyncBufferOptions {
+            video_track_names: names,
+            state_schema: schema,
+            config,
+            stall: Vec::new(),
+            metrics,
+        })
     }
 
     #[test]
@@ -1364,7 +1371,13 @@ mod tests {
         let metrics = Arc::new(MetricsRegistry::new(&tracks));
         let schema: Vec<FieldSpec> =
             fields.into_iter().map(|n| FieldSpec::new(n, DType::F64)).collect();
-        let mut buf = SyncBuffer::new(&tracks, schema, reuse_config(), Vec::new(), metrics.clone());
+        let mut buf = SyncBuffer::new(SyncBufferOptions {
+            video_track_names: &tracks,
+            state_schema: schema,
+            config: reuse_config(),
+            stall: Vec::new(),
+            metrics: metrics.clone(),
+        });
 
         // Fresh emission #1.
         let _ = buf.push_frame(
@@ -1684,7 +1697,13 @@ mod tests {
             StallConfig { max_lag_us: Some(50_000), behavior: StallBehavior::Drop },
             StallConfig { max_lag_us: Some(50_000), behavior: StallBehavior::Freeze },
         ];
-        let mut buf = SyncBuffer::new(&tracks, schema, config, stall, metrics);
+        let mut buf = SyncBuffer::new(SyncBufferOptions {
+            video_track_names: &tracks,
+            state_schema: schema,
+            config,
+            stall,
+            metrics,
+        });
 
         let _ = push_f(&mut buf, "wrist", 10_000);
         let _ = push_f(&mut buf, "scene", 10_000);

@@ -45,7 +45,7 @@ use crate::rpc::RpcError;
 use crate::serialization::{
     DecodeError, action_fingerprint, deserialize_action, deserialize_values, schema_fingerprint,
 };
-use crate::sync_buffer::{SyncBuffer, SyncOutput};
+use crate::sync_buffer::{SyncBuffer, SyncBufferOptions, SyncOutput};
 use crate::transport::{Delivery, PeerId, Presence, Stream, TransportCaps, VideoCaps};
 use crate::types::{
     Action, ActionSubscription, Observation, Role, State, Telemetry, TypedValue, VideoFrameData,
@@ -459,13 +459,13 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             }
             Role::Operator | Role::Observer => {
                 if self.config.observation_sync() {
-                    self.sync_buffer = Some(SyncBuffer::new(
-                        &self.track_names,
-                        self.config.state_schema().to_vec(),
-                        self.config.sync_config(),
-                        self.config.stall_configs(&self.track_names),
-                        self.metrics.clone(),
-                    ));
+                    self.sync_buffer = Some(SyncBuffer::new(SyncBufferOptions {
+                        video_track_names: &self.track_names,
+                        state_schema: self.config.state_schema().to_vec(),
+                        config: self.config.sync_config(),
+                        stall: self.config.stall_configs(&self.track_names),
+                        metrics: self.metrics.clone(),
+                    }));
                 }
                 let schema = self.config.action_schema();
                 if role == Role::Operator && !schema.is_empty() {

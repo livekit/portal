@@ -366,16 +366,22 @@ impl PortalConfig {
         let VideoOptions { quality, max_bitrate_kbps, simulcast, screencast, resolution } = options;
         let name = name.into();
         assert!(
-            !self.has_track(&name),
+            !self.video_tracks.iter().any(|s| s.name == name),
             "video track '{name}' already declared (each track name must be unique \
              across add_video calls)"
         );
-        if codec == Codec::Mjpeg {
+        // Only the MJPEG encoder reads `quality`. Canonicalize it to 0
+        // everywhere else so a spec never reports a JPEG quality nothing will
+        // use.
+        let quality = if codec == Codec::Mjpeg {
             assert!(
                 (1..=100).contains(&quality),
                 "MJPEG quality must be in 1..=100, got {quality}"
             );
-        }
+            quality
+        } else {
+            0
+        };
         if let Some(kbps) = max_bitrate_kbps {
             assert!(kbps > 0, "max_bitrate_kbps must be > 0, got {kbps}");
         }
@@ -385,11 +391,6 @@ impl PortalConfig {
                 "resolution must be even and non-zero, got {width}x{height}"
             );
         }
-        // Only the MJPEG encoder reads `quality`. Canonicalize it to 0
-        // everywhere else so a spec never reports a JPEG quality nothing will
-        // use, and so a YAML-built config compares equal to the same config
-        // built programmatically — the loader already passes 0 here.
-        let quality = if codec == Codec::Mjpeg { quality } else { 0 };
         self.video_tracks.push(VideoTrackSpec::new(
             name,
             codec,
@@ -399,10 +400,6 @@ impl PortalConfig {
             screencast.unwrap_or(false),
             resolution,
         ));
-    }
-
-    fn has_track(&self, name: &str) -> bool {
-        self.video_tracks.iter().any(|s| s.name == name)
     }
 
     /// Declare state fields with per-field dtype. Order is significant and
@@ -658,7 +655,7 @@ impl PortalConfig {
             None if self.reuse_stale_frames => 0,
             // Otherwise: the point capacity eviction would have reached anyway,
             // so the default timing matches earlier versions.
-            None => self.slack as u64 * 1_000_000 / self.fps.max(1) as u64,
+            None => self.slack as u64 * 1_000_000 / self.fps as u64,
         };
 
         StallConfig { max_lag_us: Some(max_lag_us), behavior }

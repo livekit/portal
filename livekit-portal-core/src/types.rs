@@ -108,13 +108,7 @@ impl TypedValue {
             TypedValue::U32(v) => v as f64,
             TypedValue::U16(v) => v as f64,
             TypedValue::U8(v) => v as f64,
-            TypedValue::Bool(v) => {
-                if v {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
+            TypedValue::Bool(v) => f64::from(v),
         }
     }
 }
@@ -339,7 +333,7 @@ pub fn to_value_maps(
 ) -> (HashMap<String, TypedValue>, HashMap<String, f64>) {
     let mut typed = HashMap::with_capacity(schema.len());
     let mut raw = HashMap::with_capacity(schema.len());
-    for (f, v) in schema.iter().zip(values.iter()) {
+    for (f, v) in schema.iter().zip(values) {
         typed.insert(f.name.clone(), TypedValue::from_f64(*v, f.dtype));
         raw.insert(f.name.clone(), *v);
     }

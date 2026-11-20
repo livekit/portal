@@ -68,6 +68,23 @@ impl DType {
     /// Caller uses the flag to emit a rate-limited warning.
     #[doc(hidden)]
     pub fn encode(self, v: f64, out: &mut Vec<u8>) -> bool {
+        // Saturating cast to `$t`. `NaN` maps to 0. Values exactly equal to
+        // `$t::MIN` or `$t::MAX` are representable and not reported.
+        macro_rules! saturate {
+            ($t:ty) => {{
+                let (x, saturated) = if v.is_nan() {
+                    (0, true)
+                } else if v > <$t>::MAX as f64 {
+                    (<$t>::MAX, true)
+                } else if v < <$t>::MIN as f64 {
+                    (<$t>::MIN, true)
+                } else {
+                    (v as $t, false)
+                };
+                out.extend_from_slice(&x.to_le_bytes());
+                saturated
+            }};
+        }
         match self {
             DType::F64 => {
                 out.extend_from_slice(&v.to_le_bytes());
@@ -78,40 +95,15 @@ impl DType {
                 out.extend_from_slice(&f.to_le_bytes());
                 v.is_finite() && !f.is_finite()
             }
-            DType::I32 => {
-                let (x, sat) = saturate_i32(v);
-                out.extend_from_slice(&x.to_le_bytes());
-                sat
-            }
-            DType::I16 => {
-                let (x, sat) = saturate_i16(v);
-                out.extend_from_slice(&x.to_le_bytes());
-                sat
-            }
-            DType::I8 => {
-                let (x, sat) = saturate_i8(v);
-                out.extend_from_slice(&x.to_le_bytes());
-                sat
-            }
-            DType::U32 => {
-                let (x, sat) = saturate_u32(v);
-                out.extend_from_slice(&x.to_le_bytes());
-                sat
-            }
-            DType::U16 => {
-                let (x, sat) = saturate_u16(v);
-                out.extend_from_slice(&x.to_le_bytes());
-                sat
-            }
-            DType::U8 => {
-                let (x, sat) = saturate_u8(v);
-                out.extend_from_slice(&x.to_le_bytes());
-                sat
-            }
+            DType::I32 => saturate!(i32),
+            DType::I16 => saturate!(i16),
+            DType::I8 => saturate!(i8),
+            DType::U32 => saturate!(u32),
+            DType::U16 => saturate!(u16),
+            DType::U8 => saturate!(u8),
             DType::Bool => {
-                let saturated = v.is_nan();
-                out.push(if v != 0.0 && !v.is_nan() { 1 } else { 0 });
-                saturated
+                out.push(u8::from(v != 0.0 && !v.is_nan()));
+                v.is_nan()
             }
         }
     }
@@ -119,6 +111,9 @@ impl DType {
     /// Decode `buf[..self.size_bytes()]` into an `f64`.
     #[doc(hidden)]
     pub fn decode(self, buf: &[u8]) -> PortalResult<f64> {
+        fn le<const N: usize>(buf: &[u8]) -> [u8; N] {
+            *buf.first_chunk().expect("length checked by decode")
+        }
         let need = self.size_bytes();
         if buf.len() < need {
             return Err(PortalError::Deserialization(format!(
@@ -127,69 +122,18 @@ impl DType {
             )));
         }
         Ok(match self {
-            DType::F64 => f64::from_le_bytes(buf[..8].try_into().unwrap()),
-            DType::F32 => f32::from_le_bytes(buf[..4].try_into().unwrap()) as f64,
-            DType::I32 => i32::from_le_bytes(buf[..4].try_into().unwrap()) as f64,
-            DType::I16 => i16::from_le_bytes(buf[..2].try_into().unwrap()) as f64,
-            DType::I8 => i8::from_le_bytes([buf[0]]) as f64,
-            DType::U32 => u32::from_le_bytes(buf[..4].try_into().unwrap()) as f64,
-            DType::U16 => u16::from_le_bytes(buf[..2].try_into().unwrap()) as f64,
+            DType::F64 => f64::from_le_bytes(le(buf)),
+            DType::F32 => f32::from_le_bytes(le(buf)) as f64,
+            DType::I32 => i32::from_le_bytes(le(buf)) as f64,
+            DType::I16 => i16::from_le_bytes(le(buf)) as f64,
+            DType::I8 => buf[0] as i8 as f64,
+            DType::U32 => u32::from_le_bytes(le(buf)) as f64,
+            DType::U16 => u16::from_le_bytes(le(buf)) as f64,
             DType::U8 => buf[0] as f64,
-            DType::Bool => {
-                if buf[0] == 0 {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
+            DType::Bool => f64::from(buf[0] != 0),
         })
     }
 }
-
-/// Saturating cast `f64 -> signed-int T`. Returns `(value, saturated?)`.
-/// `NaN` maps to 0 and is reported as saturated. Values exactly equal to
-/// `T::MIN` or `T::MAX` are representable and *not* reported.
-macro_rules! saturate_signed {
-    ($name:ident, $t:ty) => {
-        fn $name(v: f64) -> ($t, bool) {
-            if v.is_nan() {
-                (0, true)
-            } else if v > <$t>::MAX as f64 {
-                (<$t>::MAX, true)
-            } else if v < <$t>::MIN as f64 {
-                (<$t>::MIN, true)
-            } else {
-                (v as $t, false)
-            }
-        }
-    };
-}
-
-/// Saturating cast `f64 -> unsigned-int T`. Negative and `NaN` inputs clamp
-/// to 0 and are reported as saturated. Zero and exact `T::MAX` are
-/// representable and not reported.
-macro_rules! saturate_unsigned {
-    ($name:ident, $t:ty) => {
-        fn $name(v: f64) -> ($t, bool) {
-            if v.is_nan() {
-                (0, true)
-            } else if v < 0.0 {
-                (0, true)
-            } else if v > <$t>::MAX as f64 {
-                (<$t>::MAX, true)
-            } else {
-                (v as $t, false)
-            }
-        }
-    };
-}
-
-saturate_signed!(saturate_i32, i32);
-saturate_signed!(saturate_i16, i16);
-saturate_signed!(saturate_i8, i8);
-saturate_unsigned!(saturate_u32, u32);
-saturate_unsigned!(saturate_u16, u16);
-saturate_unsigned!(saturate_u8, u8);
 
 #[cfg(test)]
 mod tests {

@@ -34,8 +34,8 @@ use serde::Deserialize;
 
 use crate::codec::Codec;
 use crate::config::{
-    DEFAULT_MJPEG_QUALITY, PortalConfig, RESERVED_TELEMETRY_PREFIX, Resolution, VideoOptions,
-    is_reserved_telemetry_name,
+    DEFAULT_MJPEG_QUALITY, FieldSpec, PortalConfig, RESERVED_TELEMETRY_PREFIX, Resolution,
+    VideoOptions, is_reserved_telemetry_name,
 };
 use crate::dtype::DType;
 use crate::types::{ActionSubscription, Role, StallBehavior, TimeSyncSource};
@@ -86,34 +86,6 @@ fn parse_stall_behavior(s: &str, context: &str) -> Result<StallBehavior, ConfigF
 enum ActionSubscriptionFile {
     Name(String),
     Bool(bool),
-}
-
-fn parse_action_subscription(
-    v: &ActionSubscriptionFile,
-) -> Result<ActionSubscription, ConfigFileError> {
-    match v {
-        ActionSubscriptionFile::Name(s) if s == "none" => Ok(ActionSubscription::None),
-        ActionSubscriptionFile::Name(s) if s == "active" => Ok(ActionSubscription::Active),
-        ActionSubscriptionFile::Name(s) if s == "all" => Ok(ActionSubscription::All),
-        ActionSubscriptionFile::Name(other) => Err(ConfigFileError::Invalid(format!(
-            "action_subscription: expected one of none, active, all — got '{other}'"
-        ))),
-        ActionSubscriptionFile::Bool(b) => Err(ConfigFileError::Invalid(format!(
-            "action_subscription: booleans are no longer accepted; use one of none, active, \
-             all (v0.2's {b} is now '{}')",
-            if *b { "active" } else { "none" }
-        ))),
-    }
-}
-
-fn parse_time_sync_source(s: &str) -> Result<TimeSyncSource, ConfigFileError> {
-    match s {
-        "portal" => Ok(TimeSyncSource::Portal),
-        "system" => Ok(TimeSyncSource::System),
-        other => Err(ConfigFileError::Invalid(format!(
-            "time_sync_source: expected one of portal, system — got '{other}'"
-        ))),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,11 +232,20 @@ where
     }
 }
 
+impl From<FieldEntry> for FieldSpec {
+    fn from(f: FieldEntry) -> Self {
+        FieldSpec::new(f.name, f.dtype)
+    }
+}
+
 impl PortalConfig {
     /// Load a `PortalConfig` from a YAML string. `session` and `role` are
     /// supplied here because they're per-process identity, not part of the
     /// shareable wire contract. The shared E2EE key, when used, must be
     /// applied with `set_e2ee_key` after loading.
+    ///
+    /// Every check here precedes the setter that would assert on the same
+    /// input, so bad input surfaces as a typed error rather than a panic.
     pub fn from_yaml_str(
         yaml: &str,
         session: impl Into<String>,
@@ -279,22 +260,63 @@ impl PortalConfig {
                 supported: SUPPORTED_VERSION,
             });
         }
-
         if parsed.action_chunks {
             return Err(ConfigFileError::ActionChunksRemoved);
         }
 
-        validate(&parsed)?;
-
         let mut cfg = PortalConfig::new(session, role);
 
         for v in &parsed.videos {
-            let quality = v.quality.unwrap_or(match v.codec {
-                Codec::Mjpeg => DEFAULT_MJPEG_QUALITY,
-                _ => 0,
-            });
-            let resolution =
-                v.width.zip(v.height).map(|(width, height)| Resolution { width, height });
+            if cfg.video_track_names().any(|n| n == v.name) {
+                return Err(ConfigFileError::Invalid(format!(
+                    "duplicate video track '{}'",
+                    v.name
+                )));
+            }
+            let invalid =
+                |msg: String| ConfigFileError::Invalid(format!("video '{}': {msg}", v.name));
+            let quality = v.quality.unwrap_or(DEFAULT_MJPEG_QUALITY);
+            if v.codec == Codec::Mjpeg && !(1..=100).contains(&quality) {
+                return Err(invalid(format!("mjpeg quality must be in 1..=100, got {quality}")));
+            }
+            // These configure the WebRTC encoder, which byte-stream tracks
+            // never reach. Reject rather than silently ignore.
+            for (field, set) in [
+                ("max_bitrate_kbps", v.max_bitrate_kbps.is_some()),
+                ("simulcast", v.simulcast.is_some()),
+                ("screencast", v.screencast.is_some()),
+            ] {
+                if set && !v.codec.is_webrtc() {
+                    return Err(invalid(format!(
+                        "{field} applies to the WebRTC codecs only, not {:?}",
+                        v.codec
+                    )));
+                }
+            }
+            if v.max_bitrate_kbps == Some(0) {
+                return Err(invalid("max_bitrate_kbps must be > 0".into()));
+            }
+            let resolution = match (v.width, v.height) {
+                (None, None) => None,
+                (Some(_), Some(_)) if !v.codec.is_webrtc() => {
+                    return Err(invalid(format!(
+                        "width and height apply to the WebRTC codecs only, not {:?}",
+                        v.codec
+                    )));
+                }
+                (Some(width), Some(height))
+                    if width == 0
+                        || height == 0
+                        || !width.is_multiple_of(2)
+                        || !height.is_multiple_of(2) =>
+                {
+                    return Err(invalid(format!(
+                        "width and height must be even and non-zero, got {width}x{height}"
+                    )));
+                }
+                (Some(width), Some(height)) => Some(Resolution { width, height }),
+                _ => return Err(invalid("width and height must be given together".into())),
+            };
             let options = VideoOptions {
                 quality,
                 max_bitrate_kbps: v.max_bitrate_kbps,
@@ -305,24 +327,42 @@ impl PortalConfig {
             cfg.add_video(&v.name, v.codec, options);
         }
 
-        if !parsed.state.is_empty() {
-            cfg.add_state_typed(parsed.state.iter().map(|f| (f.name.clone(), f.dtype)));
-        }
-        if !parsed.action.is_empty() {
-            cfg.add_action_typed(parsed.action.iter().map(|f| (f.name.clone(), f.dtype)));
-        }
-        if !parsed.telemetry.is_empty() {
-            cfg.add_telemetry_typed(parsed.telemetry.iter().map(|f| (f.name.clone(), f.dtype)));
+        cfg.add_state_typed(parsed.state);
+        cfg.add_action_typed(parsed.action);
+        for f in parsed.telemetry {
+            if is_reserved_telemetry_name(&f.name) {
+                return Err(ConfigFileError::Invalid(format!(
+                    "telemetry '{}': the '{RESERVED_TELEMETRY_PREFIX}' namespace is reserved",
+                    f.name
+                )));
+            }
+            if cfg.telemetry_fields().any(|n| n == f.name) {
+                return Err(ConfigFileError::Invalid(format!(
+                    "duplicate telemetry field '{}'",
+                    f.name
+                )));
+            }
+            cfg.add_telemetry_typed([f]);
         }
 
-        if let Some(v) = parsed.fps {
-            cfg.set_fps(v);
+        if let Some(fps) = parsed.fps {
+            if fps == 0 {
+                return Err(ConfigFileError::Invalid("fps must be > 0".into()));
+            }
+            cfg.set_fps(fps);
         }
-        if let Some(v) = parsed.slack {
-            cfg.set_slack(v);
+        if let Some(slack) = parsed.slack {
+            if slack == 0 {
+                return Err(ConfigFileError::Invalid("slack must be > 0".into()));
+            }
+            cfg.set_slack(slack);
         }
-        if let Some(v) = parsed.tolerance {
-            cfg.set_tolerance(v);
+        if let Some(tol) = parsed.tolerance {
+            // NaN, zero, and negative reject; positive (including +inf) passes.
+            if tol.is_nan() || tol <= 0.0 {
+                return Err(ConfigFileError::Invalid("tolerance must be > 0".into()));
+            }
+            cfg.set_tolerance(tol);
         }
         if let Some(v) = parsed.state_reliable {
             cfg.set_state_reliable(v);
@@ -334,9 +374,8 @@ impl PortalConfig {
             cfg.set_action_max_age_ms(Some(v));
         }
         if let Some(v) = parsed.reuse_stale_frames {
-            // Deprecated alias; `stall_for` folds it into the stall behavior.
-            cfg.reuse_stale_frames = v;
-            cfg.sync_options_set.insert("reuse_stale_frames");
+            #[allow(deprecated)]
+            cfg.set_reuse_stale_frames(v);
         }
         if let Some(v) = &parsed.stall_behavior {
             cfg.set_stall_behavior(parse_stall_behavior(v, "stall_behavior")?);
@@ -357,10 +396,34 @@ impl PortalConfig {
             cfg.set_observation_sync(v);
         }
         if let Some(v) = &parsed.time_sync_source {
-            cfg.set_time_sync_source(parse_time_sync_source(v)?);
+            cfg.set_time_sync_source(match v.as_str() {
+                "portal" => TimeSyncSource::Portal,
+                "system" => TimeSyncSource::System,
+                other => {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "time_sync_source: expected one of portal, system — got '{other}'"
+                    )));
+                }
+            });
         }
-        if let Some(v) = &parsed.action_subscription {
-            cfg.set_action_subscription(parse_action_subscription(v)?);
+        if let Some(v) = parsed.action_subscription {
+            cfg.set_action_subscription(match v {
+                ActionSubscriptionFile::Name(s) if s == "none" => ActionSubscription::None,
+                ActionSubscriptionFile::Name(s) if s == "active" => ActionSubscription::Active,
+                ActionSubscriptionFile::Name(s) if s == "all" => ActionSubscription::All,
+                ActionSubscriptionFile::Name(other) => {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "action_subscription: expected one of none, active, all — got '{other}'"
+                    )));
+                }
+                ActionSubscriptionFile::Bool(b) => {
+                    return Err(ConfigFileError::Invalid(format!(
+                        "action_subscription: booleans are no longer accepted; use one of none, \
+                         active, all (v0.2's {b} is now '{}')",
+                        if b { "active" } else { "none" }
+                    )));
+                }
+            });
         }
 
         Ok(cfg)
@@ -376,115 +439,6 @@ impl PortalConfig {
         let text = std::fs::read_to_string(path)?;
         Self::from_yaml_str(&text, session, role)
     }
-}
-
-/// Pre-flight validation: catches everything `PortalConfig`'s setters
-/// would assert on, and returns a typed error rather than letting the
-/// loader panic mid-build.
-fn validate(p: &ConfigFileV1) -> Result<(), ConfigFileError> {
-    let mut seen_video = std::collections::HashSet::new();
-    for v in &p.videos {
-        if !seen_video.insert(v.name.as_str()) {
-            return Err(ConfigFileError::Invalid(format!("duplicate video track '{}'", v.name)));
-        }
-        if v.codec == Codec::Mjpeg {
-            let q = v.quality.unwrap_or(DEFAULT_MJPEG_QUALITY);
-            if !(1..=100).contains(&q) {
-                return Err(ConfigFileError::Invalid(format!(
-                    "video '{}': mjpeg quality must be in 1..=100, got {q}",
-                    v.name
-                )));
-            }
-        }
-        if let Some(kbps) = v.max_bitrate_kbps {
-            if !v.codec.is_webrtc() {
-                return Err(ConfigFileError::Invalid(format!(
-                    "video '{}': max_bitrate_kbps applies to the WebRTC codecs only, not {:?}",
-                    v.name, v.codec
-                )));
-            }
-            if kbps == 0 {
-                return Err(ConfigFileError::Invalid(format!(
-                    "video '{}': max_bitrate_kbps must be > 0",
-                    v.name
-                )));
-            }
-        }
-        // Both toggles configure the WebRTC encoder, which byte-stream tracks
-        // never reach. Reject rather than silently ignore, same as bitrate.
-        for (field, set) in [("simulcast", v.simulcast), ("screencast", v.screencast)] {
-            if set.is_some() && !v.codec.is_webrtc() {
-                return Err(ConfigFileError::Invalid(format!(
-                    "video '{}': {field} applies to the WebRTC codecs only, not {:?}",
-                    v.name, v.codec
-                )));
-            }
-        }
-        match (v.width, v.height) {
-            (None, None) => {}
-            (Some(width), Some(height)) => {
-                if !v.codec.is_webrtc() {
-                    return Err(ConfigFileError::Invalid(format!(
-                        "video '{}': width and height apply to the WebRTC codecs only, not {:?}",
-                        v.name, v.codec
-                    )));
-                }
-                if width == 0
-                    || height == 0
-                    || !width.is_multiple_of(2)
-                    || !height.is_multiple_of(2)
-                {
-                    return Err(ConfigFileError::Invalid(format!(
-                        "video '{}': width and height must be even and non-zero, got {width}x{height}",
-                        v.name
-                    )));
-                }
-            }
-            _ => {
-                return Err(ConfigFileError::Invalid(format!(
-                    "video '{}': width and height must be given together",
-                    v.name
-                )));
-            }
-        }
-    }
-
-    let mut seen_telemetry = std::collections::HashSet::new();
-    for f in &p.telemetry {
-        if is_reserved_telemetry_name(&f.name) {
-            return Err(ConfigFileError::Invalid(format!(
-                "telemetry '{}': the '{RESERVED_TELEMETRY_PREFIX}' namespace is reserved",
-                f.name
-            )));
-        }
-        if !seen_telemetry.insert(f.name.as_str()) {
-            return Err(ConfigFileError::Invalid(format!(
-                "duplicate telemetry field '{}'",
-                f.name
-            )));
-        }
-    }
-
-    if let Some(fps) = p.fps
-        && fps == 0
-    {
-        return Err(ConfigFileError::Invalid("fps must be > 0".into()));
-    }
-    if let Some(slack) = p.slack
-        && slack == 0
-    {
-        return Err(ConfigFileError::Invalid("slack must be > 0".into()));
-    }
-    if let Some(tol) = p.tolerance {
-        // Equivalent to `!(tol > 0.0)` but explicit about NaN. Mirrors
-        // `PortalConfig::set_tolerance`'s assertion: NaN, zero, and
-        // negative all reject; positive (including +inf) passes.
-        if tol.is_nan() || tol <= 0.0 {
-            return Err(ConfigFileError::Invalid("tolerance must be > 0".into()));
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

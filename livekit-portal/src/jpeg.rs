@@ -30,7 +30,8 @@ unsafe extern "C" {
 }
 
 /// Append the 4:4:4 JPEG encoding of packed RGB24 `rgb` to `out`. `None` if
-/// `rgb` isn't `width * height * 3` bytes or libjpeg rejects the frame.
+/// libjpeg rejects the frame. Panics unless `rgb` is `width * height * 3`
+/// bytes, which callers check first.
 pub(crate) fn encode_rgb_into(
     out: &mut Vec<u8>,
     rgb: &[u8],
@@ -38,9 +39,7 @@ pub(crate) fn encode_rgb_into(
     height: u32,
     quality: u8,
 ) -> Option<()> {
-    if rgb.len() != (width as usize) * (height as usize) * 3 {
-        return None;
-    }
+    assert_eq!(rgb.len(), (width as usize) * (height as usize) * 3, "rgb size checked by caller");
     let mut buf: *mut c_uchar = std::ptr::null_mut();
     let mut len: c_ulong = 0;
     // SAFETY: `rgb` holds exactly the `width * height * 3` bytes the shim

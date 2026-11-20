@@ -18,7 +18,8 @@
 //! state packets would skew the round trip).
 
 use livekit::prelude::*;
-use livekit_portal_core::transport::Stream;
+use livekit_portal_core::livekit as wire;
+use livekit_portal_core::transport::{Delivery, Stream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -63,11 +64,28 @@ pub(crate) struct Lanes {
     clock: Lane,
 }
 
+/// The fields of a core `Output::Publish`.
 pub(crate) struct Publish {
-    pub topic: &'static str,
+    pub stream: Stream,
     pub payload: Vec<u8>,
-    pub reliable: bool,
-    pub destinations: Vec<String>,
+    pub delivery: Delivery,
+    pub to: Option<String>,
+}
+
+/// The stream's topic, reliable only for `Delivery::Reliable` (`LatestOnly`
+/// and `BestEffort` both ride the lossy channel), and LiveKit's own
+/// addressing for a hinted peer.
+impl From<Publish> for DataPacket {
+    fn from(publish: Publish) -> Self {
+        let Publish { stream, payload, delivery, to } = publish;
+        let topic = wire::topic(stream).expect("native caps never publish control or presence");
+        DataPacket {
+            payload,
+            topic: Some(topic.to_string()),
+            reliable: delivery == Delivery::Reliable,
+            destination_identities: to.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 impl Lanes {
@@ -80,42 +98,29 @@ impl Lanes {
         }
     }
 
-    /// Queue a packet without blocking. Streams without a lane (keypoints)
-    /// are published by their caller, which awaits the result.
-    pub fn send(&self, stream: Stream, publish: Publish) {
+    /// Queue a packet without blocking.
+    pub fn send(&self, publish: Publish) {
+        let stream = publish.stream;
         let lane = match stream {
             Stream::State => &self.state,
             Stream::Action => &self.action,
             Stream::Telemetry => &self.telemetry,
             Stream::Clock => &self.clock,
             Stream::Keypoint | Stream::Control | Stream::Presence => {
-                log::warn!("[publish-failed] no queue for stream '{}'", stream.name());
-                return;
+                unreachable!("keypoints are published by their sender; native caps send no others")
             }
         };
-        let topic = publish.topic;
-        let quiet = stream == Stream::Clock;
-        match lane.tx.try_send(packet(publish)) {
-            Ok(()) => {}
+        match lane.tx.try_send(publish.into()) {
             // Clock packets are dropped quietly: the next ping replaces them.
-            Err(mpsc::error::TrySendError::Full(_)) if !quiet => {
+            Err(mpsc::error::TrySendError::Full(packet)) if stream != Stream::Clock => {
+                let topic = packet.topic.unwrap_or_default();
                 log::warn!(
                     "[publish-full] topic '{topic}' queue full (cap={PUBLISH_QUEUE_CAP}), dropping packet"
                 );
             }
-            // Full clock lane, or the send task is gone (disconnect): the
-            // caller is already in teardown.
-            Err(_) => {}
+            // Sent, a full clock lane, or the send task is gone (disconnect):
+            // the caller is already in teardown.
+            _ => {}
         }
-    }
-}
-
-pub(crate) fn packet(publish: Publish) -> DataPacket {
-    let Publish { topic, payload, reliable, destinations } = publish;
-    DataPacket {
-        payload,
-        topic: Some(topic.to_string()),
-        reliable,
-        destination_identities: destinations.into_iter().map(Into::into).collect(),
     }
 }

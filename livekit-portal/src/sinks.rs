@@ -19,6 +19,7 @@
 //! task delivering events, so every call is caught and logged.
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use livekit_portal_core::Event;
@@ -28,34 +29,44 @@ use livekit_portal_core::types::{
 };
 use parking_lot::Mutex;
 
-type DropCb = Box<dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync>;
-type IdentityCb = Box<dyn Fn(&str) + Send + Sync>;
-type OptIdentityCb = Box<dyn Fn(Option<&str>) + Send + Sync>;
-type KeypointCb = Box<dyn Fn(&Keypoint) + Send + Sync>;
-type TimeSyncedCb = Box<dyn Fn() + Send + Sync>;
-type TelemetryCb = Box<dyn Fn(&Telemetry) + Send + Sync>;
-pub(crate) type VideoCb = Box<dyn Fn(&str, &VideoFrameData) + Send + Sync>;
+type Callback<A> = Mutex<Option<Box<A>>>;
+type DropCb = dyn Fn(Vec<HashMap<String, TypedValue>>) + Send + Sync;
+type IdentityCb = dyn Fn(&str) + Send + Sync;
+type OptIdentityCb = dyn Fn(Option<&str>) + Send + Sync;
+type KeypointCb = dyn Fn(&Keypoint) + Send + Sync;
+type TimeSyncedCb = dyn Fn() + Send + Sync;
+type TelemetryCb = dyn Fn(&Telemetry) + Send + Sync;
+type VideoCb = dyn Fn(&str, &VideoFrameData) + Send + Sync;
+
+/// Run the registered callback, if any, logging a panic instead of letting
+/// it take down the delivering task.
+fn call<C: ?Sized>(slot: &Callback<C>, what: impl Display, run: impl FnOnce(&C)) {
+    let cb = slot.lock();
+    let Some(cb) = cb.as_deref() else {
+        return;
+    };
+    if catch_unwind(AssertUnwindSafe(|| run(cb))).is_err() {
+        log::error!("[callback-panic] {what} callback panicked, event loop continues");
+    }
+}
 
 /// Push callback + latest-wins slot for one record type.
 pub(crate) struct Slot<R> {
-    #[allow(clippy::type_complexity)]
-    pub cb: Mutex<Option<Box<dyn Fn(&R) + Send + Sync>>>,
-    pub latest: Mutex<Option<R>>,
+    pub cb: Callback<dyn Fn(&R) + Send + Sync>,
+    latest: Mutex<Option<R>>,
+}
+
+impl<R> Default for Slot<R> {
+    fn default() -> Self {
+        Self { cb: Mutex::new(None), latest: Mutex::new(None) }
+    }
 }
 
 impl<R: Clone> Slot<R> {
-    fn new() -> Self {
-        Self { cb: Mutex::new(None), latest: Mutex::new(None) }
-    }
-
     /// Fire the callback by reference, then hand ownership to the
     /// latest-wins slot, which is updated even if the callback panics.
     fn deliver(&self, record: R, what: &str) {
-        if let Some(cb) = self.cb.lock().as_ref()
-            && catch_unwind(AssertUnwindSafe(|| cb(&record))).is_err()
-        {
-            log::error!("[callback-panic] {what} callback panicked, receive loop continues");
-        }
+        call(&self.cb, what, |cb| cb(&record));
         *self.latest.lock() = Some(record);
     }
 
@@ -69,43 +80,27 @@ impl<R: Clone> Slot<R> {
 }
 
 /// Push callback + latest-wins slot for one video track.
+#[derive(Default)]
 pub(crate) struct VideoTrackSlots {
-    pub cb: Mutex<Option<VideoCb>>,
+    pub cb: Callback<VideoCb>,
     pub latest: Mutex<Option<VideoFrameData>>,
-}
-
-impl VideoTrackSlots {
-    fn new() -> Self {
-        Self { cb: Mutex::new(None), latest: Mutex::new(None) }
-    }
 }
 
 /// Push callback + latest-wins slot per sender, since any peer publishes
 /// telemetry.
+#[derive(Default)]
 pub(crate) struct TelemetrySlots {
-    pub cb: Mutex<Option<TelemetryCb>>,
-    pub latest: Mutex<HashMap<String, Telemetry>>,
+    pub cb: Callback<TelemetryCb>,
+    latest: Mutex<HashMap<String, Telemetry>>,
 }
 
 impl TelemetrySlots {
-    fn new() -> Self {
-        Self { cb: Mutex::new(None), latest: Mutex::new(HashMap::new()) }
-    }
-
-    fn deliver(&self, telemetry: Telemetry) {
-        if let Some(cb) = self.cb.lock().as_ref()
-            && catch_unwind(AssertUnwindSafe(|| cb(&telemetry))).is_err()
-        {
-            log::error!("[callback-panic] telemetry callback panicked, receive loop continues");
-        }
-        self.latest.lock().insert(telemetry.sender.clone(), telemetry);
-    }
-
     pub fn get(&self, sender: &str) -> Option<Telemetry> {
         self.latest.lock().get(sender).cloned()
     }
 }
 
+#[derive(Default)]
 pub(crate) struct Sinks {
     pub action: Slot<Action>,
     pub state: Slot<State>,
@@ -113,89 +108,56 @@ pub(crate) struct Sinks {
     /// Latest-wins. Consumers that want history register `on_observation`
     /// and buffer on their own side.
     pub observation: Slot<Observation>,
-    pub drop_cb: Mutex<Option<DropCb>>,
+    pub drop_cb: Callback<DropCb>,
     /// Fixed at construction, keyed by declared track name.
     pub video: HashMap<String, VideoTrackSlots>,
-    pub keypoint_cb: Mutex<Option<KeypointCb>>,
-    pub time_synced_cb: Mutex<Option<TimeSyncedCb>>,
-    pub operator_joined_cb: Mutex<Option<IdentityCb>>,
-    pub operator_left_cb: Mutex<Option<IdentityCb>>,
-    pub active_operator_changed_cb: Mutex<Option<OptIdentityCb>>,
+    pub keypoint_cb: Callback<KeypointCb>,
+    pub time_synced_cb: Callback<TimeSyncedCb>,
+    pub operator_joined_cb: Callback<IdentityCb>,
+    pub operator_left_cb: Callback<IdentityCb>,
+    pub active_operator_changed_cb: Callback<OptIdentityCb>,
 }
 
 impl Sinks {
     pub fn new<'a>(track_names: impl Iterator<Item = &'a str>) -> Self {
-        Self {
-            action: Slot::new(),
-            state: Slot::new(),
-            telemetry: TelemetrySlots::new(),
-            observation: Slot::new(),
-            drop_cb: Mutex::new(None),
-            video: track_names.map(|n| (n.to_string(), VideoTrackSlots::new())).collect(),
-            keypoint_cb: Mutex::new(None),
-            time_synced_cb: Mutex::new(None),
-            operator_joined_cb: Mutex::new(None),
-            operator_left_cb: Mutex::new(None),
-            active_operator_changed_cb: Mutex::new(None),
-        }
+        let video = track_names.map(|n| (n.to_string(), VideoTrackSlots::default())).collect();
+        Self { video, ..Self::default() }
     }
 
     pub fn dispatch(&self, event: Event<VideoFrameData>) {
         match event {
             Event::Action(action) => self.action.deliver(action, "action"),
             Event::State(state) => self.state.deliver(state, "state"),
-            Event::Telemetry(telemetry) => self.telemetry.deliver(telemetry),
+            Event::Telemetry(telemetry) => {
+                call(&self.telemetry.cb, "telemetry", |cb| cb(&telemetry));
+                self.telemetry.latest.lock().insert(telemetry.sender.clone(), telemetry);
+            }
             Event::Observation(obs) => self.observation.deliver(obs, "observation"),
-            Event::VideoFrame { track, frame } => self.video_frame(&track, &frame),
-            Event::Drops(drops) => {
-                if let Some(cb) = self.drop_cb.lock().as_ref()
-                    && catch_unwind(AssertUnwindSafe(|| cb(drops))).is_err()
-                {
-                    log::error!("[callback-panic] drop callback panicked, event loop continues");
-                }
+            Event::VideoFrame { track, frame } => {
+                let Some(slots) = self.video.get(&track) else {
+                    return;
+                };
+                call(&slots.cb, format_args!("video frame (track '{track}')"), |cb| {
+                    cb(&track, &frame)
+                });
             }
-            Event::Keypoint(kp) => self.keypoint(&kp),
-            Event::TimeSynced => {
-                if let Some(cb) = self.time_synced_cb.lock().as_ref()
-                    && catch_unwind(AssertUnwindSafe(cb)).is_err()
-                {
-                    log::error!("[callback-panic] on_time_synced callback panicked");
-                }
+            Event::Drops(drops) => call(&self.drop_cb, "drop", |cb| cb(drops)),
+            Event::Keypoint(kp) => call(&self.keypoint_cb, "keypoint", |cb| cb(&kp)),
+            Event::TimeSynced => call(&self.time_synced_cb, "on_time_synced", |cb| cb()),
+            Event::OperatorJoined(id) => {
+                call(&self.operator_joined_cb, "on_operator_joined", |cb| cb(&id))
             }
-            Event::OperatorJoined(id) => fire(&self.operator_joined_cb, &id, "on_operator_joined"),
-            Event::OperatorLeft(id) => fire(&self.operator_left_cb, &id, "on_operator_left"),
+            Event::OperatorLeft(id) => {
+                call(&self.operator_left_cb, "on_operator_left", |cb| cb(&id))
+            }
             Event::ActiveOperatorChanged(id) => {
-                if let Some(cb) = self.active_operator_changed_cb.lock().as_ref()
-                    && catch_unwind(AssertUnwindSafe(|| cb(id.as_deref()))).is_err()
-                {
-                    log::error!("[callback-panic] on_active_operator_changed callback panicked");
-                }
+                let cb = &self.active_operator_changed_cb;
+                call(cb, "on_active_operator_changed", |cb| cb(id.as_deref()))
             }
             // The awaiting `set_active_operator` reads the call's outcome
             // itself, and with native RPC the core hands application
             // requests to no one: LiveKit delivers them to their handlers.
             Event::RpcResult { .. } | Event::RpcRequest { .. } => {}
-        }
-    }
-
-    fn video_frame(&self, track: &str, frame: &VideoFrameData) {
-        let Some(slots) = self.video.get(track) else {
-            return;
-        };
-        if let Some(cb) = slots.cb.lock().as_ref()
-            && catch_unwind(AssertUnwindSafe(|| cb(track, frame))).is_err()
-        {
-            log::error!(
-                "[callback-panic] video frame callback panicked on track '{track}', receive loop continues"
-            );
-        }
-    }
-
-    fn keypoint(&self, keypoint: &Keypoint) {
-        if let Some(cb) = self.keypoint_cb.lock().as_ref()
-            && catch_unwind(AssertUnwindSafe(|| cb(keypoint))).is_err()
-        {
-            log::error!("[callback-panic] keypoint callback panicked, event loop continues");
         }
     }
 
@@ -217,14 +179,6 @@ impl Sinks {
         for slots in self.video.values() {
             *slots.latest.lock() = None;
         }
-    }
-}
-
-fn fire(slot: &Mutex<Option<IdentityCb>>, identity: &str, what: &str) {
-    if let Some(cb) = slot.lock().as_ref()
-        && catch_unwind(AssertUnwindSafe(|| cb(identity))).is_err()
-    {
-        log::error!("[callback-panic] {what} callback panicked");
     }
 }
 

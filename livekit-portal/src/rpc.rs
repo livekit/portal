@@ -12,24 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! RPC types (see `livekit_portal_core::rpc`) plus their conversions to and from the
-//! LiveKit SDK's own types, used at the room boundary.
+//! RPC types (see `livekit_portal_core::rpc`). `portal.rs` converts them to
+//! and from the LiveKit SDK's own types at the room boundary.
 
 pub use livekit_portal_core::rpc::*;
-
-pub(crate) fn rpc_error_from_sdk(e: livekit::prelude::RpcError) -> RpcError {
-    RpcError { code: e.code, message: e.message, data: e.data }
-}
-
-pub(crate) fn rpc_error_to_sdk(e: RpcError) -> livekit::prelude::RpcError {
-    livekit::prelude::RpcError::new(e.code, e.message, e.data)
-}
-
-pub(crate) fn invocation_from_sdk(d: livekit::prelude::RpcInvocationData) -> RpcInvocationData {
-    RpcInvocationData {
-        request_id: d.request_id,
-        caller_identity: d.caller_identity.as_str().to_string(),
-        payload: d.payload,
-        response_timeout: d.response_timeout,
-    }
-}

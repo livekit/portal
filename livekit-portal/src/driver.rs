@@ -60,8 +60,6 @@ impl EventLoop {
                     // The core asks again if it still needs waking.
                     self.wake.borrow_and_update();
                     self.shared.step(Input::Wake);
-                    deadline = self.deadline();
-                    continue;
                 }
                 changed = self.wake.changed() => {
                     if changed.is_err() {
@@ -82,8 +80,23 @@ impl EventLoop {
 
     fn handle(&self, event: RoomEvent) {
         match event {
-            RoomEvent::TrackSubscribed { track, publication, .. } => {
-                self.track_subscribed(track, publication)
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Video(video_track),
+                publication,
+                ..
+            } if self.config.role() != Role::Robot => {
+                let name = publication.name();
+                if !self.config.video_tracks().iter().any(|s| s.name == name) {
+                    return;
+                }
+                log::info!("[{}] subscribed to video track '{name}'", self.config.session());
+                let receiver = VideoReceiver::spawn(VideoReceiverOptions {
+                    name: name.to_string(),
+                    stream: NativeVideoStream::new(video_track.rtc_track()),
+                    shared: self.shared.clone(),
+                    metrics: self.shared.track_metrics(&name),
+                });
+                self.video_receivers.lock().insert(name.to_string(), receiver);
             }
             RoomEvent::DataReceived { payload, topic: Some(topic), participant, .. } => {
                 // Other applications' topics are theirs.
@@ -136,28 +149,5 @@ impl EventLoop {
             }
             _ => {}
         }
-    }
-
-    fn track_subscribed(&self, track: RemoteTrack, publication: RemoteTrackPublication) {
-        if self.config.role() == Role::Robot {
-            return;
-        }
-        let RemoteTrack::Video(video_track) = track else {
-            return;
-        };
-        let name = publication.name();
-        if !self.config.video_tracks().iter().any(|s| s.name == name) {
-            return;
-        }
-        log::info!("[{}] subscribed to video track '{name}'", self.config.session());
-        let metrics =
-            self.shared.metrics.track(&name).expect("track metrics registered at construction");
-        let receiver = VideoReceiver::spawn(VideoReceiverOptions {
-            name: name.to_string(),
-            stream: NativeVideoStream::new(video_track.rtc_track()),
-            shared: self.shared.clone(),
-            metrics,
-        });
-        self.video_receivers.lock().insert(name.to_string(), receiver);
     }
 }

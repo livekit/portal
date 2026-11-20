@@ -49,30 +49,7 @@ const DEFAULT_HEIGHT: u32 = 480;
 
 pub(crate) struct VideoPublisher {
     source: NativeVideoSource,
-    track: LocalVideoTrack,
     metrics: Arc<TrackMetrics>,
-    fps: u32,
-    codec: Codec,
-    max_bitrate_kbps: Option<u32>,
-    simulcast: bool,
-    screencast: bool,
-}
-
-/// Map a Portal WebRTC codec to the libwebrtc codec the publish path sets.
-/// Only ever called for WebRTC codecs — `add_video` routes byte-stream codecs
-/// to the frame-video path, so they never reach a `VideoPublisher`.
-fn webrtc_video_codec(codec: Codec) -> VideoCodec {
-    match codec {
-        Codec::H264 => VideoCodec::H264,
-        Codec::Vp8 => VideoCodec::VP8,
-        Codec::Vp9 => VideoCodec::VP9,
-        Codec::Av1 => VideoCodec::AV1,
-        Codec::H265 => VideoCodec::H265,
-        Codec::Raw | Codec::Png | Codec::Mjpeg => unreachable!(
-            "byte-stream codecs never reach a VideoPublisher (add_video routes them \
-             to the frame-video path)"
-        ),
-    }
 }
 
 /// Unset, the SDK picks `Balanced` for a source that isn't a camera or screen
@@ -89,37 +66,39 @@ pub(crate) struct VideoPublisherOptions<'a> {
     pub spec: &'a VideoTrackSpec,
     pub metrics: Arc<TrackMetrics>,
     pub fps: u32,
+    pub local_participant: &'a LocalParticipant,
 }
 
 impl VideoPublisher {
-    pub fn new(options: VideoPublisherOptions<'_>) -> Self {
-        let VideoPublisherOptions { spec, metrics, fps } = options;
+    /// Create the track's source and publish it.
+    pub async fn publish(options: VideoPublisherOptions<'_>) -> PortalResult<Self> {
+        let VideoPublisherOptions { spec, metrics, fps, local_participant } = options;
         let Resolution { width, height } =
             spec.resolution.unwrap_or(Resolution { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT });
-        let resolution = VideoResolution { width, height };
-        // `screencast` is libwebrtc's content-type hint. The degradation
-        // preference that goes with it is set at publish.
-        let source = NativeVideoSource::new(resolution, spec.screencast);
-        let rtc_source = RtcVideoSource::Native(source.clone());
-        let track = LocalVideoTrack::create_video_track(&spec.name, rtc_source);
-        Self {
-            source,
-            track,
-            metrics,
-            fps,
-            codec: spec.codec,
-            max_bitrate_kbps: spec.max_bitrate_kbps,
-            simulcast: spec.simulcast,
-            screencast: spec.screencast,
-        }
-    }
+        // `screencast` is libwebrtc's content-type hint; the degradation
+        // preference below goes with it.
+        let source = NativeVideoSource::new(VideoResolution { width, height }, spec.screencast);
+        let track =
+            LocalVideoTrack::create_video_track(&spec.name, RtcVideoSource::Native(source.clone()));
 
-    pub async fn publish(&self, local_participant: &LocalParticipant) -> PortalResult<()> {
         // user_timestamp is mandatory: the receive path uses it to align frames
         // with state, and panics if it is missing. Subscribed tracks produced
         // by publishers that don't set this trailer are unsupported.
         let mut features = FrameMetadataFeatures::default();
         features.user_timestamp = true;
+
+        // `add_video` routes byte-stream codecs to the frame-video path, so
+        // only WebRTC codecs reach a `VideoPublisher`.
+        let video_codec = match spec.codec {
+            Codec::H264 => VideoCodec::H264,
+            Codec::Vp8 => VideoCodec::VP8,
+            Codec::Vp9 => VideoCodec::VP9,
+            Codec::Av1 => VideoCodec::AV1,
+            Codec::H265 => VideoCodec::H265,
+            Codec::Raw | Codec::Png | Codec::Mjpeg => {
+                unreachable!("byte-stream codecs never reach a VideoPublisher")
+            }
+        };
 
         // Pin encoder ceilings explicitly. Without `video_encoding`, libwebrtc's
         // `VideoStreamEncoder` picks conservative defaults and drops frames to
@@ -133,23 +112,23 @@ impl VideoPublisher {
         //     just don't want a tight cap forcing frame drops on high-motion
         //     bursts. Configurable per track via `add_video`'s
         //     `max_bitrate_kbps`.
-        let max_bitrate_kbps = self.max_bitrate_kbps.unwrap_or(DEFAULT_H264_MAX_BITRATE_KBPS);
+        let max_bitrate_kbps = spec.max_bitrate_kbps.unwrap_or(DEFAULT_H264_MAX_BITRATE_KBPS);
         let options = TrackPublishOptions {
-            video_codec: webrtc_video_codec(self.codec),
-            simulcast: self.simulcast,
+            video_codec,
+            simulcast: spec.simulcast,
             frame_metadata_features: features,
             video_encoding: Some(VideoEncoding {
-                max_framerate: (self.fps as f64) * 2.0,
+                max_framerate: (fps as f64) * 2.0,
                 max_bitrate: (max_bitrate_kbps as u64) * 1_000,
             }),
-            degradation_preference: Some(degradation_preference(self.screencast)),
+            degradation_preference: Some(degradation_preference(spec.screencast)),
             ..Default::default()
         };
         local_participant
-            .publish_track(LocalTrack::Video(self.track.clone()), options)
+            .publish_track(LocalTrack::Video(track), options)
             .await
             .map_err(|e| PortalError::Room(e.to_string()))?;
-        Ok(())
+        Ok(Self { source, metrics })
     }
 
     pub fn send_frame(
@@ -284,7 +263,7 @@ pub(crate) struct VideoReceiver {
 
 impl VideoReceiver {
     pub fn spawn(options: VideoReceiverOptions) -> Self {
-        let VideoReceiverOptions { name, stream, shared, metrics } = options;
+        let VideoReceiverOptions { name, mut stream, shared, metrics } = options;
         let channel = Arc::new(FrameChannel::new(RECV_CHANNEL_CAPACITY));
 
         // Drain task: pull decoded frames off the native stream as fast as
@@ -297,7 +276,6 @@ impl VideoReceiver {
         let drain_shared = shared.clone();
         let drain_name = name.clone();
         let drain_handle = tokio::spawn(async move {
-            let mut stream = stream;
             let mut dropped_total: u64 = 0;
             let mut last_warn: Option<Instant> = None;
             let mut untimed_total: u64 = 0;
@@ -313,14 +291,12 @@ impl VideoReceiver {
                     frame.frame_metadata.as_ref().and_then(|m| m.user_timestamp)
                 else {
                     untimed_total += 1;
+                    let now = Instant::now();
                     // The first frame after subscribing routinely races the
                     // trailer handler; only repeated skips point at the sender.
                     if untimed_total == 1 {
                         log::debug!("[missing-timestamp] '{drain_name}' skipped first frame");
-                        continue;
-                    }
-                    let now = Instant::now();
-                    if last_untimed_warn
+                    } else if last_untimed_warn
                         .is_none_or(|t| now.duration_since(t) >= RECV_DROP_WARN_INTERVAL)
                     {
                         log::warn!(
@@ -342,20 +318,19 @@ impl VideoReceiver {
                 // buffer is `Bytes`.
                 drain_shared.sinks.set_latest_frame(&drain_name, &frame_data);
 
-                if drain_channel.push(frame_data) {
-                    dropped_total += 1;
-                    let now = Instant::now();
-                    let should_warn =
-                        last_warn.is_none_or(|t| now.duration_since(t) >= RECV_DROP_WARN_INTERVAL);
-                    if should_warn {
-                        log::warn!(
-                            "[recv-overflow] '{drain_name}' frame processing is behind; dropped \
+                if !drain_channel.push(frame_data) {
+                    continue;
+                }
+                dropped_total += 1;
+                let now = Instant::now();
+                if last_warn.is_none_or(|t| now.duration_since(t) >= RECV_DROP_WARN_INTERVAL) {
+                    log::warn!(
+                        "[recv-overflow] '{drain_name}' frame processing is behind; dropped \
                              {dropped_total} frame(s) so far to keep the receive loop \
                              draining. A slow on-frame or on-observation callback is the \
                              usual cause."
-                        );
-                        last_warn = Some(now);
-                    }
+                    );
+                    last_warn = Some(now);
                 }
             }
             // Stream ended (track unsubscribed / room closed). Let the

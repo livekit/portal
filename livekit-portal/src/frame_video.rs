@@ -59,7 +59,7 @@ use livekit_portal_core::livekit::FRAME_VIDEO_TOPIC;
 pub(crate) struct FrameVideoPublisher {
     spec: VideoTrackSpec,
     pending: Arc<PendingFrame>,
-    task: Option<JoinHandle<()>>,
+    task: JoinHandle<()>,
     metrics: Arc<TrackMetrics>,
 }
 
@@ -93,7 +93,7 @@ impl FrameVideoPublisher {
                 }
             }
         });
-        Self { spec, pending, task: Some(task), metrics }
+        Self { spec, pending, task, metrics }
     }
 
     /// Encode one RGB frame and queue it for publish. `rgb_data` is packed
@@ -134,9 +134,7 @@ struct PendingFrame {
 
 impl Drop for FrameVideoPublisher {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.task.abort();
     }
 }
 
@@ -160,13 +158,12 @@ pub(crate) fn spawn_receive(reader: livekit::ByteStreamReader, shared: Arc<Share
             return;
         };
         let name = received.track_name;
-        if let Some(metrics) = shared.metrics.track(&name) {
-            metrics.record_received_bytes(
-                received.frame.timestamp_us,
-                anchored_now_us(),
-                received.wire_len,
-            );
-        }
+        // `decode` only returns declared tracks.
+        shared.track_metrics(&name).record_received_bytes(
+            received.frame.timestamp_us,
+            anchored_now_us(),
+            received.wire_len,
+        );
         shared.sinks.set_latest_frame(&name, &received.frame);
         shared.step(Input::VideoFrame { track: &name, frame: received.frame });
     });

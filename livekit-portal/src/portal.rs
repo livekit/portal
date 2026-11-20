@@ -36,11 +36,10 @@ use livekit_portal_core::config::{FieldSpec, PortalConfig};
 use livekit_portal_core::error::{PortalError, PortalResult};
 use livekit_portal_core::frame_video::FrameVideoTracks;
 use livekit_portal_core::keypoint::Keypoint;
-use livekit_portal_core::metrics::{MetricsRegistry, PortalMetrics};
-use livekit_portal_core::transport::{Delivery, Presence, Stream};
+use livekit_portal_core::metrics::{MetricsRegistry, PortalMetrics, TrackMetrics};
 use livekit_portal_core::types::*;
 use livekit_portal_core::{
-    Connect, CoreInit, Event, Input, OpId, Output, PortalCore, RpcId, RpcRequest, SendAction,
+    Connect, CoreInit, Event, Input, Output, PortalCore, RpcId, RpcRequest, SendAction,
     SendKeypoint, SendState, SendTelemetry, SendVideoFrame, SetActiveOperator, Step,
     VideoTransport,
 };
@@ -49,7 +48,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::clock::RawClock;
-use crate::data::{Lanes, Publish, packet};
+use crate::data::{Lanes, Publish};
 use crate::driver::EventLoop;
 use crate::frame_video::{FrameVideoPublisher, FrameVideoPublisherOptions};
 use crate::rpc::{RpcError, RpcHandler, RpcInvocationData};
@@ -66,11 +65,13 @@ pub use livekit_portal_core::livekit::{
 pub const TIME_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 pub use livekit_portal_core::transport::PROTOCOL_VERSION;
 
+const RUNTIME_CAPTURED: &str = "connect captures the runtime before the local participant";
+
 /// State shared by `Portal`, the room event actor and the media tasks.
 pub(crate) struct Shared {
     core: Mutex<PortalCore<VideoFrameData>>,
     pub sinks: Sinks,
-    pub metrics: Arc<MetricsRegistry>,
+    metrics: Arc<MetricsRegistry>,
     /// Declared frame-video tracks, to decode received frames off the lock.
     pub frame_video: FrameVideoTracks,
     clock: RawClock,
@@ -99,6 +100,10 @@ impl Shared {
         self.clock.now_us()
     }
 
+    pub fn track_metrics(&self, track: &str) -> Arc<TrackMetrics> {
+        self.metrics.track(track).expect("track metrics registered at construction")
+    }
+
     pub fn receives_frame_bytes(&self) -> bool {
         self.core.lock().receives_frame_bytes()
     }
@@ -116,19 +121,35 @@ impl Shared {
         for output in out {
             match output {
                 Output::Publish { stream, payload, delivery, to } => {
-                    let Some(publish) = publish(Outgoing { stream, payload, delivery, to }) else {
-                        continue;
-                    };
                     if let Some(lanes) = self.lanes.lock().as_ref() {
-                        lanes.send(stream, publish);
+                        lanes.send(Publish { stream, payload, delivery, to });
                     }
                 }
-                Output::SetPresence { id, presence } => self.spawn_set_presence(id, presence),
-                // Only `Portal::set_active_operator` starts one, and it
-                // performs the call itself.
-                Output::Rpc { id, .. } => {
-                    let result = Err(RpcError::new(1500, "unexpected rpc", None));
-                    self.step(Input::RpcResponse { id, result });
+                // Presence updates the core starts on its own (an
+                // RPC-requested handoff) report back once LiveKit confirms
+                // the attribute write.
+                Output::SetPresence { id, presence } => {
+                    let Some(lp) = self.local_participant.lock().clone() else {
+                        if let Some(id) = id {
+                            self.step(Input::PresenceSet {
+                                id,
+                                result: Err("not connected".into()),
+                            });
+                        }
+                        continue;
+                    };
+                    let runtime = self.runtime_handle.lock().clone().expect(RUNTIME_CAPTURED);
+                    let shared = self.this.clone();
+                    let attributes = wire::active_operator_attributes(&presence);
+                    runtime.spawn(async move {
+                        let result = lp.set_attributes(attributes).await.map_err(|e| e.to_string());
+                        if let (Some(id), Some(shared)) = (id, shared.upgrade()) {
+                            shared.step(Input::PresenceSet { id, result });
+                        }
+                    });
+                }
+                Output::Rpc { .. } => {
+                    unreachable!("only `Portal::set_active_operator` starts an rpc, and runs it")
                 }
                 Output::RpcReply { id, result } => {
                     if let Some(tx) = self.rpc_waiters.lock().remove(&id) {
@@ -146,27 +167,6 @@ impl Shared {
                 }
             }
         }
-    }
-
-    /// Presence updates the core starts on its own (an RPC-requested
-    /// handoff) report back once LiveKit confirms the attribute write.
-    fn spawn_set_presence(&self, id: Option<OpId>, presence: Presence) {
-        let lp = self.local_participant.lock().clone();
-        let runtime = self.runtime_handle.lock().clone();
-        let (Some(lp), Some(runtime)) = (lp, runtime) else {
-            if let Some(id) = id {
-                self.step(Input::PresenceSet { id, result: Err("not connected".into()) });
-            }
-            return;
-        };
-        let shared = self.this.clone();
-        let attributes = wire::active_operator_attributes(&presence);
-        runtime.spawn(async move {
-            let result = lp.set_attributes(attributes).await.map_err(|e| e.to_string());
-            if let (Some(id), Some(shared)) = (id, shared.upgrade()) {
-                shared.step(Input::PresenceSet { id, result });
-            }
-        });
     }
 }
 
@@ -196,7 +196,7 @@ pub struct Portal {
 
     // RPC methods the caller has registered. Applied to the LocalParticipant
     // on connect(); survives disconnect so reconnects reapply them.
-    rpc_handlers: Arc<Mutex<HashMap<String, RpcHandler>>>,
+    rpc_handlers: Mutex<HashMap<String, RpcHandler>>,
 }
 
 impl Portal {
@@ -227,7 +227,7 @@ impl Portal {
             video_receivers: Arc::new(Mutex::new(HashMap::new())),
             video_publishers: Mutex::new(HashMap::new()),
             frame_video_publishers: Mutex::new(HashMap::new()),
-            rpc_handlers: Arc::new(Mutex::new(HashMap::new())),
+            rpc_handlers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -286,61 +286,55 @@ impl Portal {
         if role == Role::Robot {
             let shared = Arc::downgrade(&self.shared);
             let handler: RpcHandler = Arc::new(move |data: RpcInvocationData| {
-                let shared = shared.clone();
-                Box::pin(async move { set_active_operator_rpc(shared, data).await })
+                Box::pin(set_active_operator_rpc(shared.clone(), data))
             });
             self.register_rpc_method(SET_ACTIVE_OPERATOR_RPC, handler);
         }
 
-        self.apply_rpc_handlers(&local_participant);
-
-        // Self-set the role attribute so other participants can discover us.
-        // Token-mint may also have set this key; in that case `set_attributes`
-        // is effectively a no-op for the same value.
-        if let Err(e) = local_participant.set_attributes(wire::role_attributes(role)).await {
-            // Most common cause: the token grant did not include
-            // `canUpdateOwnMetadata`. Surface a clear error so callers fix
-            // their token-mint script rather than silently leaving the
-            // participant unidentified. Roll back the partial state we
-            // already wrote so a retry starts from a clean slate.
-            self.teardown();
-            let _ = room.close().await;
-            return Err(PortalError::Room(format!(
-                "failed to publish role attribute (token may be missing canUpdateOwnMetadata): {e}"
-            )));
+        let handlers = self.rpc_handlers.lock().clone();
+        for (method, handler) in handlers {
+            register_handler_on(&local_participant, method, handler);
         }
 
-        let peers = room
-            .remote_participants()
-            .into_values()
-            .map(|p| (p.identity().as_str().to_string(), wire::presence(&p.attributes())))
-            .collect();
-        let now_us = self.shared.now_us();
-        let connected = self.shared.core.lock().connect(Connect {
-            local_peer: local_participant.identity().as_str().to_string(),
-            // A token can seed the pointer, so the gate holds before anyone
-            // calls `set_active_operator`.
-            active_operator: wire::active_operator(&local_participant.attributes()),
-            peers,
-            now_us,
-        });
-        let out = match connected {
-            Ok(out) => out,
-            Err(e) => {
-                self.teardown();
-                let _ = room.close().await;
-                return Err(e);
+        let joined = async {
+            // Self-set the role attribute so other participants can discover
+            // us. Token-mint may also have set this key; in that case
+            // `set_attributes` is effectively a no-op for the same value.
+            if let Err(e) = local_participant.set_attributes(wire::role_attributes(role)).await {
+                // Most common cause: the token grant did not include
+                // `canUpdateOwnMetadata`. Surface a clear error so callers
+                // fix their token-mint script rather than silently leaving
+                // the participant unidentified.
+                return Err(PortalError::Room(format!(
+                    "failed to publish role attribute (token may be missing canUpdateOwnMetadata): {e}"
+                )));
             }
-        };
-        self.shared.execute(out);
-        let synced = self.shared.core.lock().time_synced();
-        self.shared.synced.send_replace(synced);
 
-        if role == Role::Robot
-            && let Err(e) = self.setup_robot(&local_participant).await
-        {
-            // Publishing a video track can fail mid-way; undo everything
-            // written above before bailing.
+            let peers = room
+                .remote_participants()
+                .into_values()
+                .map(|p| (p.identity().as_str().to_string(), wire::presence(&p.attributes())))
+                .collect();
+            let now_us = self.shared.now_us();
+            let out = self.shared.core.lock().connect(Connect {
+                local_peer: local_participant.identity().as_str().to_string(),
+                // A token can seed the pointer, so the gate holds before
+                // anyone calls `set_active_operator`.
+                active_operator: wire::active_operator(&local_participant.attributes()),
+                peers,
+                now_us,
+            })?;
+            self.shared.execute(out);
+            let synced = self.shared.core.lock().time_synced();
+            self.shared.synced.send_replace(synced);
+
+            if role == Role::Robot {
+                self.setup_robot(&local_participant).await?;
+            }
+            Ok(())
+        };
+        // Roll back the partial state written so far so a retry starts clean.
+        if let Err(e) = joined.await {
             self.teardown();
             let _ = room.close().await;
             return Err(e);
@@ -512,9 +506,36 @@ impl Portal {
     pub async fn set_active_operator(&self, identity: Option<String>) -> PortalResult<()> {
         if self.config.role() != Role::Robot {
             // The common pattern is to call this right after `connect()`,
-            // before the robot's attributes have surfaced. Wait briefly for
-            // it rather than forcing every caller to.
-            self.resolve_robot_identity().await?;
+            // before the robot's attributes have surfaced. Poll the core's
+            // roster and the room for ~1.5s rather than forcing every caller
+            // to wait.
+            let robot_seen = || {
+                if self.robot_identity().is_some() {
+                    return true;
+                }
+                let found = self.conn.lock().room.as_ref().and_then(|room| {
+                    room.remote_participants().into_values().find_map(|p| {
+                        let presence = wire::presence(&p.attributes());
+                        (presence.compatible_role() == Some(Role::Robot))
+                            .then(|| (p.identity().as_str().to_string(), presence))
+                    })
+                });
+                let Some((identity, presence)) = found else {
+                    return false;
+                };
+                // Tell the core, so later calls take the fast path.
+                self.shared.step(Input::PresenceChanged { peer: &identity, presence });
+                true
+            };
+            for attempt in 0.. {
+                if robot_seen() {
+                    break;
+                }
+                if attempt == 30 {
+                    return Err(PortalError::NoPeer);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
         let now_us = self.shared.now_us();
         let (_, out) =
@@ -605,16 +626,10 @@ impl Portal {
         // which `tokio::spawn`s internally. If we were called from a
         // foreign thread with no runtime context (a binding's asyncio
         // loop), that spawn panics. Enter the runtime `connect()` ran on
-        // so the spawn lands on it. The handle is always present here
-        // (an LP exists only after a successful connect set it), but fall
-        // back to a bare call rather than panicking if it somehow isn't.
-        match self.shared.runtime_handle.lock().clone() {
-            Some(handle) => {
-                let _guard = handle.enter();
-                register_handler_on(&lp, method.to_string(), handler);
-            }
-            None => register_handler_on(&lp, method.to_string(), handler),
-        }
+        // so the spawn lands on it.
+        let runtime = self.shared.runtime_handle.lock().clone().expect(RUNTIME_CAPTURED);
+        let _guard = runtime.enter();
+        register_handler_on(&lp, method.to_string(), handler);
     }
 
     /// Remove a previously registered RPC method handler.
@@ -638,9 +653,21 @@ impl Portal {
         payload: String,
         response_timeout: Option<Duration>,
     ) -> PortalResult<String> {
-        let destination = match destination {
-            Some(id) => id.to_string(),
-            None => self.resolve_peer()?,
+        // Without a destination: the core's counterpart, then the single
+        // remote participant for setups that haven't designated control yet.
+        let destination = destination.map(str::to_string);
+        let destination = match destination.or_else(|| self.shared.core.lock().default_peer()) {
+            Some(id) => id,
+            None => {
+                let conn = self.conn.lock();
+                let room = conn.room.as_ref().ok_or(PortalError::NotConnected)?;
+                let mut remotes = room.remote_participants().into_keys();
+                match (remotes.next(), remotes.next()) {
+                    (Some(id), None) => id.as_str().to_string(),
+                    (None, _) => return Err(PortalError::NoPeer),
+                    (Some(_), Some(_)) => return Err(PortalError::AmbiguousPeer),
+                }
+            }
         };
         let lp = self.shared.local_participant.lock().clone().ok_or(PortalError::NotConnected)?;
 
@@ -654,73 +681,9 @@ impl Portal {
             data.response_timeout = t;
         }
 
-        lp.perform_rpc(data).await.map_err(|e| PortalError::Rpc(crate::rpc::rpc_error_from_sdk(e)))
-    }
-
-    /// Walk `room.remote_participants()` looking for one whose attributes
-    /// declare `role=robot`, and tell the core about it so later calls take
-    /// the fast path.
-    fn find_robot_in_room(&self) -> Option<String> {
-        let (identity, presence) = {
-            let conn = self.conn.lock();
-            let room = conn.room.as_ref()?;
-            room.remote_participants().into_values().find_map(|p| {
-                let presence = wire::presence(&p.attributes());
-                (presence.compatible_role() == Some(Role::Robot))
-                    .then(|| (p.identity().as_str().to_string(), presence))
-            })?
-        };
-        self.shared.step(Input::PresenceChanged { peer: &identity, presence });
-        Some(identity)
-    }
-
-    /// Resolve the robot's identity for an operator-side RPC. Tries the
-    /// core's roster first, then a synchronous scan of the room, then a
-    /// short polling loop so `set_active_operator` works immediately after
-    /// `connect()` without racing the initial attribute-propagation event.
-    /// Returns `NoPeer` after the timeout if no robot ever appears.
-    async fn resolve_robot_identity(&self) -> PortalResult<String> {
-        let lookup = || self.robot_identity().or_else(|| self.find_robot_in_room());
-        if let Some(id) = lookup() {
-            return Ok(id);
-        }
-        // Poll for ~1.5s in 50ms ticks. On a healthy LAN the first
-        // ParticipantAttributesChanged event lands well within this window.
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if let Some(id) = lookup() {
-                return Ok(id);
-            }
-        }
-        Err(PortalError::NoPeer)
-    }
-
-    /// Resolve a default destination for `perform_rpc(None, ...)`: the
-    /// core's counterpart first, then a single-remote-participant snapshot
-    /// for setups that haven't designated control yet.
-    fn resolve_peer(&self) -> PortalResult<String> {
-        if let Some(id) = self.shared.core.lock().default_peer() {
-            return Ok(id);
-        }
-        let conn = self.conn.lock();
-        let room = conn.room.as_ref().ok_or(PortalError::NotConnected)?;
-        let remotes = room.remote_participants();
-        match remotes.len() {
-            0 => Err(PortalError::NoPeer),
-            1 => {
-                let (id, _) = remotes.into_iter().next().expect("remotes has one entry");
-                Ok(id.as_str().to_string())
-            }
-            _ => Err(PortalError::AmbiguousPeer),
-        }
-    }
-
-    /// Apply every stored handler to a freshly-connected LocalParticipant.
-    fn apply_rpc_handlers(&self, lp: &LocalParticipant) {
-        let handlers = self.rpc_handlers.lock().clone();
-        for (method, handler) in handlers {
-            register_handler_on(lp, method, handler);
-        }
+        lp.perform_rpc(data).await.map_err(|e| {
+            PortalError::Rpc(RpcError { code: e.code, message: e.message, data: e.data })
+        })
     }
 
     /// Per-connection cleanup shared by `disconnect()` and a failed
@@ -732,12 +695,8 @@ impl Portal {
         let out = self.shared.core.lock().disconnect();
         self.shared.execute(out);
         *self.shared.lanes.lock() = None;
-        {
-            let mut receivers = self.video_receivers.lock();
-            for receiver in receivers.values() {
-                receiver.abort();
-            }
-            receivers.clear();
+        for (_, receiver) in self.video_receivers.lock().drain() {
+            receiver.abort();
         }
         self.video_publishers.lock().clear();
         self.frame_video_publishers.lock().clear();
@@ -780,10 +739,7 @@ impl Portal {
     }
 
     fn require_observation_sync(&self) -> PortalResult<()> {
-        match self.config.observation_sync() {
-            true => Ok(()),
-            false => Err(PortalError::ObservationSyncDisabled),
-        }
+        self.config.observation_sync().then_some(()).ok_or(PortalError::ObservationSyncDisabled)
     }
 
     /// Clone of the latest action received (Robot side), or `None`.
@@ -871,31 +827,24 @@ impl Portal {
     async fn setup_robot(&self, lp: &LocalParticipant) -> PortalResult<()> {
         let session = self.config.session();
         for spec in self.config.video_tracks().iter().filter(|s| s.is_webrtc()) {
-            let track_name = &spec.name;
-            let metrics = self
-                .shared
-                .metrics
-                .track(track_name)
-                .expect("track metrics registered at construction");
-            let fps = self.config.fps();
-            let publisher = VideoPublisher::new(VideoPublisherOptions { spec, metrics, fps });
-            publisher.publish(lp).await?;
-            log::info!("[{session}] published video track '{track_name}'");
-            self.video_publishers.lock().insert(track_name.clone(), Arc::new(publisher));
+            let publisher = VideoPublisher::publish(VideoPublisherOptions {
+                spec,
+                metrics: self.shared.track_metrics(&spec.name),
+                fps: self.config.fps(),
+                local_participant: lp,
+            })
+            .await?;
+            log::info!("[{session}] published video track '{}'", spec.name);
+            self.video_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
         }
 
         // Frame-video publishers don't publish a track: they emit one byte
         // stream per frame, so there is only a drainer task to start.
         for spec in self.config.frame_video_tracks() {
-            let metrics = self
-                .shared
-                .metrics
-                .track(&spec.name)
-                .expect("track metrics registered at construction");
             let publisher = FrameVideoPublisher::new(FrameVideoPublisherOptions {
                 spec: spec.clone(),
                 local_participant: lp.clone(),
-                metrics,
+                metrics: self.shared.track_metrics(&spec.name),
             });
             self.frame_video_publishers.lock().insert(spec.name.clone(), Arc::new(publisher));
         }
@@ -945,12 +894,8 @@ impl Portal {
         })?;
         for output in out {
             match output {
-                Output::Publish { stream: Stream::Keypoint, payload, delivery, to } => {
-                    let stream = Stream::Keypoint;
-                    let Some(publish) = publish(Outgoing { stream, payload, delivery, to }) else {
-                        continue;
-                    };
-                    lp.publish_data(packet(publish))
+                Output::Publish { stream, payload, delivery, to } => {
+                    lp.publish_data(Publish { stream, payload, delivery, to }.into())
                         .await
                         .map_err(|e| PortalError::Room(e.to_string()))?;
                 }
@@ -973,27 +918,6 @@ impl Portal {
     }
 }
 
-/// The fields of an `Output::Publish`.
-struct Outgoing {
-    stream: Stream,
-    payload: Vec<u8>,
-    delivery: Delivery,
-    to: Option<String>,
-}
-
-/// A core publish as a LiveKit data packet: the stream's topic, reliable
-/// only for `Delivery::Reliable` (`LatestOnly` and `BestEffort` both ride
-/// the lossy channel), and LiveKit's own addressing for a hinted peer.
-fn publish(outgoing: Outgoing) -> Option<Publish> {
-    let Outgoing { stream, payload, delivery, to } = outgoing;
-    let Some(topic) = wire::topic(stream) else {
-        log::warn!("[publish-failed] stream '{}' has no LiveKit topic", stream.name());
-        return None;
-    };
-    let reliable = delivery == Delivery::Reliable;
-    Some(Publish { topic, payload, reliable, destinations: to.into_iter().collect() })
-}
-
 /// Wrap a Portal `RpcHandler` in the signature the SDK expects and install
 /// it on the given LocalParticipant. Payload types are converted at the
 /// boundary — the SDK's `RpcInvocationData` / `RpcError` never leak into
@@ -1002,8 +926,15 @@ fn register_handler_on(lp: &LocalParticipant, method: String, handler: RpcHandle
     lp.register_rpc_method(method, move |data| {
         let handler = handler.clone();
         Box::pin(async move {
-            let core_data = crate::rpc::invocation_from_sdk(data);
-            handler(core_data).await.map_err(crate::rpc::rpc_error_to_sdk)
+            let data = RpcInvocationData {
+                request_id: data.request_id,
+                caller_identity: data.caller_identity.as_str().to_string(),
+                payload: data.payload,
+                response_timeout: data.response_timeout,
+            };
+            handler(data)
+                .await
+                .map_err(|e| livekit::prelude::RpcError::new(e.code, e.message, e.data))
         })
     });
 }

@@ -293,24 +293,17 @@ impl From<Event<WebFrame>> for JsEvent {
     }
 }
 
-impl JsOutput {
-    /// Map a core output onto LiveKit, the way the native driver does.
-    /// `None` for a stream LiveKit carries natively (control, presence),
-    /// which the core never publishes under LiveKit's caps.
-    pub fn from_core(output: Output<WebFrame>) -> Option<Self> {
-        Some(match output {
-            Output::Publish { stream, payload, delivery, to } => {
-                let Some(topic) = livekit::topic(stream) else {
-                    log::warn!("[publish-failed] stream '{}' has no LiveKit topic", stream.name());
-                    return None;
-                };
-                JsOutput::Publish {
-                    topic,
-                    payload: ByteBuf::from(payload),
-                    reliable: delivery == Delivery::Reliable,
-                    to,
-                }
-            }
+/// Map a core output onto LiveKit, the way the native driver does.
+impl From<Output<WebFrame>> for JsOutput {
+    fn from(output: Output<WebFrame>) -> Self {
+        match output {
+            Output::Publish { stream, payload, delivery, to } => JsOutput::Publish {
+                topic: livekit::topic(stream)
+                    .expect("LiveKit caps keep control and presence off data streams"),
+                payload: ByteBuf::from(payload),
+                reliable: delivery == Delivery::Reliable,
+                to,
+            },
             Output::SetPresence { id, presence } => JsOutput::SetAttributes {
                 id: id.map(|id| id.0),
                 attributes: livekit::active_operator_attributes(&presence),
@@ -323,12 +316,12 @@ impl JsOutput {
             }
             Output::Emit(event) => JsOutput::Event { event: event.into() },
             Output::ScheduleWake { at_us } => JsOutput::Wake { at_us },
-        })
+        }
     }
 }
 
 pub fn outputs(out: Vec<Output<WebFrame>>) -> Result<JsValue, JsError> {
-    let out: Vec<JsOutput> = out.into_iter().filter_map(JsOutput::from_core).collect();
+    let out: Vec<JsOutput> = out.into_iter().map(Into::into).collect();
     to_value(&out)
 }
 

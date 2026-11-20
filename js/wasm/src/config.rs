@@ -133,7 +133,18 @@ impl From<&PortalConfig> for ConfigInfo {
 
 impl From<&FieldSpec> for FieldInfo {
     fn from(f: &FieldSpec) -> Self {
-        Self { name: f.name.clone(), dtype: dtype_name(f.dtype) }
+        let dtype = match f.dtype {
+            DType::F64 => "f64",
+            DType::F32 => "f32",
+            DType::I32 => "i32",
+            DType::I16 => "i16",
+            DType::I8 => "i8",
+            DType::U32 => "u32",
+            DType::U16 => "u16",
+            DType::U8 => "u8",
+            DType::Bool => "bool",
+        };
+        Self { name: f.name.clone(), dtype }
     }
 }
 
@@ -148,20 +159,6 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::Raw => "raw",
         Codec::Png => "png",
         Codec::Mjpeg => "mjpeg",
-    }
-}
-
-fn dtype_name(dtype: DType) -> &'static str {
-    match dtype {
-        DType::F64 => "f64",
-        DType::F32 => "f32",
-        DType::I32 => "i32",
-        DType::I16 => "i16",
-        DType::I8 => "i8",
-        DType::U32 => "u32",
-        DType::U16 => "u16",
-        DType::U8 => "u8",
-        DType::Bool => "bool",
     }
 }
 

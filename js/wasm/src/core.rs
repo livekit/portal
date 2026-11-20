@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use livekit_portal_core::codec::Codec;
 use livekit_portal_core::frame_video::{FrameVideoTracks, RgbFrame, build_frame_payload};
 use livekit_portal_core::livekit;
 use livekit_portal_core::types::FrameSource;
@@ -406,15 +405,19 @@ impl Core {
                         "track '{track}' sends byte frames: pass rgb, width and height"
                     )));
                 };
-                let payload = self.encode(EncodeFrame {
-                    track: &track,
+                let payload = build_frame_payload(RgbFrame {
+                    track_name: &track,
                     codec,
-                    quality,
-                    rgb: &rgb,
                     width,
                     height,
                     timestamp_us: route.timestamp_us,
-                })?;
+                    rgb: &rgb,
+                    quality,
+                })
+                .map_err(err)?;
+                if let Some(metrics) = self.inner.metrics_registry().track(&track) {
+                    metrics.record_sent_bytes(payload.len());
+                }
                 VideoRouteOutput {
                     timestamp_us: route.timestamp_us,
                     transport: "bytes",
@@ -492,37 +495,9 @@ impl Core {
     }
 }
 
-struct EncodeFrame<'a> {
-    track: &'a str,
-    codec: Codec,
-    quality: u8,
-    rgb: &'a [u8],
-    width: u32,
-    height: u32,
-    timestamp_us: u64,
-}
-
 impl Core {
     fn step(&mut self, input: Input<'_, WebFrame>, now_us: f64) -> Vec<Output<WebFrame>> {
         self.inner.handle(Step { input, now_us: us(now_us) })
-    }
-
-    fn encode(&self, frame: EncodeFrame<'_>) -> Result<Vec<u8>, JsError> {
-        let EncodeFrame { track, codec, quality, rgb, width, height, timestamp_us } = frame;
-        let payload = build_frame_payload(RgbFrame {
-            track_name: track,
-            codec,
-            width,
-            height,
-            timestamp_us,
-            rgb,
-            quality,
-        })
-        .map_err(err)?;
-        if let Some(metrics) = self.inner.metrics_registry().track(track) {
-            metrics.record_sent_bytes(payload.len());
-        }
-        Ok(payload)
     }
 }
 

@@ -203,6 +203,12 @@ pub struct FieldSpec {
     pub dtype: DType,
 }
 
+impl From<&core::FieldSpec> for FieldSpec {
+    fn from(f: &core::FieldSpec) -> Self {
+        Self { name: f.name.clone(), dtype: f.dtype.into() }
+    }
+}
+
 /// One declared video track: name, codec, and the per-codec options.
 ///
 /// One record for every track regardless of transport, mirroring the core
@@ -230,16 +236,18 @@ pub struct VideoTrackSpec {
     pub height: Option<u32>,
 }
 
-fn videotrackspec_from_core(s: &core::VideoTrackSpec) -> VideoTrackSpec {
-    VideoTrackSpec {
-        name: s.name.clone(),
-        codec: s.codec.into(),
-        quality: s.quality,
-        max_bitrate_kbps: s.max_bitrate_kbps,
-        simulcast: s.simulcast,
-        screencast: s.screencast,
-        width: s.resolution.map(|r| r.width),
-        height: s.resolution.map(|r| r.height),
+impl From<&core::VideoTrackSpec> for VideoTrackSpec {
+    fn from(s: &core::VideoTrackSpec) -> Self {
+        Self {
+            name: s.name.clone(),
+            codec: s.codec.into(),
+            quality: s.quality,
+            max_bitrate_kbps: s.max_bitrate_kbps,
+            simulcast: s.simulcast,
+            screencast: s.screencast,
+            width: s.resolution.map(|r| r.width),
+            height: s.resolution.map(|r| r.height),
+        }
     }
 }
 
@@ -457,14 +465,6 @@ impl From<&core::Keypoint> for Keypoint {
             timestamp_us: k.timestamp_us,
             sender: k.sender.clone(),
         }
-    }
-}
-
-fn keypoint_payload(json: &str) -> PortalResult<serde_json::Map<String, serde_json::Value>> {
-    match serde_json::from_str(json) {
-        Ok(serde_json::Value::Object(map)) => Ok(map),
-        Ok(_) => Err(PortalError::InvalidKeypoint("payload must be a JSON object".into())),
-        Err(e) => Err(PortalError::InvalidKeypoint(format!("payload is not valid JSON: {e}"))),
     }
 }
 
@@ -1001,42 +1001,27 @@ impl PortalConfig {
     /// Every declared video track with its codec and options, in declaration
     /// order. The full readback of what `add_video` was given.
     pub fn video_track_specs(&self) -> Vec<VideoTrackSpec> {
-        self.inner.lock().video_tracks().iter().map(videotrackspec_from_core).collect()
+        self.inner.lock().video_tracks().iter().map(Into::into).collect()
     }
 
     /// The byte-stream subset (Raw / Png / Mjpeg) of `video_track_specs`.
     pub fn frame_video_tracks(&self) -> Vec<VideoTrackSpec> {
-        self.inner.lock().frame_video_tracks().map(videotrackspec_from_core).collect()
+        self.inner.lock().frame_video_tracks().map(Into::into).collect()
     }
 
     /// Declared state schema, in declaration order.
     pub fn state_schema(&self) -> Vec<FieldSpec> {
-        self.inner
-            .lock()
-            .state_schema()
-            .iter()
-            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
-            .collect()
+        self.inner.lock().state_schema().iter().map(Into::into).collect()
     }
 
     /// Declared action schema, in declaration order.
     pub fn action_schema(&self) -> Vec<FieldSpec> {
-        self.inner
-            .lock()
-            .action_schema()
-            .iter()
-            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
-            .collect()
+        self.inner.lock().action_schema().iter().map(Into::into).collect()
     }
 
     /// Declared telemetry schema, in declaration order.
     pub fn telemetry_schema(&self) -> Vec<FieldSpec> {
-        self.inner
-            .lock()
-            .telemetry_schema()
-            .iter()
-            .map(|f| FieldSpec { name: f.name.clone(), dtype: f.dtype.into() })
-            .collect()
+        self.inner.lock().telemetry_schema().iter().map(Into::into).collect()
     }
 
     /// Session name this config was built for.
@@ -1107,10 +1092,6 @@ pub struct Portal {
     // Held only to keep the foreign trait object alive for the lifetime of
     // the Portal — core::Portal's closures already own their own `Arc` clones.
     _callbacks: Arc<dyn PortalCallbacks>,
-    state_fields: Vec<String>,
-    action_fields: Vec<String>,
-    telemetry_fields: Vec<String>,
-    video_tracks: Vec<String>,
     video_track_specs: Vec<VideoTrackSpec>,
 }
 
@@ -1122,13 +1103,8 @@ impl Portal {
     #[uniffi::constructor]
     pub fn new(config: Arc<PortalConfig>, callbacks: Arc<dyn PortalCallbacks>) -> Arc<Self> {
         let cfg = config.inner.lock().clone();
-        let state_fields: Vec<String> = cfg.state_fields().map(String::from).collect();
-        let action_fields: Vec<String> = cfg.action_fields().map(String::from).collect();
-        let telemetry_fields: Vec<String> = cfg.telemetry_fields().map(String::from).collect();
-        let video_tracks: Vec<String> = cfg.video_track_names().map(String::from).collect();
         let video_track_specs: Vec<VideoTrackSpec> =
-            cfg.video_tracks().iter().map(videotrackspec_from_core).collect();
-
+            cfg.video_tracks().iter().map(Into::into).collect();
         let inner = core::Portal::new(cfg);
 
         let cb = callbacks.clone();
@@ -1155,7 +1131,7 @@ impl Portal {
             let cb = callbacks.clone();
             inner
                 .on_observation(move |obs| {
-                    cb.on_observation(observation_from_core(obs));
+                    cb.on_observation(obs.into());
                 })
                 .expect("observation sync is on");
         }
@@ -1173,11 +1149,11 @@ impl Portal {
         // with WebRTC tracks on the core side, so a single registration
         // surface works for both — the foreign side only sees one
         // `on_video_frame(track, frame)` event stream per Portal.
-        for track in &video_tracks {
+        for spec in &video_track_specs {
             let cb = callbacks.clone();
-            let track_name = track.clone();
-            inner.on_video_frame(track, move |_name, frame| {
-                cb.on_video_frame(track_name.clone(), frame_from_core(frame));
+            let track_name = spec.name.clone();
+            inner.on_video_frame(&spec.name, move |_name, frame| {
+                cb.on_video_frame(track_name.clone(), frame.into());
             });
         }
 
@@ -1200,15 +1176,7 @@ impl Portal {
         let cb = callbacks.clone();
         inner.on_telemetry(move |t| cb.on_telemetry(t.into()));
 
-        Arc::new(Self {
-            inner,
-            _callbacks: callbacks,
-            state_fields,
-            action_fields,
-            telemetry_fields,
-            video_tracks,
-            video_track_specs,
-        })
+        Arc::new(Self { inner, _callbacks: callbacks, video_track_specs })
     }
 
     pub async fn connect(&self, url: String, token: String) -> PortalResult<()> {
@@ -1255,7 +1223,7 @@ impl Portal {
     }
 
     pub fn get_observation(&self) -> PortalResult<Option<Observation>> {
-        Ok(self.inner.get_observation()?.as_ref().map(observation_from_core))
+        Ok(self.inner.get_observation()?.as_ref().map(Into::into))
     }
 
     pub fn send_telemetry(
@@ -1291,11 +1259,11 @@ impl Portal {
     }
 
     pub fn get_video_frame(&self, track_name: String) -> Option<VideoFrame> {
-        self.inner.get_video_frame(&track_name).as_ref().map(frame_from_core)
+        self.inner.get_video_frame(&track_name).as_ref().map(Into::into)
     }
 
     pub fn metrics(&self) -> PortalMetrics {
-        metrics_from_core(self.inner.metrics())
+        self.inner.metrics().into()
     }
 
     /// Send a keypoint to the room. Returns the observers that were present.
@@ -1305,7 +1273,11 @@ impl Portal {
         payload_json: String,
         timestamp_us: Option<u64>,
     ) -> PortalResult<Vec<String>> {
-        let payload = keypoint_payload(&payload_json)?;
+        let value = serde_json::from_str(&payload_json)
+            .map_err(|e| PortalError::InvalidKeypoint(format!("payload is not valid JSON: {e}")))?;
+        let serde_json::Value::Object(payload) = value else {
+            return Err(PortalError::InvalidKeypoint("payload must be a JSON object".into()));
+        };
         Ok(self.inner.send_keypoint(&kind, payload, timestamp_us).await?)
     }
 
@@ -1319,21 +1291,21 @@ impl Portal {
     }
 
     pub fn state_fields(&self) -> Vec<String> {
-        self.state_fields.clone()
+        field_names(self.inner.state_schema())
     }
 
     pub fn action_fields(&self) -> Vec<String> {
-        self.action_fields.clone()
+        field_names(self.inner.action_schema())
     }
 
     pub fn telemetry_fields(&self) -> Vec<String> {
-        self.telemetry_fields.clone()
+        field_names(self.inner.telemetry_schema())
     }
 
     /// Names of every declared video track, in declaration order, whatever
     /// transport its codec selects.
     pub fn video_tracks(&self) -> Vec<String> {
-        self.video_tracks.clone()
+        self.video_track_specs.iter().map(|s| s.name.clone()).collect()
     }
 
     /// Every declared video track with its codec and options, in declaration
@@ -1390,7 +1362,14 @@ impl Portal {
     /// Register a method handler. Handlers may be registered before or
     /// after `connect()`; reconnects reapply the stored set.
     pub fn register_rpc_method(&self, method: String, handler: Arc<dyn RpcHandler>) {
-        self.inner.register_rpc_method(&method, wrap_foreign_handler(handler));
+        // Called once per incoming RPC; each call moves its own handle into the future.
+        self.inner.register_rpc_method(
+            &method,
+            Arc::new(move |data: core::RpcInvocationData| {
+                let handler = handler.clone();
+                Box::pin(async move { handler.handle(data.into()).await.map_err(Into::into) })
+            }),
+        );
     }
 
     pub fn unregister_rpc_method(&self, method: String) {
@@ -1969,28 +1948,35 @@ role_portal_methods!(Observer);
 receiving_portal_methods!(Observer);
 
 // ---------------------------------------------------------------------------
-// Conversions from core types. Records own their data, so we copy frame
-// bytes out of the core's `Arc<[u8]>` into `Vec<u8>` at the boundary.
+// Conversions from core types
 // ---------------------------------------------------------------------------
 
-fn frame_from_core(f: &core::VideoFrameData) -> VideoFrame {
-    VideoFrame {
-        width: f.width,
-        height: f.height,
-        data: FrameBytes(f.data.clone()),
-        timestamp_us: f.timestamp_us,
-        source: f.source.into(),
+impl From<&core::VideoFrameData> for VideoFrame {
+    fn from(f: &core::VideoFrameData) -> Self {
+        Self {
+            width: f.width,
+            height: f.height,
+            data: FrameBytes(f.data.clone()),
+            timestamp_us: f.timestamp_us,
+            source: f.source.into(),
+        }
     }
 }
 
-fn observation_from_core(o: &core::Observation) -> Observation {
-    // FFI carries the raw f64 state map across the boundary; foreign
-    // bindings (Python) re-cast to typed values in their own record.
-    Observation {
-        timestamp_us: o.timestamp_us,
-        state: o.raw_state.clone(),
-        frames: o.frames.iter().map(|(k, v)| (k.clone(), frame_from_core(v))).collect(),
+impl From<&core::Observation> for Observation {
+    fn from(o: &core::Observation) -> Self {
+        // FFI carries the raw f64 state map across the boundary; foreign
+        // bindings (Python) re-cast to typed values in their own record.
+        Self {
+            timestamp_us: o.timestamp_us,
+            state: o.raw_state.clone(),
+            frames: o.frames.iter().map(|(k, v)| (k.clone(), v.into())).collect(),
+        }
     }
+}
+
+fn field_names(schema: &[core::FieldSpec]) -> Vec<String> {
+    schema.iter().map(|f| f.name.clone()).collect()
 }
 
 /// Convert the foreign `HashMap<String, f64>` (what UniFFI accepts for
@@ -2014,74 +2000,62 @@ fn f64_to_typed(
         .collect()
 }
 
-/// Adapt a foreign `RpcHandler` trait object to the core handler type.
-/// The outer `Fn` closure is invoked once per incoming RPC; the Arc clone
-/// moves an owned handle into the returned future so the closure can be
-/// called again without consuming its capture.
-fn wrap_foreign_handler(handler: Arc<dyn RpcHandler>) -> core::RpcHandler {
-    Arc::new(move |data: core::RpcInvocationData| {
-        let handler = handler.clone();
-        Box::pin(async move {
-            let ffi_data = RpcInvocationData::from(data);
-            handler.handle(ffi_data).await.map_err(Into::into)
-        })
-    })
-}
-
-fn metrics_from_core(m: core::PortalMetrics) -> PortalMetrics {
-    PortalMetrics {
-        sync: SyncMetrics {
-            observations_emitted: m.sync.observations_emitted,
-            stale_observations_emitted: m.sync.stale_observations_emitted,
-            states_dropped: m.sync.states_dropped,
-            frames_omitted: m.sync.frames_omitted.clone(),
-            match_delta_us_p50: m.sync.match_delta_us_p50,
-            match_delta_us_p95: m.sync.match_delta_us_p95,
-            last_blocker_track: m.sync.last_blocker_track,
-        },
-        transport: TransportMetrics {
-            frames_sent: m.transport.frames_sent,
-            frames_received: m.transport.frames_received,
-            frames_dropped_publisher_full: m.transport.frames_dropped_publisher_full,
-            bytes_sent: m.transport.bytes_sent,
-            bytes_received: m.transport.bytes_received,
-            states_sent: m.transport.states_sent,
-            states_received: m.transport.states_received,
-            actions_sent: m.transport.actions_sent,
-            actions_received: m.transport.actions_received,
-            actions_dropped_stale: m.transport.actions_dropped_stale,
-            telemetry_sent: m.transport.telemetry_sent,
-            telemetry_received: m.transport.telemetry_received,
-            frame_jitter_us: m.transport.frame_jitter_us,
-            state_jitter_us: m.transport.state_jitter_us,
-            action_jitter_us: m.transport.action_jitter_us,
-        },
-        buffers: BufferMetrics {
-            video_fill: m.buffers.video_fill.into_iter().map(|(k, v)| (k, v as u64)).collect(),
-            state_fill: m.buffers.state_fill as u64,
-            evictions: m.buffers.evictions,
-        },
-        rtt: RttMetrics {
-            rtt_us_last: m.rtt.rtt_us_last,
-            rtt_us_mean: m.rtt.rtt_us_mean,
-            rtt_us_p95: m.rtt.rtt_us_p95,
-            pings_sent: m.rtt.pings_sent,
-            pongs_received: m.rtt.pongs_received,
-        },
-        time_sync: TimeSyncMetrics {
-            source: m.time_sync.source.into(),
-            synced: m.time_sync.synced,
-            offset_us: m.time_sync.offset_us,
-            uncertainty_us: m.time_sync.uncertainty_us,
-            measured_offset_us: m.time_sync.measured_offset_us,
-            resyncs: m.time_sync.resyncs,
-            samples_rejected: m.time_sync.samples_rejected,
-        },
-        policy: PolicyMetrics {
-            e2e_us_p50: m.policy.e2e_us_p50,
-            e2e_us_p95: m.policy.e2e_us_p95,
-            correlated_received: m.policy.correlated_received,
-        },
+impl From<core::PortalMetrics> for PortalMetrics {
+    fn from(m: core::PortalMetrics) -> Self {
+        Self {
+            sync: SyncMetrics {
+                observations_emitted: m.sync.observations_emitted,
+                stale_observations_emitted: m.sync.stale_observations_emitted,
+                states_dropped: m.sync.states_dropped,
+                frames_omitted: m.sync.frames_omitted,
+                match_delta_us_p50: m.sync.match_delta_us_p50,
+                match_delta_us_p95: m.sync.match_delta_us_p95,
+                last_blocker_track: m.sync.last_blocker_track,
+            },
+            transport: TransportMetrics {
+                frames_sent: m.transport.frames_sent,
+                frames_received: m.transport.frames_received,
+                frames_dropped_publisher_full: m.transport.frames_dropped_publisher_full,
+                bytes_sent: m.transport.bytes_sent,
+                bytes_received: m.transport.bytes_received,
+                states_sent: m.transport.states_sent,
+                states_received: m.transport.states_received,
+                actions_sent: m.transport.actions_sent,
+                actions_received: m.transport.actions_received,
+                actions_dropped_stale: m.transport.actions_dropped_stale,
+                telemetry_sent: m.transport.telemetry_sent,
+                telemetry_received: m.transport.telemetry_received,
+                frame_jitter_us: m.transport.frame_jitter_us,
+                state_jitter_us: m.transport.state_jitter_us,
+                action_jitter_us: m.transport.action_jitter_us,
+            },
+            buffers: BufferMetrics {
+                video_fill: m.buffers.video_fill.into_iter().map(|(k, v)| (k, v as u64)).collect(),
+                state_fill: m.buffers.state_fill as u64,
+                evictions: m.buffers.evictions,
+            },
+            rtt: RttMetrics {
+                rtt_us_last: m.rtt.rtt_us_last,
+                rtt_us_mean: m.rtt.rtt_us_mean,
+                rtt_us_p95: m.rtt.rtt_us_p95,
+                pings_sent: m.rtt.pings_sent,
+                pongs_received: m.rtt.pongs_received,
+            },
+            time_sync: TimeSyncMetrics {
+                source: m.time_sync.source.into(),
+                synced: m.time_sync.synced,
+                offset_us: m.time_sync.offset_us,
+                uncertainty_us: m.time_sync.uncertainty_us,
+                measured_offset_us: m.time_sync.measured_offset_us,
+                resyncs: m.time_sync.resyncs,
+                samples_rejected: m.time_sync.samples_rejected,
+            },
+            policy: PolicyMetrics {
+                e2e_us_p50: m.policy.e2e_us_p50,
+                e2e_us_p95: m.policy.e2e_us_p95,
+                correlated_received: m.policy.correlated_received,
+            },
+        }
     }
 }
 

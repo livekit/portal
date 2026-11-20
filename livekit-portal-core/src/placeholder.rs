@@ -117,18 +117,9 @@ const MAX_NAME: usize = 20;
 pub fn render(width: u32, height: u32, track_name: &str) -> Bytes {
     let w = width as usize;
     let h = height as usize;
-    let mut buf = vec![0u8; w * h * 3];
-    if w == 0 || h == 0 {
-        return Bytes::from(buf);
-    }
-
-    for y in 0..h {
-        for x in 0..w {
-            let c = if ((x + y) / STRIPE).is_multiple_of(2) { MAGENTA } else { DARK };
-            let i = (y * w + x) * 3;
-            buf[i..i + 3].copy_from_slice(&c);
-        }
-    }
+    let mut px: Vec<[u8; 3]> = (0..w * h)
+        .map(|i| if ((i % w + i / w) / STRIPE).is_multiple_of(2) { MAGENTA } else { DARK })
+        .collect();
 
     // Integer scale keeps glyph edges crisp. ~120px of width per 20 columns
     // of text is the smallest that stays readable on a teleop grid tile.
@@ -146,58 +137,36 @@ pub fn render(width: u32, height: u32, track_name: &str) -> Bytes {
     if text_h + pad * 2 > h {
         // No room for a legible label; the stripes alone still read as
         // "synthetic", which is the property that matters most.
-        return Bytes::from(buf);
+        return Bytes::from(px.into_flattened());
     }
 
     let band_top = (h - (text_h + pad * 2)) / 2;
     let band_bot = band_top + text_h + pad * 2;
-    for y in band_top..band_bot {
-        for x in 0..w {
-            let i = (y * w + x) * 3;
-            buf[i..i + 3].copy_from_slice(&BAND);
-        }
-    }
+    px[band_top * w..band_bot * w].fill(BAND);
 
-    let mut y = band_top + pad;
-    for line in lines {
+    // `scale`x nearest-neighbour blit. A line that fits is centred, so every
+    // glyph pixel lands inside the band.
+    for (k, line) in lines.into_iter().enumerate() {
         let text_w = line.chars().count() * ADVANCE * scale;
-        if text_w <= w {
-            draw_text(&mut buf, w, (w - text_w) / 2, y, line, scale);
+        if text_w > w {
+            continue;
         }
-        y += line_h + gap;
-    }
-
-    Bytes::from(buf)
-}
-
-/// Blit `text` at `(ox, oy)`, `scale`x nearest-neighbour. Glyph pixels that
-/// would fall outside the buffer are skipped, so callers need not pre-check
-/// the exact right edge.
-fn draw_text(buf: &mut [u8], w: usize, ox: usize, oy: usize, text: &str, scale: usize) {
-    let h = buf.len() / (w * 3);
-    for (n, ch) in text.chars().enumerate() {
-        let g = glyph(ch);
-        let gx = ox + n * ADVANCE * scale;
-        for (row, bits) in g.iter().enumerate() {
-            for col in 0..GLYPH_W {
+        let oy = band_top + pad + k * (line_h + gap);
+        let ox = (w - text_w) / 2;
+        for (n, ch) in line.chars().enumerate() {
+            for (row, bits) in glyph(ch).iter().enumerate() {
                 // Bit 4 is the leftmost column of the glyph.
-                if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
-                    continue;
-                }
-                for sy in 0..scale {
-                    for sx in 0..scale {
-                        let px = gx + col * scale + sx;
-                        let py = oy + row * scale + sy;
-                        if px >= w || py >= h {
-                            continue;
-                        }
-                        let i = (py * w + px) * 3;
-                        buf[i..i + 3].copy_from_slice(&TEXT);
+                for col in (0..GLYPH_W).filter(|col| bits & (1 << (GLYPH_W - 1 - col)) != 0) {
+                    let x = ox + n * ADVANCE * scale + col * scale;
+                    for y in oy + row * scale..oy + (row + 1) * scale {
+                        px[y * w + x..][..scale].fill(TEXT);
                     }
                 }
             }
         }
     }
+
+    Bytes::from(px.into_flattened())
 }
 
 #[cfg(test)]

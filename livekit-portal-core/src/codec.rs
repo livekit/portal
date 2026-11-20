@@ -140,8 +140,7 @@ pub fn check_rgb(rgb: &[u8], width: u32, height: u32) -> CodecResult<()> {
 pub fn estimated_encoded_size(width: u32, height: u32, codec: Codec) -> usize {
     let raw = (width as usize).saturating_mul(height as usize).saturating_mul(3);
     match codec {
-        Codec::Raw => raw,
-        Codec::Png => raw,
+        Codec::Raw | Codec::Png => raw,
         Codec::Mjpeg => (raw / 8).max(1024),
         Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
             "WebRTC codecs ride the WebRTC media path, not the byte-stream encode path"
@@ -204,8 +203,7 @@ pub fn encode_frame_into(
             );
             encoder
                 .write_image(rgb, width, height, ExtendedColorType::Rgb8)
-                .map_err(|e| CodecError::EncodeFailed(e.to_string()))?;
-            Ok(())
+                .map_err(|e| CodecError::EncodeFailed(e.to_string()))
         }
         Codec::Mjpeg => JpegEncoder::new_with_quality(&mut *out, quality)
             .write_image(rgb, width, height, ExtendedColorType::Rgb8)
@@ -229,38 +227,21 @@ pub fn decode_frame(
     declared_width: u32,
     declared_height: u32,
 ) -> CodecResult<DecodedFrame> {
-    match codec {
+    let format = match codec {
         Codec::Raw => {
             check_rgb(&bytes, declared_width, declared_height)?;
-            Ok(DecodedFrame { rgb: bytes, width: declared_width, height: declared_height })
+            return Ok(DecodedFrame { rgb: bytes, width: declared_width, height: declared_height });
         }
-        Codec::Png => decode_with_image_crate(
-            &bytes,
-            image::ImageFormat::Png,
-            declared_width,
-            declared_height,
-        ),
-        Codec::Mjpeg => decode_with_image_crate(
-            &bytes,
-            image::ImageFormat::Jpeg,
-            declared_width,
-            declared_height,
-        ),
+        Codec::Png => image::ImageFormat::Png,
+        Codec::Mjpeg => image::ImageFormat::Jpeg,
         Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
             "WebRTC codecs ride the WebRTC media path, not the byte-stream decode path"
         ),
-    }
-}
-
-fn decode_with_image_crate(
-    bytes: &[u8],
-    format: image::ImageFormat,
-    declared_width: u32,
-    declared_height: u32,
-) -> CodecResult<DecodedFrame> {
-    let cursor = Cursor::new(bytes);
-    let reader = image::ImageReader::with_format(cursor, format);
-    let decoded = reader.decode().map_err(|e| CodecError::DecodeFailed(e.to_string()))?.into_rgb8();
+    };
+    let decoded = image::ImageReader::with_format(Cursor::new(&bytes[..]), format)
+        .decode()
+        .map_err(|e| CodecError::DecodeFailed(e.to_string()))?
+        .into_rgb8();
     let (w, h) = decoded.dimensions();
     if (declared_width != 0 || declared_height != 0)
         && (w != declared_width || h != declared_height)

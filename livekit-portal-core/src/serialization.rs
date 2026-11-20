@@ -68,12 +68,16 @@ pub fn action_fingerprint(schema: &[FieldSpec]) -> u32 {
 
 /// Size of a `serialize_values` packet for `schema`.
 pub fn state_packet_len(schema: &[FieldSpec]) -> usize {
-    HEADER_LEN + schema.iter().map(|f| f.dtype.size_bytes()).sum::<usize>()
+    HEADER_LEN + payload_len(schema)
 }
 
 /// Size of a `serialize_action` packet for `schema`.
 pub fn action_packet_len(schema: &[FieldSpec]) -> usize {
-    CORRELATED_HEADER_LEN + schema.iter().map(|f| f.dtype.size_bytes()).sum::<usize>()
+    CORRELATED_HEADER_LEN + payload_len(schema)
+}
+
+fn payload_len(schema: &[FieldSpec]) -> usize {
+    schema.iter().map(|f| f.dtype.size_bytes()).sum()
 }
 
 /// Stable on-wire/hash tag for a dtype. Never renumber — changes break
@@ -112,18 +116,10 @@ pub fn serialize_values(
     values: &[f64],
     schema: &[FieldSpec],
 ) -> EncodeResult {
-    debug_assert_eq!(values.len(), schema.len());
-    let payload_bytes: usize = schema.iter().map(|f| f.dtype.size_bytes()).sum();
-    let mut buf = Vec::with_capacity(HEADER_LEN + payload_bytes);
+    let mut buf = Vec::with_capacity(state_packet_len(schema));
     buf.extend_from_slice(&fingerprint.to_le_bytes());
     buf.extend_from_slice(&timestamp_us.to_le_bytes());
-    let mut saturated_indices = Vec::new();
-    for (i, (v, field)) in values.iter().zip(schema.iter()).enumerate() {
-        if field.dtype.encode(*v, &mut buf) {
-            saturated_indices.push(i);
-        }
-    }
-    EncodeResult { payload: buf, saturated_indices }
+    encode_fields(buf, values, schema)
 }
 
 /// Serialize an action with its optional `in_reply_to_ts_us` correlation,
@@ -139,18 +135,22 @@ pub fn serialize_action(
     values: &[f64],
     schema: &[FieldSpec],
 ) -> EncodeResult {
-    debug_assert_eq!(values.len(), schema.len());
-    let payload_bytes: usize = schema.iter().map(|f| f.dtype.size_bytes()).sum();
-    let mut buf = Vec::with_capacity(CORRELATED_HEADER_LEN + payload_bytes);
+    let mut buf = Vec::with_capacity(action_packet_len(schema));
     buf.extend_from_slice(&fingerprint.to_le_bytes());
     buf.extend_from_slice(&timestamp_us.to_le_bytes());
     buf.extend_from_slice(&in_reply_to_ts_us.unwrap_or(0).to_le_bytes());
-    let mut saturated_indices = Vec::new();
-    for (i, (v, field)) in values.iter().zip(schema.iter()).enumerate() {
-        if field.dtype.encode(*v, &mut buf) {
-            saturated_indices.push(i);
-        }
-    }
+    encode_fields(buf, values, schema)
+}
+
+/// Append `values` to the already-written header in `buf`.
+fn encode_fields(mut buf: Vec<u8>, values: &[f64], schema: &[FieldSpec]) -> EncodeResult {
+    debug_assert_eq!(values.len(), schema.len());
+    let saturated_indices = values
+        .iter()
+        .zip(schema)
+        .enumerate()
+        .filter_map(|(i, (v, field))| field.dtype.encode(*v, &mut buf).then_some(i))
+        .collect();
     EncodeResult { payload: buf, saturated_indices }
 }
 
@@ -169,30 +169,10 @@ pub fn deserialize_action(
             data.len()
         ))));
     }
-    let fp_got = u32::from_le_bytes(data[0..4].try_into().unwrap());
-    if fp_got != fingerprint {
-        return Err(DecodeError::SchemaMismatch { expected: fingerprint, got: fp_got });
-    }
-    let payload_bytes: usize = schema.iter().map(|f| f.dtype.size_bytes()).sum();
-    let expected_len = CORRELATED_HEADER_LEN + payload_bytes;
-    if data.len() != expected_len {
-        return Err(DecodeError::Malformed(PortalError::Deserialization(format!(
-            "expected {} bytes, got {}",
-            expected_len,
-            data.len()
-        ))));
-    }
-    let timestamp_us = u64::from_le_bytes(data[4..12].try_into().unwrap());
-    let reply_raw = u64::from_le_bytes(data[12..20].try_into().unwrap());
-    let in_reply_to_ts_us = (reply_raw != 0).then_some(reply_raw);
-    let mut values = Vec::with_capacity(schema.len());
-    let mut offset = CORRELATED_HEADER_LEN;
-    for f in schema.iter() {
-        let width = f.dtype.size_bytes();
-        values.push(f.dtype.decode(&data[offset..offset + width])?);
-        offset += width;
-    }
-    Ok((timestamp_us, in_reply_to_ts_us, values))
+    check_fingerprint(data, fingerprint)?;
+    let values = decode_fields(data, CORRELATED_HEADER_LEN, schema)?;
+    let reply_raw = le_u64(&data[12..]);
+    Ok((le_u64(&data[4..]), (reply_raw != 0).then_some(reply_raw), values))
 }
 
 /// Reasons a receive-side deserialize can fail. Split so the caller can
@@ -229,12 +209,32 @@ pub fn deserialize_values(
             data.len()
         ))));
     }
-    let fp_got = u32::from_le_bytes(data[0..4].try_into().unwrap());
-    if fp_got != fingerprint {
-        return Err(DecodeError::SchemaMismatch { expected: fingerprint, got: fp_got });
+    check_fingerprint(data, fingerprint)?;
+    let values = decode_fields(data, HEADER_LEN, schema)?;
+    Ok((le_u64(&data[4..]), values))
+}
+
+/// `data` must hold at least the 4-byte fingerprint.
+fn check_fingerprint(data: &[u8], expected: u32) -> Result<(), DecodeError> {
+    let got = u32::from_le_bytes(data[..4].try_into().expect("4-byte slice"));
+    if got != expected {
+        return Err(DecodeError::SchemaMismatch { expected, got });
     }
-    let payload_bytes: usize = schema.iter().map(|f| f.dtype.size_bytes()).sum();
-    let expected_len = HEADER_LEN + payload_bytes;
+    Ok(())
+}
+
+fn le_u64(data: &[u8]) -> u64 {
+    u64::from_le_bytes(data[..8].try_into().expect("8-byte slice"))
+}
+
+/// Check `data` is exactly `header_len` plus the schema's payload, then
+/// decode the fields after the header.
+fn decode_fields(
+    data: &[u8],
+    header_len: usize,
+    schema: &[FieldSpec],
+) -> Result<Vec<f64>, DecodeError> {
+    let expected_len = header_len + payload_len(schema);
     if data.len() != expected_len {
         return Err(DecodeError::Malformed(PortalError::Deserialization(format!(
             "expected {} bytes, got {}",
@@ -242,15 +242,16 @@ pub fn deserialize_values(
             data.len()
         ))));
     }
-    let timestamp_us = u64::from_le_bytes(data[4..12].try_into().unwrap());
-    let mut values = Vec::with_capacity(schema.len());
-    let mut offset = HEADER_LEN;
-    for f in schema.iter() {
-        let width = f.dtype.size_bytes();
-        values.push(f.dtype.decode(&data[offset..offset + width])?);
-        offset += width;
-    }
-    Ok((timestamp_us, values))
+    let mut offset = header_len;
+    let values = schema
+        .iter()
+        .map(|f| {
+            let width = f.dtype.size_bytes();
+            offset += width;
+            f.dtype.decode(&data[offset - width..offset]).expect("packet length checked above")
+        })
+        .collect();
+    Ok(values)
 }
 
 #[cfg(test)]

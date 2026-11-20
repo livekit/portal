@@ -35,8 +35,8 @@ use bytes::Bytes;
 use crate::config::PortalConfig;
 use crate::control::{decode_presence, encode_presence};
 use crate::core::{
-    Connect, CoreInit, Event, Input, OpId, Output, PortalCore, RPC_RECIPIENT_DISCONNECTED, RpcId,
-    RpcRequest, SET_ACTIVE_OPERATOR_RPC, SendVideoFrame, Step, VideoTransport,
+    Connect, CoreInit, Event, Input, OpId, Output, PortalCore, RPC_RECIPIENT_DISCONNECTED,
+    ReplyRpc, RpcId, RpcRequest, SET_ACTIVE_OPERATOR_RPC, SendVideoFrame, Step, VideoTransport,
 };
 use crate::error::{PortalError, PortalResult};
 use crate::frame_video::{RgbFrame, build_frame_payload};
@@ -136,6 +136,16 @@ struct Peer {
     wake_at: Option<u64>,
     events: Vec<Event<VideoFrameData>>,
     rpc_handler: Option<RpcHandler>,
+}
+
+impl Peer {
+    /// Answer an application RPC with the peer's handler.
+    fn answer(&mut self, method: &str, payload: &str) -> Result<String, RpcError> {
+        match &mut self.rpc_handler {
+            Some(handler) => handler(method, payload),
+            None => Err(RpcError::new(1400, "Method not supported at destination", None)),
+        }
+    }
 }
 
 /// One publisher's stream (or video track) as one subscriber sees it.
@@ -317,24 +327,29 @@ impl Loopback {
     pub fn run_for(&mut self, duration_us: u64) {
         let until = self.now_us + duration_us;
         loop {
-            let next_message = self.in_flight.iter().map(|m| (m.at_us, m.order)).min();
+            let next_message = self
+                .in_flight
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, m)| (m.at_us, m.order))
+                .map(|(i, m)| (m.at_us, i));
             let next_wake = self
                 .peers
                 .iter()
-                .filter_map(|(id, p)| p.wake_at.map(|at| (net_time(at, p.skew_us), id.clone())))
+                .filter_map(|(id, p)| {
+                    p.wake_at.map(|at| (at.saturating_add_signed(-p.skew_us), id.clone()))
+                })
                 .min();
             match (next_message, next_wake) {
-                (Some((at, _)), wake)
+                (Some((at, i)), wake)
                     if at <= until && wake.as_ref().is_none_or(|(w, _)| at <= *w) =>
                 {
                     self.now_us = self.now_us.max(at);
-                    self.deliver_next();
+                    self.deliver(i);
                 }
                 (_, Some((at, id))) if at <= until => {
                     self.now_us = self.now_us.max(at);
-                    if let Some(p) = self.peers.get_mut(&id) {
-                        p.wake_at = None;
-                    }
+                    self.peers.get_mut(&id).expect("wake is from a live peer").wake_at = None;
                     self.step(&id, Input::Wake);
                 }
                 _ => break,
@@ -476,12 +491,14 @@ impl Loopback {
     pub fn execute(&mut self, from: &str, out: Vec<Output<VideoFrameData>>) {
         for output in out {
             match output {
-                Output::Publish { stream, payload, delivery, to: _ } => {
+                Output::Publish { stream, mut payload, delivery, to: _ } => {
                     // Broadcast only: `to` is a hint this transport ignores.
-                    let payload = match stream {
-                        Stream::Presence => self.rewrite_presence(from, payload),
-                        _ => payload,
-                    };
+                    if stream == Stream::Presence
+                        && self.peers.get(from).is_some_and(|p| p.protocol_version.is_some())
+                        && let Some(p) = decode_presence(&payload)
+                    {
+                        payload = encode_presence(&self.announced(from, p));
+                    }
                     let lane = Lane::Data(stream);
                     let message = Message::Data { stream, payload };
                     let seq = self.next_seq(from, &lane);
@@ -535,7 +552,19 @@ impl Loopback {
                     let message = Message::Result { id: op, result };
                     self.send(from, &caller, Lane::Room, Delivery::Reliable, message);
                 }
-                Output::Emit(event) => self.emit(from, event),
+                Output::Emit(event) => {
+                    let Some(peer) = self.peers.get_mut(from) else {
+                        continue;
+                    };
+                    let Event::RpcRequest { id, method, payload, .. } = &event else {
+                        peer.events.push(event);
+                        continue;
+                    };
+                    let result = peer.answer(method, payload);
+                    let out = peer.core.reply_rpc(ReplyRpc { id: *id, result });
+                    peer.events.push(event);
+                    self.execute(from, out);
+                }
                 Output::ScheduleWake { at_us } => {
                     if let Some(p) = self.peers.get_mut(from) {
                         p.wake_at = at_us;
@@ -545,40 +574,12 @@ impl Loopback {
         }
     }
 
-    fn emit(&mut self, id: &str, event: Event<VideoFrameData>) {
-        let Event::RpcRequest { id: rpc, method, payload, .. } = &event else {
-            if let Some(p) = self.peers.get_mut(id) {
-                p.events.push(event);
-            }
-            return;
-        };
-        let Some(peer) = self.peers.get_mut(id) else {
-            return;
-        };
-        let result = match &mut peer.rpc_handler {
-            Some(handler) => handler(method, payload),
-            None => Err(RpcError::new(1400, "Method not supported at destination", None)),
-        };
-        let out = peer.core.reply_rpc(crate::core::ReplyRpc { id: *rpc, result });
-        peer.events.push(event);
-        self.execute(id, out);
-    }
-
     /// The presence `id` announces, with any version override applied.
     fn announced(&self, id: &str, mut presence: Presence) -> Presence {
         if let Some(version) = self.peers.get(id).and_then(|p| p.protocol_version.clone()) {
             presence.protocol_version = Some(version);
         }
         presence
-    }
-
-    fn rewrite_presence(&self, id: &str, payload: Vec<u8>) -> Vec<u8> {
-        match decode_presence(&payload) {
-            Some(p) if self.peers.get(id).is_some_and(|p| p.protocol_version.is_some()) => {
-                encode_presence(&self.announced(id, p))
-            }
-            _ => payload,
-        }
     }
 
     fn next_seq(&mut self, from: &str, lane: &Lane) -> u64 {
@@ -599,7 +600,11 @@ impl Loopback {
             self.links.get(&(from.clone(), to.clone())).copied().unwrap_or(self.default_link);
         let reliable = delivery == Delivery::Reliable;
         let lossy = matches!(delivery, Delivery::BestEffort { .. });
-        if lossy && link.loss > 0.0 && self.random_unit() < link.loss {
+        // A uniform draw in `0.0..1.0` from the top 53 bits.
+        if lossy
+            && link.loss > 0.0
+            && link.loss > (self.random() >> 11) as f64 / (1u64 << 53) as f64
+        {
             return;
         }
         let jitter = match link.jitter_us {
@@ -629,16 +634,8 @@ impl Loopback {
         });
     }
 
-    fn deliver_next(&mut self) {
-        let Some(i) = self
-            .in_flight
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, m)| (m.at_us, m.order))
-            .map(|(i, _)| i)
-        else {
-            return;
-        };
+    /// Deliver the in-flight message at `i`.
+    fn deliver(&mut self, i: usize) {
         let m = self.in_flight.swap_remove(i);
         if !self.peers.contains_key(&m.to) {
             return;
@@ -673,30 +670,20 @@ impl Loopback {
                 self.step(to, Input::PresenceChanged { peer: from, presence })
             }
             Message::Left => self.step(to, Input::PeerLeft { peer: from }),
+            // Portal's own method goes to the core, application methods to
+            // the peer's handler, as on LiveKit.
+            Message::Call { key, method, payload } if method == SET_ACTIVE_OPERATOR_RPC => {
+                let request =
+                    RpcRequest { id: RpcId(key), method: &method, from, payload: &payload };
+                self.step(to, Input::RpcRequest(request));
+            }
             Message::Call { key, method, payload } => {
-                self.on_native_call(NativeCall { key, from, to, method, payload })
+                let peer = self.peers.get_mut(to).expect("recipient checked above");
+                let result = peer.answer(&method, &payload);
+                self.execute(to, vec![Output::RpcReply { id: RpcId(key), result }]);
             }
             Message::Result { id, result } => self.step(to, Input::RpcResponse { id, result }),
         }
-    }
-
-    /// Native RPC reaching its callee: Portal's own method goes to the core,
-    /// application methods to the peer's handler, as on LiveKit.
-    fn on_native_call(&mut self, call: NativeCall<'_>) {
-        let NativeCall { key, from, to, method, payload } = call;
-        if method == SET_ACTIVE_OPERATOR_RPC {
-            let request = RpcRequest { id: RpcId(key), method: &method, from, payload: &payload };
-            self.step(to, Input::RpcRequest(request));
-            return;
-        }
-        let Some(peer) = self.peers.get_mut(to) else {
-            return;
-        };
-        let result = match &mut peer.rpc_handler {
-            Some(handler) => handler(&method, &payload),
-            None => Err(RpcError::new(1400, "Method not supported at destination", None)),
-        };
-        self.execute(to, vec![Output::RpcReply { id: RpcId(key), result }]);
     }
 
     fn random(&mut self) -> u64 {
@@ -706,10 +693,6 @@ impl Loopback {
         x ^= x << 17;
         self.rng = x;
         x
-    }
-
-    fn random_unit(&mut self) -> f64 {
-        (self.random() >> 11) as f64 / (1u64 << 53) as f64
     }
 }
 
@@ -731,18 +714,6 @@ struct Send {
     message: Message,
 }
 
-struct NativeCall<'a> {
-    key: u64,
-    from: &'a str,
-    to: &'a str,
-    method: String,
-    payload: String,
-}
-
 fn local_time(net_us: u64, skew_us: i64) -> u64 {
     net_us.saturating_add_signed(skew_us)
-}
-
-fn net_time(local_us: u64, skew_us: i64) -> u64 {
-    local_us.saturating_add_signed(-skew_us)
 }

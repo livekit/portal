@@ -69,26 +69,6 @@ const HEADER_FIXED_LEN: usize = 16;
 /// the receive path before we drop.
 const TRACK_NAME_MAX: usize = 256;
 
-fn codec_id(c: Codec) -> u8 {
-    match c {
-        Codec::Raw => 0,
-        Codec::Png => 1,
-        Codec::Mjpeg => 2,
-        Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
-            "WebRTC codecs ride the WebRTC media path, not the byte-stream wire format"
-        ),
-    }
-}
-
-fn codec_from_id(id: u8) -> Option<Codec> {
-    match id {
-        0 => Some(Codec::Raw),
-        1 => Some(Codec::Png),
-        2 => Some(Codec::Mjpeg),
-        _ => None,
-    }
-}
-
 /// One RGB24 frame to put on the wire.
 pub struct RgbFrame<'a> {
     pub track_name: &'a str,
@@ -137,7 +117,14 @@ pub fn build_frame_payload_with(frame: RgbFrame<'_>, encode: EncodeFn) -> Portal
     let header_len = HEADER_FIXED_LEN + name_bytes.len();
     let mut buf = Vec::with_capacity(header_len + estimated_encoded_size(width, height, codec));
     buf.push(WIRE_VERSION);
-    buf.push(codec_id(codec));
+    buf.push(match codec {
+        Codec::Raw => 0,
+        Codec::Png => 1,
+        Codec::Mjpeg => 2,
+        Codec::H264 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 | Codec::H265 => unreachable!(
+            "WebRTC codecs ride the WebRTC media path, not the byte-stream wire format"
+        ),
+    });
     buf.extend_from_slice(&(width as u16).to_le_bytes());
     buf.extend_from_slice(&(height as u16).to_le_bytes());
     buf.extend_from_slice(&timestamp_us.to_le_bytes());
@@ -172,7 +159,12 @@ pub fn deserialize_frame(bytes: &[u8]) -> Result<DeserializedHeader<'_>, &'stati
     if bytes[0] != WIRE_VERSION {
         return Err("frame_video payload has unknown version");
     }
-    let codec = codec_from_id(bytes[1]).ok_or("unknown codec id")?;
+    let codec = match bytes[1] {
+        0 => Codec::Raw,
+        1 => Codec::Png,
+        2 => Codec::Mjpeg,
+        _ => return Err("unknown codec id"),
+    };
     let width = u16::from_le_bytes([bytes[2], bytes[3]]) as u32;
     let height = u16::from_le_bytes([bytes[4], bytes[5]]) as u32;
     let timestamp_us = u64::from_le_bytes(bytes[6..14].try_into().expect("length checked above"));
@@ -224,13 +216,9 @@ impl FrameVideoTracks {
     /// bump and no memcpy.
     pub fn decode(&self, payload: Bytes) -> Option<ReceivedFrame> {
         let wire_len = payload.len();
-        let header = match deserialize_frame(&payload) {
-            Ok(h) => h,
-            Err(e) => {
-                log::warn!("[bad-payload] frame_video: bad header ({e})");
-                return None;
-            }
-        };
+        let header = deserialize_frame(&payload)
+            .inspect_err(|e| log::warn!("[bad-payload] frame_video: bad header ({e})"))
+            .ok()?;
         let Some(&declared) = self.codecs.get(header.track_name) else {
             log::warn!(
                 "[unknown-track] frame_video: track '{}' not declared, dropping frame",
@@ -249,15 +237,11 @@ impl FrameVideoTracks {
         }
         let track_name = header.track_name.to_string();
         let DeserializedHeader { codec, width, height, timestamp_us, payload_offset, .. } = header;
-        // Zero-copy slice of the codec payload.
-        let codec_payload = payload.slice(payload_offset..);
-        let decoded = match decode_frame(codec_payload, codec, width, height) {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("[decode-failed] frame_video '{track_name}': decode failed: {e}");
-                return None;
-            }
-        };
+        let decoded = decode_frame(payload.slice(payload_offset..), codec, width, height)
+            .inspect_err(|e| {
+                log::warn!("[decode-failed] frame_video '{track_name}': decode failed: {e}")
+            })
+            .ok()?;
         let frame = VideoFrameData {
             width: decoded.width,
             height: decoded.height,
@@ -397,7 +381,7 @@ mod tests {
     fn rejects_oversize_track_name_on_deserialize() {
         // Forge a payload that claims a name length above TRACK_NAME_MAX
         // and confirm the deserializer rejects without trying to read it.
-        let mut bytes = vec![WIRE_VERSION, codec_id(Codec::Raw)];
+        let mut bytes = vec![WIRE_VERSION, 0]; // Raw
         bytes.extend_from_slice(&8u16.to_le_bytes()); // width
         bytes.extend_from_slice(&8u16.to_le_bytes()); // height
         bytes.extend_from_slice(&0u64.to_le_bytes()); // ts

@@ -94,7 +94,18 @@ impl DataPublisher {
     pub fn send_map(&mut self, input: SendMap<'_>) -> PortalResult<Encoded> {
         let SendMap { values, timestamp_us, in_reply_to_ts_us } = input;
         self.check_dtypes(values)?;
-        self.warn_unknown_keys(values);
+        // Small schemas make a linear scan faster than a HashSet lookup.
+        for key in values.keys() {
+            if !self.schema.iter().any(|f| &f.name == key)
+                && self.warned_unknown_keys.insert(key.clone())
+            {
+                log::warn!(
+                    "[unknown-field] stream '{}': field '{}' not in schema, ignored",
+                    self.name,
+                    key
+                );
+            }
+        }
         apply_carry_forward(&self.schema, &mut self.last_values, values);
         let out = match self.stream {
             DataStream::State | DataStream::Telemetry => {
@@ -116,8 +127,16 @@ impl DataPublisher {
             .zip(self.schema.iter())
             .map(|(v, f)| TypedValue::from_f64(*v, f.dtype).as_f64())
             .collect();
-        if !out.saturated_indices.is_empty() {
-            self.warn_saturated(&out.saturated_indices);
+        for &i in &out.saturated_indices {
+            if self.warned_saturated.insert(i) {
+                let field = &self.schema[i];
+                log::warn!(
+                    "[saturated] stream '{}': field '{}' clamped to {:?} range",
+                    self.name,
+                    field.name,
+                    field.dtype
+                );
+            }
         }
         Ok(Encoded { payload: out.payload, wire_values })
     }
@@ -137,36 +156,6 @@ impl DataPublisher {
             }
         }
         Ok(())
-    }
-
-    fn warn_unknown_keys(&mut self, map: &HashMap<String, TypedValue>) {
-        // Small schemas make a linear scan faster than a HashSet lookup.
-        for key in map.keys() {
-            if self.schema.iter().any(|f| &f.name == key) {
-                continue;
-            }
-            if self.warned_unknown_keys.insert(key.clone()) {
-                log::warn!(
-                    "[unknown-field] stream '{}': field '{}' not in schema, ignored",
-                    self.name,
-                    key
-                );
-            }
-        }
-    }
-
-    fn warn_saturated(&mut self, indices: &[usize]) {
-        for &i in indices {
-            if self.warned_saturated.insert(i) {
-                let field = &self.schema[i];
-                log::warn!(
-                    "[saturated] stream '{}': field '{}' clamped to {:?} range",
-                    self.name,
-                    field.name,
-                    field.dtype
-                );
-            }
-        }
     }
 }
 

@@ -59,16 +59,6 @@ impl Roster {
             || self.observers.contains(id)
     }
 
-    /// Whether `id` may steer the active operator.
-    pub fn may_steer(&self, id: &str) -> bool {
-        self.operators.contains(id) || self.observers.contains(id)
-    }
-
-    pub fn clear(&mut self) {
-        self.active_operator = None;
-        self.clear_for_reconnect();
-    }
-
     /// Partial clear when the link is restored. Drops the rosters so the
     /// presence that follows rebuilds them, but keeps `active_operator`
     /// pinned:

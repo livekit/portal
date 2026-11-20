@@ -429,7 +429,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.now_us = now_us;
         let role = self.config.role();
         self.local_peer = Some(local_peer);
-        if role == Role::Robot && active_operator.is_some() {
+        if role == Role::Robot {
             self.roster.active_operator = active_operator;
         }
         for (peer, presence) in peers {
@@ -497,7 +497,8 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
     /// The connection ended, or a connect attempt is being rolled back.
     pub fn disconnect(&mut self) -> Vec<Output<F>> {
         self.local_peer = None;
-        self.roster.clear();
+        self.roster.active_operator = None;
+        self.roster.clear_for_reconnect();
         self.peers.clear();
         self.last_heard_us.clear();
         self.next_heartbeat_us = None;
@@ -505,9 +506,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.action_publisher = None;
         self.telemetry_publisher = None;
         self.newest_telemetry_us.clear();
-        if let Some(mut sb) = self.sync_buffer.take() {
-            sb.clear();
-        }
+        self.sync_buffer = None;
         self.clock.stop_pinging();
         for (id, op) in std::mem::take(&mut self.pending) {
             if let PendingOp::Call { .. } = op {
@@ -543,9 +542,11 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             }
             Input::PeerLeft { peer } => self.peer_left(peer),
             Input::Data { stream, from, payload } => self.on_data(stream, from, payload),
-            Input::FrameBytes { from: _, payload } => self.on_frame_bytes(payload),
+            Input::FrameBytes { payload, .. } => self.on_frame_bytes(payload),
             Input::VideoFrame { track, frame } => self.on_video_frame(track, frame),
-            Input::RpcRequest(request) => self.on_rpc_request(request),
+            Input::RpcRequest(RpcRequest { id, method, from, payload }) => {
+                self.on_call(Caller::Native(id), from, method, payload.to_string())
+            }
             Input::RpcResponse { id, result } => {
                 if self.pending.remove(&id).is_some() {
                     self.out.push(Output::Emit(Event::RpcResult { id, result }));
@@ -639,7 +640,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         }];
         // Echo what the subscription would have delivered from anyone else:
         // the wire values, post-carry-forward and post-saturation.
-        let active = self.is_self_active();
+        let active = self.local_peer.is_some() && self.local_peer == self.roster.active_operator;
         let echo = match self.config.action_subscription() {
             ActionSubscription::None => false,
             ActionSubscription::Active => active,
@@ -713,19 +714,16 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
     ) -> PortalResult<(Option<OpId>, Vec<Output<F>>)> {
         let SetActiveOperator { identity, now_us } = input;
         self.now_us = now_us;
-        if self.local_peer.is_none() {
-            return Err(match self.config.role() {
-                Role::Robot => PortalError::NotConnected,
-                Role::Operator | Role::Observer => PortalError::NoPeer,
-            });
-        }
+        let connected = self.local_peer.is_some();
         let id = match self.config.role() {
+            Role::Robot if !connected => return Err(PortalError::NotConnected),
             Role::Robot => {
                 self.change_active_operator(identity, None);
                 None
             }
             Role::Operator | Role::Observer => {
-                let robot = self.roster.robot.clone().ok_or(PortalError::NoPeer)?;
+                let robot =
+                    self.roster.robot.clone().filter(|_| connected).ok_or(PortalError::NoPeer)?;
                 Some(self.start_call(Call {
                     to: robot,
                     method: SET_ACTIVE_OPERATOR_RPC.to_string(),
@@ -745,9 +743,17 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         if self.local_peer.is_none() {
             return Err(PortalError::NotConnected);
         }
-        let to = match to {
+        // Default: the obvious counterpart, else the only other peer.
+        let to = match to.or_else(|| self.default_peer()) {
             Some(to) => to,
-            None => self.resolve_peer()?,
+            None => {
+                let mut peers = self.peers.iter();
+                match (peers.next(), peers.next()) {
+                    (None, _) => return Err(PortalError::NoPeer),
+                    (Some(peer), None) => peer.clone(),
+                    (Some(_), Some(_)) => return Err(PortalError::AmbiguousPeer),
+                }
+            }
         };
         let id = self.start_call(Call { to, method, payload, timeout_ms });
         Ok((id, self.finish_step()))
@@ -890,7 +896,11 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
 
     fn finish_step(&mut self) -> Vec<Output<F>> {
         self.poll_waiting_rpcs();
-        self.schedule_wake();
+        let next = self.next_wake_us();
+        if next != self.scheduled_wake_us {
+            self.scheduled_wake_us = next;
+            self.out.push(Output::ScheduleWake { at_us: next });
+        }
         std::mem::take(&mut self.out)
     }
 
@@ -930,19 +940,9 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         self.out.push(Output::Emit(event));
     }
 
-    fn is_self_active(&self) -> bool {
-        match (&self.local_peer, &self.roster.active_operator) {
-            (Some(local), Some(active)) => local == active,
-            _ => false,
-        }
-    }
-
+    /// Polyfilled presence only: native transports announce via `SetPresence`.
     fn announce_presence(&mut self) {
-        if self.caps.native_presence {
-            let presence = self.local_presence();
-            self.out.push(Output::SetPresence { id: None, presence });
-            return;
-        }
+        debug_assert!(!self.caps.native_presence);
         self.out.push(Output::Publish {
             stream: Stream::Presence,
             payload: encode_presence(&self.local_presence()),
@@ -975,12 +975,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                     }
                 }
             }
-            Stream::Action => {
-                let Some(origin) = self.gate_action(from) else {
-                    return;
-                };
-                self.on_action(payload, origin);
-            }
+            Stream::Action => self.on_action(payload, from),
             Stream::Telemetry => {
                 let Some(from) = from.filter(|s| self.roster.is_known_peer(s)) else {
                     return;
@@ -991,7 +986,9 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
             Stream::State => {}
             Stream::Presence if !self.caps.native_presence => {
                 if let (Some(from), Some(presence)) = (from, decode_presence(payload)) {
-                    self.on_polyfill_presence(from, presence);
+                    self.peers.insert(from.to_string());
+                    self.last_heard_us.insert(from.to_string(), self.now_us);
+                    self.update_roster(from, &presence);
                 }
             }
             Stream::Control if !self.caps.native_rpc => {
@@ -1003,38 +1000,31 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         }
     }
 
-    /// The active-operator gate for an incoming action. Returns who sent it
-    /// and whether they were active, or `None` to drop it before decoding.
+    /// The active-operator gate runs before decoding. The robot takes only
+    /// the active operator's actions. An operator takes what its
+    /// subscription asks for, so a controller with `None` pays nothing on
+    /// the receive path. In every case the sender must be a recognised
+    /// operator: a pointer seeded before connect or set over RPC can name
+    /// any identity.
     ///
-    /// The robot takes only the active operator's actions. An operator takes
-    /// what its subscription asks for, so a controller with `None` pays
-    /// nothing on the receive path. In every case the sender must be a
-    /// recognised operator: a pointer seeded before connect or set over RPC
-    /// can name any identity.
-    fn gate_action(&self, from: Option<&str>) -> Option<ActionOrigin> {
-        let subscription = match self.config.role() {
-            Role::Robot => ActionSubscription::Active,
-            Role::Operator | Role::Observer => self.config.action_subscription(),
-        };
-        if subscription == ActionSubscription::None {
-            return None;
-        }
-        let sender = from?;
-        if !self.roster.operators.contains(sender) {
-            return None;
-        }
-        let active = self.roster.active_operator.as_deref() == Some(sender);
-        if !active && subscription == ActionSubscription::Active {
-            return None;
-        }
-        Some(ActionOrigin { sender: sender.to_string(), active })
-    }
-
     /// `received_at_us` is on the robot's clock, so the robot's end-to-end
     /// latency compares its own frame timestamps against its own clock.
     /// Jitter uses the local arrival time instead, which never steps with a
     /// sync correction.
-    fn on_action(&mut self, payload: &[u8], origin: ActionOrigin) {
+    fn on_action(&mut self, payload: &[u8], from: Option<&str>) {
+        let subscription = match self.config.role() {
+            Role::Robot => ActionSubscription::Active,
+            Role::Operator | Role::Observer => self.config.action_subscription(),
+        };
+        let Some(sender) = from.filter(|s| {
+            subscription != ActionSubscription::None && self.roster.operators.contains(*s)
+        }) else {
+            return;
+        };
+        let active = self.roster.active_operator.as_deref() == Some(sender);
+        if !active && subscription == ActionSubscription::Active {
+            return;
+        }
         let received_at_us = self.clock.estimate(self.now_us);
         let schema = self.config.action_schema();
         match deserialize_action(payload, self.action_fp, schema) {
@@ -1045,15 +1035,8 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                         self.metrics.record_stale_action();
                         return;
                     }
-                    let newest = self.newest_action_us.get_mut(origin.sender.as_str());
-                    if overtaken(newest.as_deref().copied(), send_ts) {
+                    if !advance(&mut self.newest_action_us, sender, send_ts) {
                         return;
-                    }
-                    match newest {
-                        Some(newest) => *newest = send_ts,
-                        None => {
-                            self.newest_action_us.insert(origin.sender.clone(), send_ts);
-                        }
                     }
                 }
                 self.metrics.record_received(DataStream::Action, send_ts, self.now_us);
@@ -1063,7 +1046,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
                     in_reply_to_ts_us,
                     schema,
                     values: &values,
-                    origin,
+                    origin: ActionOrigin { sender: sender.to_string(), active },
                 }))));
             }
             Err(DecodeError::SchemaMismatch { expected, got }) => {
@@ -1080,7 +1063,7 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         match deserialize_values(payload, self.state_fp, schema) {
             Ok((timestamp_us, values)) => {
                 if !self.config.state_reliable() {
-                    if overtaken(self.newest_state_us, timestamp_us) {
+                    if self.newest_state_us.is_some_and(|n| timestamp_us < n) {
                         return;
                     }
                     self.newest_state_us = Some(timestamp_us);
@@ -1113,15 +1096,8 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         }
         match deserialize_values(payload, self.telemetry_fp, schema) {
             Ok((timestamp_us, values)) => {
-                let newest = self.newest_telemetry_us.get_mut(sender.as_str());
-                if overtaken(newest.as_deref().copied(), timestamp_us) {
+                if !advance(&mut self.newest_telemetry_us, &sender, timestamp_us) {
                     return;
-                }
-                match newest {
-                    Some(newest) => *newest = timestamp_us,
-                    None => {
-                        self.newest_telemetry_us.insert(sender.clone(), timestamp_us);
-                    }
                 }
                 self.metrics.record_received(DataStream::Telemetry, timestamp_us, self.now_us);
                 self.out.push(Output::Emit(Event::Telemetry(build_telemetry(TelemetryRecord {
@@ -1238,12 +1214,6 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         }
     }
 
-    fn on_polyfill_presence(&mut self, from: &str, presence: Presence) {
-        self.peers.insert(from.to_string());
-        self.last_heard_us.insert(from.to_string(), self.now_us);
-        self.update_roster(from, &presence);
-    }
-
     fn on_control(&mut self, from: &str, message: ControlMessage) {
         let local = self.local_peer.as_deref();
         match message {
@@ -1272,52 +1242,46 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         }
     }
 
-    fn on_rpc_request(&mut self, request: RpcRequest<'_>) {
-        let RpcRequest { id, method, from, payload } = request;
-        self.on_call(Caller::Native(id), from, method, payload.to_string());
-    }
-
     fn on_call(&mut self, caller: Caller, from: &str, method: &str, payload: String) {
-        if method != SET_ACTIVE_OPERATOR_RPC {
-            match caller {
-                // Native RPC delivers application methods to the driver's
-                // own handlers, never here.
-                Caller::Native(_) => self.reply(caller, Err(unsupported_method())),
-                Caller::Control { .. } => {
-                    let id = RpcId(self.next_inbound);
-                    self.next_inbound += 1;
-                    self.inbound.insert(id, caller);
-                    self.out.push(Output::Emit(Event::RpcRequest {
-                        id,
-                        from: from.to_string(),
-                        method: method.to_string(),
-                        payload,
-                    }));
-                }
+        let set_active = method == SET_ACTIVE_OPERATOR_RPC;
+        match caller {
+            Caller::Control { .. } if !set_active => {
+                let id = RpcId(self.next_inbound);
+                self.next_inbound += 1;
+                self.inbound.insert(id, caller);
+                self.out.push(Output::Emit(Event::RpcRequest {
+                    id,
+                    from: from.to_string(),
+                    method: method.to_string(),
+                    payload,
+                }));
             }
-            return;
+            // Native RPC delivers application methods to the driver's own
+            // handlers, never here.
+            _ if !set_active || self.config.role() != Role::Robot => {
+                let e = RpcError::new(
+                    RPC_UNSUPPORTED_METHOD,
+                    "Method not supported at destination",
+                    None,
+                );
+                self.reply(caller, Err(e));
+            }
+            // Checked on every step until the caller shows up or the wait ends.
+            _ => self.waiting_rpcs.push(WaitingRpc {
+                caller,
+                from: from.to_string(),
+                payload,
+                deadline_us: self.now_us.saturating_add(RPC_CALLER_ROSTER_WAIT_US),
+            }),
         }
-        if self.config.role() != Role::Robot {
-            self.reply(caller, Err(unsupported_method()));
-            return;
-        }
-        // Checked on every step until the caller shows up or the wait ends.
-        self.waiting_rpcs.push(WaitingRpc {
-            caller,
-            from: from.to_string(),
-            payload,
-            deadline_us: self.now_us.saturating_add(RPC_CALLER_ROSTER_WAIT_US),
-        });
     }
 
     /// Admit waiting `set_active_operator` callers that are now operators or
     /// observers, and refuse the ones whose wait is over.
     fn poll_waiting_rpcs(&mut self) {
-        if self.waiting_rpcs.is_empty() {
-            return;
-        }
         for w in std::mem::take(&mut self.waiting_rpcs) {
-            if self.roster.may_steer(&w.from) {
+            let roster = &self.roster;
+            if roster.operators.contains(&w.from) || roster.observers.contains(&w.from) {
                 if self.local_peer.is_none() {
                     let e = RpcError::new(RPC_NOT_CONNECTED, "robot not connected", None);
                     self.reply(w.caller, Err(e));
@@ -1374,14 +1338,13 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         let Some(PendingOp::SetActive { identity, prev, caller }) = self.pending.remove(&id) else {
             return;
         };
-        match result {
-            Ok(()) => self.commit_active_operator(identity, prev, caller),
-            Err(e) => {
-                if let Some(caller) = caller {
-                    let message = format!("presence update failed: {e}");
-                    self.reply(caller, Err(RpcError::new(RPC_PRESENCE_FAILED, message, None)));
-                }
+        match (result, caller) {
+            (Ok(()), caller) => self.commit_active_operator(identity, prev, caller),
+            (Err(e), Some(caller)) => {
+                let message = format!("presence update failed: {e}");
+                self.reply(caller, Err(RpcError::new(RPC_PRESENCE_FAILED, message, None)));
             }
+            (Err(_), None) => {}
         }
     }
 
@@ -1421,34 +1384,11 @@ impl<F: FramePayload + From<VideoFrameData>> PortalCore<F> {
         }
     }
 
-    /// Default RPC destination: the obvious counterpart, else the only
-    /// other peer.
-    fn resolve_peer(&self) -> PortalResult<PeerId> {
-        if let Some(peer) = self.default_peer() {
-            return Ok(peer);
-        }
-        let mut peers = self.peers.iter();
-        match (peers.next(), peers.next()) {
-            (None, _) => Err(PortalError::NoPeer),
-            (Some(peer), None) => Ok(peer.clone()),
-            (Some(_), Some(_)) => Err(PortalError::AmbiguousPeer),
-        }
-    }
-
     fn op(&mut self, op: PendingOp) -> OpId {
         let id = OpId(self.next_op);
         self.next_op += 1;
         self.pending.insert(id, op);
         id
-    }
-
-    fn schedule_wake(&mut self) {
-        let next = self.next_wake_us();
-        if next == self.scheduled_wake_us {
-            return;
-        }
-        self.scheduled_wake_us = next;
-        self.out.push(Output::ScheduleWake { at_us: next });
     }
 }
 
@@ -1457,10 +1397,6 @@ struct Call {
     method: String,
     payload: String,
     timeout_ms: Option<u32>,
-}
-
-fn unsupported_method() -> RpcError {
-    RpcError::new(RPC_UNSUPPORTED_METHOD, "Method not supported at destination", None)
 }
 
 /// Observations go out one by one so a slow consumer sees each; drops go
@@ -1492,10 +1428,20 @@ fn warn_mismatch(warned: &mut HashSet<u32>, stream: Stream, expected: u32, got: 
     }
 }
 
-/// Whether a lossy packet stamped `ts` was overtaken in flight by its
-/// sender's `newest`.
-fn overtaken(newest: Option<u64>, ts: u64) -> bool {
-    newest.is_some_and(|n| ts < n)
+/// Records `ts` as the sender's newest stamp on a lossy stream, or returns
+/// false if a newer packet overtook it in flight.
+fn advance(newest: &mut HashMap<PeerId, u64>, sender: &str, ts: u64) -> bool {
+    match newest.get_mut(sender) {
+        Some(n) if ts < *n => false,
+        Some(n) => {
+            *n = ts;
+            true
+        }
+        None => {
+            newest.insert(sender.to_string(), ts);
+            true
+        }
+    }
 }
 
 fn reliability(reliable: bool) -> &'static str {

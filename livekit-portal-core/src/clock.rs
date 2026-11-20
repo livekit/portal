@@ -164,27 +164,32 @@ pub struct OffsetEstimator {
 }
 
 impl OffsetEstimator {
-    /// An estimator for the reference clock, synced from the start.
-    pub fn reference() -> Self {
-        Self { synced: true, ..Default::default() }
-    }
-
     pub fn push(&mut self, sample: Sample) -> EstimatorEvent {
-        let Some(best) = self.best() else {
-            self.admit(sample);
-            return self.pending_or_synced();
-        };
-        if best.offset_us.abs_diff(sample.offset_us) <= JUMP_THRESHOLD_US {
+        let jumped = self
+            .best()
+            .is_some_and(|best| best.offset_us.abs_diff(sample.offset_us) > JUMP_THRESHOLD_US);
+        if !jumped {
             self.jump_run.clear();
-            self.admit(sample);
-            return self.pending_or_synced();
+            self.window.push_back(sample);
+            let horizon = sample.at_us.saturating_sub(WINDOW_US);
+            while self.window.front().is_some_and(|s| s.at_us < horizon) {
+                self.window.pop_front();
+            }
+            if self.synced {
+                return EstimatorEvent::Updated;
+            }
+            if self.window.len() < MIN_SAMPLES_TO_SYNC {
+                return EstimatorEvent::Pending;
+            }
+            self.synced = true;
+            return EstimatorEvent::Synced;
         }
 
-        let agrees = self
+        let disagrees = self
             .jump_run
             .first()
-            .is_none_or(|first| first.offset_us.abs_diff(sample.offset_us) <= JUMP_AGREEMENT_US);
-        if !agrees {
+            .is_some_and(|first| first.offset_us.abs_diff(sample.offset_us) > JUMP_AGREEMENT_US);
+        if disagrees {
             self.jump_run.clear();
         }
         self.jump_run.push(sample);
@@ -201,13 +206,13 @@ impl OffsetEstimator {
 
     /// Current estimate, once synced.
     pub fn offset_us(&self) -> Option<i64> {
-        self.synced.then(|| self.best()).flatten().map(|s| s.offset_us)
+        self.best().filter(|_| self.synced).map(|s| s.offset_us)
     }
 
     /// Worst-case error of `offset_us`: the true offset lies within half the
     /// round trip of the sample it came from.
     pub fn uncertainty_us(&self) -> Option<u64> {
-        self.synced.then(|| self.best()).flatten().map(|s| s.rtt_us.div_ceil(2))
+        self.best().filter(|_| self.synced).map(|s| s.rtt_us.div_ceil(2))
     }
 
     pub fn is_synced(&self) -> bool {
@@ -225,25 +230,6 @@ impl OffsetEstimator {
     pub fn reset_counters(&mut self) {
         self.resyncs = 0;
         self.samples_rejected = 0;
-    }
-
-    fn admit(&mut self, sample: Sample) {
-        self.window.push_back(sample);
-        let horizon = sample.at_us.saturating_sub(WINDOW_US);
-        while self.window.front().is_some_and(|s| s.at_us < horizon) {
-            self.window.pop_front();
-        }
-    }
-
-    fn pending_or_synced(&mut self) -> EstimatorEvent {
-        match (self.synced, self.window.len() >= MIN_SAMPLES_TO_SYNC) {
-            (true, _) => EstimatorEvent::Updated,
-            (false, true) => {
-                self.synced = true;
-                EstimatorEvent::Synced
-            }
-            (false, false) => EstimatorEvent::Pending,
-        }
     }
 
     fn best(&self) -> Option<Sample> {
@@ -316,6 +302,7 @@ impl MonotonicClock {
         self.applied_offset_us
     }
 }
+
 // --- Synced clock ---
 
 /// Fast until synced, since `connect` waits for the first sync.
@@ -353,14 +340,11 @@ pub struct ClockSync {
 
 impl ClockSync {
     pub fn new(options: ClockOptions) -> Self {
-        let estimator = match options.is_reference {
-            true => OffsetEstimator::reference(),
-            false => OffsetEstimator::default(),
-        };
         Self {
+            // The reference clock is synced from the start.
+            estimator: OffsetEstimator { synced: options.is_reference, ..Default::default() },
             options,
             clock: MonotonicClock::default(),
-            estimator,
             robot_identity: None,
             next_ping_us: None,
             seq: 0,

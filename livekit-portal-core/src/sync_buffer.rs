@@ -188,38 +188,27 @@ impl<F: FramePayload> SyncBuffer<F> {
         stall: Vec<StallConfig>,
         metrics: Arc<MetricsRegistry>,
     ) -> Self {
-        let track_names: Vec<String> = video_track_names.to_vec();
-        let track_index: HashMap<String, usize> =
-            track_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
-        let video_buffers = (0..track_names.len()).map(|_| VecDeque::new()).collect();
-        let cursors = vec![0; track_names.len()];
-        let video_overflow_warn = (0..track_names.len()).map(|_| LogThrottle::default()).collect();
-        let matched_scratch: Vec<Option<MatchSlot<F>>> =
-            (0..track_names.len()).map(|_| None).collect();
-        let last_emitted_frames = (0..track_names.len()).map(|_| None).collect();
-        let stall = if stall.len() == track_names.len() {
-            stall
-        } else {
-            vec![config.default_stall; track_names.len()]
-        };
+        let n = video_track_names.len();
+        let track_index =
+            video_track_names.iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
+        let stall = if stall.len() == n { stall } else { vec![config.default_stall; n] };
         let any_max_lag = stall.iter().any(|s| s.max_lag_us.is_some());
-        let placeholders = (0..track_names.len()).map(|_| None).collect();
         Self {
-            track_names,
+            track_names: video_track_names.to_vec(),
             track_index,
-            video_buffers,
+            video_buffers: (0..n).map(|_| VecDeque::new()).collect(),
             state_buffer: VecDeque::new(),
             state_schema,
             config,
-            placeholders,
+            placeholders: (0..n).map(|_| None).collect(),
             stall,
             any_max_lag,
-            cursors,
+            cursors: vec![0; n],
             blocker: None,
-            matched_scratch,
-            last_emitted_frames,
+            matched_scratch: (0..n).map(|_| None).collect(),
+            last_emitted_frames: (0..n).map(|_| None).collect(),
             state_overflow_warn: LogThrottle::default(),
-            video_overflow_warn,
+            video_overflow_warn: (0..n).map(|_| LogThrottle::default()).collect(),
             drop_warn: DropWarn::default(),
             metrics,
             now_us: 0,
@@ -231,102 +220,56 @@ impl<F: FramePayload> SyncBuffer<F> {
         self.now_us = now_us;
     }
 
-    /// Count one unsyncable-state drop and emit a throttled, self-explanatory
-    /// warning. `ahead_us` is how far the video stream had moved past the
-    /// dropped state (`newest_frame_ts - state_ts`), which is why no match
-    /// was possible. The first drop in a burst logs immediately; subsequent
-    /// drops fold into a summary emitted at most once per `DROP_WARN_INTERVAL`.
+    /// Count one unsyncable-state drop and emit a throttled warning.
+    /// `ahead_us` is how far the video stream had moved past the dropped
+    /// state (`newest_frame_ts - state_ts`). The first drop in a burst logs
+    /// immediately; later ones fold into a summary at most once per
+    /// `DROP_WARN_INTERVAL_US`.
     fn note_unsyncable_drop(&mut self, ahead_us: u64) {
-        self.drop_warn.count += 1;
-        self.drop_warn.worst_ahead_us = self.drop_warn.worst_ahead_us.max(ahead_us);
+        let warn = &mut self.drop_warn;
+        warn.count += 1;
+        warn.worst_ahead_us = warn.worst_ahead_us.max(ahead_us);
 
-        let now = self.now_us;
-        let elapsed = self.drop_warn.last_log_us.map(|t| now.saturating_sub(t));
-        let should_log = match elapsed {
-            None => true,
-            Some(d) => d >= DROP_WARN_INTERVAL_US,
-        };
-        if !should_log {
+        let elapsed = warn.last_log_us.map(|t| self.now_us.saturating_sub(t));
+        if elapsed.is_some_and(|d| d < DROP_WARN_INTERVAL_US) {
             return;
         }
 
         let range_ms = self.config.search_range_us as f64 / 1_000.0;
-        let ahead_ms = self.drop_warn.worst_ahead_us as f64 / 1_000.0;
+        let ahead_ms = warn.worst_ahead_us as f64 / 1_000.0;
         match elapsed {
-            // First drop in a burst. Cause and fix live at docs/10-troubleshooting.md#sync-drop.
+            // Cause and fix live at docs/10-troubleshooting.md#sync-drop.
             None => log::warn!(
                 "[sync-drop] dropping states: no frame within ±{range_ms:.0}ms of \
                  the state timestamp (video {ahead_ms:.0}ms ahead). Throttling \
                  further [sync-drop] warnings to once per {}s.",
                 DROP_WARN_INTERVAL_US / 1_000_000,
             ),
-            // Sustained burst: one rolled-up summary per interval.
             Some(d) => log::warn!(
                 "[sync-drop] dropped {} more states in {:.0}s: no frame within \
                  ±{range_ms:.0}ms (video up to {ahead_ms:.0}ms ahead).",
-                self.drop_warn.count,
+                warn.count,
                 d as f64 / 1_000_000.0,
             ),
         }
-        self.drop_warn.last_log_us = Some(now);
-        self.drop_warn.count = 0;
-        self.drop_warn.worst_ahead_us = 0;
-    }
-
-    /// Largest sender timestamp currently buffered across every stream — the
-    /// newest state plus each track's newest frame. This is the "stream
-    /// clock" `max_lag` is measured against: it advances whenever *any*
-    /// stream is still flowing, so a track that has gone silent is detected
-    /// through the clocks of the tracks that have not.
-    ///
-    /// Reads only sender timestamps, never a wall clock, so stall decisions
-    /// stay reproducible and testable — the reason a wall-clock deadline was
-    /// rejected in the first place. The corollary is that this is not a
-    /// watchdog: if every stream goes silent the clock stops and nothing
-    /// resolves, which is harmless because nothing is being emitted either.
-    ///
-    /// Always `>= state_buffer[0]`, since the head is the front of
-    /// `state_buffer` and its back is `>=` its front. O(tracks), and only
-    /// called when at least one track has a finite `max_lag`.
-    fn logical_now(&self) -> u64 {
-        let mut now = self.state_buffer.back().map(|(ts, _)| *ts).unwrap_or(0);
-        for buf in &self.video_buffers {
-            if let Some(frame) = buf.back() {
-                now = now.max(frame.timestamp_us());
-            }
-        }
-        now
-    }
-
-    /// Build the typed state map once per emission. Separate so the two
-    /// call sites (overflow drop and sync emit) stay in lockstep, and
-    /// distinctly named to avoid shadowing the conceptual "typed state"
-    /// field on `Observation`.
-    fn build_typed_state_map(&self, values: &[f64]) -> HashMap<String, TypedValue> {
-        to_value_maps(&self.state_schema, values).0
+        *warn = DropWarn { count: 0, worst_ahead_us: 0, last_log_us: Some(self.now_us) };
     }
 
     pub fn push_frame(&mut self, track_name: &str, frame: F) -> SyncOutput<F> {
-        let idx = match self.track_index.get(track_name) {
-            Some(&i) => i,
-            None => return SyncOutput::empty(),
+        let Some(&idx) = self.track_index.get(track_name) else {
+            return SyncOutput::empty();
         };
 
-        let cap = self.config.video_buffer_size as usize;
         let buf = &mut self.video_buffers[idx];
         buf.push_back(frame);
-
-        let mut evicted = 0usize;
-        while buf.len() > cap {
-            buf.pop_front();
-            evicted += 1;
-        }
+        let evicted = buf.len().saturating_sub(self.config.video_buffer_size as usize);
         if evicted > 0 {
-            let cursor = &mut self.cursors[idx];
-            *cursor = cursor.saturating_sub(evicted);
-            if let Some(tm) = self.metrics.track(track_name) {
-                tm.record_evictions(evicted as u64);
-            }
+            buf.drain(..evicted);
+            self.cursors[idx] = self.cursors[idx].saturating_sub(evicted);
+            self.metrics
+                .track(track_name)
+                .expect("metrics registered per track")
+                .record_evictions(evicted as u64);
             if let Some(held_back) = self.video_overflow_warn[idx].due(self.now_us) {
                 log::warn!(
                     "[video-overflow] '{track_name}' buffer full, evicted {evicted} frame(s) \
@@ -335,25 +278,16 @@ impl<F: FramePayload> SyncBuffer<F> {
             }
         }
 
-        // Skip try_sync when this push cannot have changed head-state matchability:
-        //   - another track is blocking (a push to a non-blocker doesn't unblock it), AND
-        //   - no eviction happened on this track (eviction can newly-transition a track
-        //     from matching → unmatchable, which must be checked), AND
-        //   - no track has a finite `max_lag`.
+        // Skip try_sync when this push cannot have changed head-state
+        // matchability: another track is blocking, nothing was evicted here
+        // (eviction can turn a matching track unmatchable), and no track has
+        // a finite `max_lag`.
         //
         // That last clause is what makes a stall resolve when a healthy track
         // is the only thing still moving: a push to a *non-blocking* track
         // advances the stream clock, which can carry the head past its lag
-        // budget even though this track was never the blocker. Skipping here
-        // would strand the head exactly in the case the budget exists to fix.
-        // It costs the blocker short-circuit whenever a budget is set, which
-        // is an O(tracks) early-return per frame — cheap next to decoding one.
-        let should_run = match self.blocker {
-            None => true,
-            Some(b) if b == idx => true,
-            Some(_) => evicted > 0 || self.any_max_lag,
-        };
-
+        // budget even though this track was never the blocker.
+        let should_run = evicted > 0 || self.any_max_lag || self.blocker.is_none_or(|b| b == idx);
         if should_run { self.try_sync() } else { SyncOutput::empty() }
     }
 
@@ -361,50 +295,39 @@ impl<F: FramePayload> SyncBuffer<F> {
         let old_head_ts = self.state_buffer.front().map(|(ts, _)| *ts);
         self.state_buffer.push_back((timestamp_us, values));
 
-        let mut overflow_drops: Vec<HashMap<String, TypedValue>> = Vec::new();
-        while self.state_buffer.len() > self.config.state_buffer_size as usize {
-            let (_, vals) = self.state_buffer.pop_front().unwrap();
-            overflow_drops.push(self.build_typed_state_map(&vals));
-        }
-        if !overflow_drops.is_empty() {
-            self.metrics.record_state_dropped(overflow_drops.len() as u64);
+        let excess = self.state_buffer.len().saturating_sub(self.config.state_buffer_size as usize);
+        let overflow_drops: Vec<_> = self
+            .state_buffer
+            .drain(..excess)
+            .map(|(_, vals)| to_value_maps(&self.state_schema, &vals).0)
+            .collect();
+        if excess > 0 {
+            self.metrics.record_state_dropped(excess as u64);
             if let Some(held_back) = self.state_overflow_warn.due(self.now_us) {
                 log::warn!(
-                    "[state-overflow] state buffer full ({}), dropped {} oldest \
+                    "[state-overflow] state buffer full ({}), dropped {excess} oldest \
                      ({held_back} more overflows since the last warning)",
                     self.config.state_buffer_size,
-                    overflow_drops.len(),
                 );
             }
         }
-        // If eviction (or first-ever push) changed the head state, the old blocker
-        // hint no longer applies.
-        let new_head_ts = self.state_buffer.front().map(|(ts, _)| *ts);
-        if new_head_ts != old_head_ts {
+        // A new head state invalidates the blocker hint.
+        if self.state_buffer.front().map(|(ts, _)| *ts) != old_head_ts {
             self.blocker = None;
         }
 
         let mut output = self.try_sync();
-        if !overflow_drops.is_empty() {
-            // Overflow drops precede any sync-fail drops temporally.
-            overflow_drops.append(&mut output.drops);
-            output.drops = overflow_drops;
-        }
+        // Overflow drops precede any sync-fail drops temporally.
+        output.drops.splice(0..0, overflow_drops);
         output
     }
 
     pub fn clear(&mut self) {
-        for buf in &mut self.video_buffers {
-            buf.clear();
-        }
+        self.video_buffers.iter_mut().for_each(VecDeque::clear);
         self.state_buffer.clear();
         self.cursors.fill(0);
-        for slot in &mut self.last_emitted_frames {
-            *slot = None;
-        }
-        for slot in &mut self.placeholders {
-            *slot = None;
-        }
+        self.last_emitted_frames.fill_with(|| None);
+        self.placeholders.fill_with(|| None);
         self.blocker = None;
         self.drop_warn = DropWarn::default();
     }
@@ -414,97 +337,86 @@ impl<F: FramePayload> SyncBuffer<F> {
         let range = self.config.search_range_us;
 
         loop {
-            if self.state_buffer.is_empty() {
+            let Some(&(state_ts, _)) = self.state_buffer.front() else {
                 self.blocker = None;
                 return output;
-            }
-
-            let state_ts = self.state_buffer[0].0;
-            // Next state in the buffer (if any) — used for fair-share: if a
-            // candidate frame is closer to the next state than to the head
-            // state, we skip it so the later state can claim it.
+            };
+            // Fair-share: a candidate frame closer to the next state than to
+            // the head is left for the next state to claim.
             let next_state_ts = self.state_buffer.get(1).map(|(ts, _)| *ts);
 
-            for slot in &mut self.matched_scratch {
-                *slot = None;
-            }
+            self.matched_scratch.fill_with(|| None);
 
-            // Stream clock for `max_lag`, computed once per candidate state
-            // rather than per track. Skipped entirely when no track has a
-            // finite `max_lag`, which is the default.
-            let logical_now = if self.any_max_lag { self.logical_now() } else { 0 };
+            // Stream clock for `max_lag`: the newest sender timestamp buffered
+            // on any stream, so a silent track is detected through the clocks
+            // of the tracks still flowing. Sender timestamps only, never a wall
+            // clock, so stall decisions stay reproducible. Not a watchdog: if
+            // every stream goes silent nothing resolves, which is harmless
+            // because nothing is being emitted either. Always `>= state_ts`.
+            let logical_now = match self.any_max_lag {
+                true => self
+                    .video_buffers
+                    .iter()
+                    .filter_map(|b| b.back().map(F::timestamp_us))
+                    .chain(self.state_buffer.back().map(|(ts, _)| *ts))
+                    .max()
+                    .unwrap_or(0),
+                false => 0,
+            };
 
-            // Per-iteration status. Priority: drop > wait > emit. We scan every
-            // track (even after a wait-on-earlier-track) so that a drop-eligible
-            // track later in the list can override the wait — otherwise a state
-            // could stall forever waiting on cam1 while cam2 has already moved
-            // beyond the match horizon.
+            // Priority: drop > wait > emit. Every track is scanned, even after
+            // a wait on an earlier one, so a drop-eligible later track can
+            // override the wait; otherwise a state could stall forever waiting
+            // on cam1 while cam2 has already moved beyond the match horizon.
             //
             // A track that cannot match waits until either no future frame
             // could match it or its `max_lag` elapses, then resolves per its
-            // `stall_behavior` policy. `Freeze` and `Omit` still wait through the
+            // `stall_behavior`. `Freeze` and `Omit` still wait through the
             // startup window before the track's first frame, when they have
-            // nothing to substitute. State-buffer overflow (handled in
-            // `push_state`) remains the hard safety net against a fully
-            // halted video stream.
-            let mut should_drop = false;
-            // How far the video stream had moved past `state_ts` when the drop
-            // fired (`newest_frame_ts - state_ts`). Captured for the warning so
-            // it can report why no match was possible.
-            let mut drop_ahead_us = 0u64;
+            // nothing to substitute. State-buffer overflow remains the hard
+            // safety net against a fully halted video stream.
+            //
+            // `drop_ahead_us` is `newest_frame_ts - state_ts` for the warning.
+            let mut drop_ahead_us: Option<u64> = None;
             let mut iter_blocker: Option<usize> = None;
 
             for track_i in 0..self.video_buffers.len() {
                 let frame_buf = &self.video_buffers[track_i];
 
-                // Cursor maintenance / fresh match search. Guarded on buffer
-                // being non-empty; if empty we fall through to the reuse /
-                // wait branches below.
                 let mut best_idx: Option<usize> = None;
                 let mut best_delta = u64::MAX;
                 if !frame_buf.is_empty() {
                     let cursor = &mut self.cursors[track_i];
-                    // Defensive clamp in case capacity shrunk or mutation missed an adjustment.
-                    if *cursor >= frame_buf.len() {
-                        *cursor = frame_buf.len() - 1;
-                    }
-                    // Rewind if the cursor is already past state_ts (can happen if
-                    // states arrive out of order on unreliable delivery).
+                    debug_assert!(
+                        *cursor < frame_buf.len(),
+                        "cursor follows every buffer mutation"
+                    );
+                    // Rewind if states arrived out of order on unreliable delivery.
                     while *cursor > 0 && frame_buf[*cursor].timestamp_us() > state_ts {
                         *cursor -= 1;
                     }
-                    // Advance while the next frame is still at or before state_ts.
                     while *cursor + 1 < frame_buf.len()
                         && frame_buf[*cursor + 1].timestamp_us() <= state_ts
                     {
                         *cursor += 1;
                     }
 
-                    let cursor_val = *cursor;
-                    for candidate in
-                        [Some(cursor_val), cursor_val.checked_add(1)].into_iter().flatten()
-                    {
-                        if let Some(f) = frame_buf.get(candidate) {
-                            let d = state_ts.abs_diff(f.timestamp_us());
-                            if d >= range || d >= best_delta {
-                                continue;
-                            }
-                            // Fair-share: if a later buffered state has a strictly
-                            // closer claim, leave the frame for it. Prevents a
-                            // greedy head-state from stealing its neighbor's frame
-                            // when tolerance > 1 tick.
-                            if let Some(nts) = next_state_ts
-                                && nts.abs_diff(f.timestamp_us()) < d
-                            {
-                                continue;
-                            }
+                    for candidate in *cursor..=*cursor + 1 {
+                        let Some(f) = frame_buf.get(candidate) else { break };
+                        let d = state_ts.abs_diff(f.timestamp_us());
+                        // Fair-share: leave the frame to a later state with a
+                        // strictly closer claim, so a greedy head can't steal
+                        // its neighbor's frame when tolerance > 1 tick.
+                        let claimed_later =
+                            next_state_ts.is_some_and(|nts| nts.abs_diff(f.timestamp_us()) < d);
+                        if d < range && d < best_delta && !claimed_later {
                             best_delta = d;
                             best_idx = Some(candidate);
                         }
                     }
                 }
 
-                let newest_ts = frame_buf.back().map(|f| f.timestamp_us());
+                let newest_ts = frame_buf.back().map(F::timestamp_us);
                 let stall = self.stall[track_i];
                 let lagged =
                     stall.max_lag_us.is_some_and(|max| logical_now.saturating_sub(state_ts) >= max);
@@ -518,12 +430,10 @@ impl<F: FramePayload> SyncBuffer<F> {
                     let own_frame_pending = best_delta >= native
                         && newest_ts.is_some_and(|n| n < state_ts.saturating_add(native));
                     if own_frame_pending && !lagged {
-                        if iter_blocker.is_none() {
-                            iter_blocker = Some(track_i);
-                        }
+                        iter_blocker.get_or_insert(track_i);
                         continue;
                     }
-                    let frame = self.video_buffers[track_i][idx].clone();
+                    let frame = frame_buf[idx].clone();
                     let borrowed = best_delta >= native && frame.timestamp_us() > state_ts;
                     self.matched_scratch[track_i] = Some(MatchSlot {
                         frame,
@@ -534,85 +444,58 @@ impl<F: FramePayload> SyncBuffer<F> {
                     continue;
                 }
 
-                // No fresh in-range match on this track. Two questions, in
-                // order: can waiting still help, and — if not, or if we have
-                // already waited long enough — how does this track's policy
-                // resolve the moment?
-                //
-                // Waiting cannot help once the newest buffered frame is
-                // already past the horizon: frame timestamps are monotonic,
-                // so every future frame is at least that new and none of them
-                // can match. (Testing the newest rather than the front
-                // detects this immediately, instead of only after eviction
-                // drags the tail past the horizon — a latency bug of up to
-                // `video_buffer_size` frames.) `>=` matches the strict
-                // `d < range` match rule: a frame at exactly `state_ts +
-                // range` is not a match, so the state cannot match it either.
+                // Waiting cannot help once the newest buffered frame is past
+                // the horizon: frame timestamps are monotonic, so no future
+                // frame can match. (Testing the newest rather than the front
+                // detects this immediately instead of only after eviction.)
+                // `>=` mirrors the strict `d < range` match rule.
                 let unmatchable = newest_ts.is_some_and(|n| n >= state_ts.saturating_add(range));
 
-                // Otherwise a future frame could still land in range, so we
-                // wait — but only until the fastest-advancing stream's sender
-                // clock has run `max_lag` past this moment. `None` keeps the
-                // historical behavior of waiting until state-buffer capacity
-                // evicts the moment (or forever, if state output has stopped
-                // too). See `logical_now`.
+                // Otherwise wait, but only until the stream clock has run
+                // `max_lag` past this moment. `None` waits until state-buffer
+                // capacity evicts the moment.
                 if !unmatchable && !lagged {
-                    if iter_blocker.is_none() {
-                        iter_blocker = Some(track_i);
-                    }
+                    iter_blocker.get_or_insert(track_i);
                     continue;
                 }
 
                 // Resolve without this track.
                 match stall.behavior {
                     // Prefer the newest below-horizon buffered frame
-                    // (ts ≤ state_ts, |Δ| ≥ range) over the stored
-                    // last-emitted fallback: it tracks forward with state_ts
-                    // so match_delta stays bounded, and draining it keeps the
-                    // buffer from wedging at cap while a track is
-                    // systematically behind. Since state_ts advances
-                    // monotonically, no future state could fresh-match a
-                    // frame with ts ≤ state_ts − range, so consuming it now is
-                    // safe. Past-horizon frames (ts > state_ts) are left for a
-                    // later state to claim, and we fall back to pure reuse.
+                    // (ts ≤ state_ts − range) over the stored last-emitted
+                    // fallback: it tracks forward with state_ts so match_delta
+                    // stays bounded, and draining it keeps the buffer from
+                    // wedging at cap while a track is systematically behind.
+                    // No future state could fresh-match it, so consuming it
+                    // is safe. Past-horizon frames are left for a later state.
                     StallBehavior::Freeze => {
-                        if !frame_buf.is_empty() {
-                            let c = self.cursors[track_i];
-                            let cand = &frame_buf[c];
-                            if cand.timestamp_us() <= state_ts
-                                && state_ts - cand.timestamp_us() >= range
-                            {
-                                self.matched_scratch[track_i] = Some(MatchSlot {
-                                    frame: cand.clone(),
-                                    drain_to: Some(c),
-                                    borrowed: false,
-                                    source: FrameSource::Stale,
-                                });
-                                continue;
-                            }
-                        }
-                        if let Some(stale) = self.last_emitted_frames[track_i].clone() {
+                        let c = self.cursors[track_i];
+                        let below_horizon = frame_buf.get(c).filter(|f| {
+                            state_ts.checked_sub(f.timestamp_us()).is_some_and(|d| d >= range)
+                        });
+                        let stand_in = match below_horizon {
+                            Some(f) => Some((f.clone(), Some(c))),
+                            None => self.last_emitted_frames[track_i].clone().map(|f| (f, None)),
+                        };
+                        if let Some((frame, drain_to)) = stand_in {
                             self.matched_scratch[track_i] = Some(MatchSlot {
-                                frame: stale,
-                                drain_to: None,
+                                frame,
+                                drain_to,
                                 borrowed: false,
                                 source: FrameSource::Stale,
                             });
                             continue;
                         }
                     }
-                    // Keep the moment alive with a stand-in, so the healthy
-                    // tracks and the state still reach the consumer. Geometry
-                    // and recency both come from the track's last real frame:
-                    // without one there is nothing to size a placeholder
-                    // from, and reusing its timestamp keeps `match_delta`
-                    // reporting the true age of the newest real pixels rather
-                    // than a flattering zero.
+                    // Keep the moment alive with a stand-in sized from the
+                    // track's last real frame and carrying its timestamp, so
+                    // `match_delta` reports the true age of the newest real
+                    // pixels rather than a flattering zero.
                     StallBehavior::Omit => {
                         if let Some(last) = &self.last_emitted_frames[track_i] {
+                            let name = &self.track_names[track_i];
                             let cached = &mut self.placeholders[track_i];
-                            let frame =
-                                last.placeholder(&self.track_names[track_i], cached.as_ref());
+                            let frame = last.placeholder(name, cached.as_ref());
                             *cached = Some(frame.clone());
                             self.matched_scratch[track_i] = Some(MatchSlot {
                                 frame,
@@ -620,9 +503,10 @@ impl<F: FramePayload> SyncBuffer<F> {
                                 borrowed: false,
                                 source: FrameSource::Omitted,
                             });
-                            if let Some(tm) = self.metrics.track(&self.track_names[track_i]) {
-                                tm.record_frame_omitted();
-                            }
+                            self.metrics
+                                .track(name)
+                                .expect("metrics registered per track")
+                                .record_frame_omitted();
                             continue;
                         }
                     }
@@ -630,29 +514,22 @@ impl<F: FramePayload> SyncBuffer<F> {
                 }
 
                 // `Freeze` and `Omit` land here only before the track's first
-                // frame, with nothing to stand in with and no geometry to
-                // synthesize from. If a future frame could still match, keep
-                // waiting rather than discarding a moment we may yet be able
-                // to satisfy; that startup window is exactly the historical
-                // `reuse_stale_frames` behavior. Otherwise drop.
+                // frame. If a future frame could still match, keep waiting
+                // rather than discard a moment we may yet satisfy.
                 if !unmatchable && stall.behavior != StallBehavior::Drop {
-                    if iter_blocker.is_none() {
-                        iter_blocker = Some(track_i);
-                    }
+                    iter_blocker.get_or_insert(track_i);
                     continue;
                 }
 
-                should_drop = true;
-                drop_ahead_us = newest_ts.unwrap_or(logical_now).saturating_sub(state_ts);
+                drop_ahead_us = Some(newest_ts.unwrap_or(logical_now).saturating_sub(state_ts));
                 break;
             }
 
-            if should_drop {
-                self.note_unsyncable_drop(drop_ahead_us);
-                let (_, values) = self.state_buffer.pop_front().unwrap();
-                output.drops.push(self.build_typed_state_map(&values));
+            if let Some(ahead_us) = drop_ahead_us {
+                self.note_unsyncable_drop(ahead_us);
+                let (_, values) = self.state_buffer.pop_front().expect("head state present");
+                output.drops.push(to_value_maps(&self.state_schema, &values).0);
                 self.metrics.record_state_dropped(1);
-                // Retry next state with fresh iteration.
                 continue;
             }
 
@@ -662,73 +539,50 @@ impl<F: FramePayload> SyncBuffer<F> {
                 return output;
             }
 
-            // Record worst-case per-track alignment (against whichever frame
-            // got used, fresh or stale — stale deltas can be arbitrarily large
-            // so this surfaces video-freeze duration in metrics). Separately
-            // flag observations that involved any stale match so ops can
-            // distinguish "video is silently frozen / behind" from normal
-            // operation.
-            let mut worst_delta = 0u64;
-            let mut any_stale = false;
-            for slot in &self.matched_scratch {
-                if let Some(s) = slot.as_ref() {
-                    worst_delta = worst_delta.max(state_ts.abs_diff(s.frame.timestamp_us()));
-                    if s.source == FrameSource::Stale {
-                        any_stale = true;
-                    }
-                }
-            }
+            // Worst per-track alignment against whichever frame got used;
+            // stale deltas can be arbitrarily large, so this surfaces
+            // video-freeze duration.
+            let used = || self.matched_scratch.iter().flatten();
+            let worst_delta =
+                used().map(|s| state_ts.abs_diff(s.frame.timestamp_us())).max().unwrap_or(0);
             self.metrics.record_observation(worst_delta);
-            if any_stale {
+            if used().any(|s| s.source == FrameSource::Stale) {
                 self.metrics.record_stale_observation();
             }
 
-            let (ts, values) = self.state_buffer.pop_front().unwrap();
+            let (_, values) = self.state_buffer.pop_front().expect("head state present");
 
-            let mut frames_map: HashMap<String, F> = HashMap::with_capacity(self.track_names.len());
-            for track_i in 0..self.track_names.len() {
-                if let Some(slot) = self.matched_scratch[track_i].take() {
-                    if let Some(idx) = slot.drain_to {
-                        // Drain the buffer up to and including the chosen
-                        // frame and remember it as the stale fallback for
-                        // later states that can't find a fresh match. Done
-                        // for fresh matches AND for below-horizon reuse
-                        // matches, so `last_emitted_frames` always advances
-                        // with state_ts.
-                        let end = if slot.borrowed { idx } else { idx + 1 };
-                        self.video_buffers[track_i].drain(0..end);
-                        // Cursor was at or just past idx; after draining, shift it back.
-                        self.cursors[track_i] = self.cursors[track_i].saturating_sub(end);
-                        self.last_emitted_frames[track_i] = Some(slot.frame.clone());
-                    }
-                    // Pure reuse (drain_to == None): leave buffer / cursor /
-                    // last-emitted untouched so a future in-range frame can
-                    // still be claimed by a later state.
-                    //
-                    // The buffered frame is always stored as `Live`; stamp
-                    // how it was actually used on the copy handed out.
-                    let mut frame = slot.frame;
-                    frame.set_source(slot.source);
-                    frames_map.insert(self.track_names[track_i].clone(), frame);
+            let mut frames: HashMap<String, F> = HashMap::with_capacity(self.track_names.len());
+            for (track_i, slot) in self.matched_scratch.iter_mut().enumerate() {
+                let Some(slot) = slot.take() else { continue };
+                // Pure reuse (`drain_to == None`) leaves buffer, cursor and
+                // last-emitted untouched so a later state can still claim a
+                // future in-range frame.
+                if let Some(idx) = slot.drain_to {
+                    let end = if slot.borrowed { idx } else { idx + 1 };
+                    self.video_buffers[track_i].drain(..end);
+                    self.cursors[track_i] = self.cursors[track_i].saturating_sub(end);
+                    self.last_emitted_frames[track_i] = Some(slot.frame.clone());
                 }
+                // The buffered frame is always stored as `Live`; stamp how it
+                // was actually used on the copy handed out.
+                let mut frame = slot.frame;
+                frame.set_source(slot.source);
+                frames.insert(self.track_names[track_i].clone(), frame);
             }
 
-            let (typed_state, raw_state) = to_value_maps(&self.state_schema, &values);
+            let (state, raw_state) = to_value_maps(&self.state_schema, &values);
             output.observations.push(Observation {
-                state: typed_state,
+                state,
                 raw_state,
-                frames: frames_map,
-                timestamp_us: ts,
+                frames,
+                timestamp_us: state_ts,
             });
         }
     }
 
     pub fn video_fill_snapshot(&self) -> HashMap<String, usize> {
-        self.track_names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.clone(), self.video_buffers[i].len()))
-            .collect()
+        self.track_names.iter().cloned().zip(self.video_buffers.iter().map(VecDeque::len)).collect()
     }
 
     pub fn state_fill(&self) -> usize {

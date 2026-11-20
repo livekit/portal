@@ -186,7 +186,7 @@ pub struct MetricsRegistry {
 impl MetricsRegistry {
     pub fn new(video_tracks: &[String]) -> Self {
         let per_track: HashMap<String, Arc<TrackMetrics>> =
-            video_tracks.iter().map(|n| (n.clone(), Arc::new(TrackMetrics::new()))).collect();
+            video_tracks.iter().map(|n| (n.clone(), Arc::default())).collect();
         Self {
             track_order: video_tracks.to_vec(),
             per_track,
@@ -225,13 +225,12 @@ impl MetricsRegistry {
         };
     }
 
-    /// Bump the appropriate received counter and feed the per-stream
-    /// inter-arrival jitter sampler. Mirrors `bump_sent`'s dispatch shape
-    /// so both streams share one entry point.
     pub fn record_stale_action(&self) {
         self.actions_dropped_stale.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Bump the stream's received counter and feed its inter-arrival
+    /// jitter sampler.
     pub fn record_received(&self, stream: DataStream, send_ts_us: u64, recv_ts_us: u64) {
         match stream {
             DataStream::State => {
@@ -254,12 +253,14 @@ impl MetricsRegistry {
     /// clock skew on loopback runs — we'd rather drop the sample than
     /// log a wrapped u64).
     pub fn record_e2e(&self, in_reply_to_ts_us: Option<u64>, recv_ts_us: u64) {
-        let Some(reply_ts) = in_reply_to_ts_us else { return };
-        if recv_ts_us <= reply_ts {
+        let Some(latency) = in_reply_to_ts_us
+            .and_then(|reply_ts| recv_ts_us.checked_sub(reply_ts))
+            .filter(|&d| d > 0)
+        else {
             return;
-        }
+        };
         self.correlated_received.fetch_add(1, Ordering::Relaxed);
-        self.e2e_samples.lock().push(recv_ts_us - reply_ts);
+        self.e2e_samples.lock().push(latency);
     }
 
     pub fn record_observation(&self, worst_delta_us: u64) {
@@ -290,28 +291,9 @@ impl MetricsRegistry {
     }
 
     pub fn snapshot(&self, video_fill: HashMap<String, usize>, state_fill: usize) -> PortalMetrics {
-        let n = self.track_order.len();
-        let mut frames_sent = HashMap::with_capacity(n);
-        let mut frames_received = HashMap::with_capacity(n);
-        let mut frame_jitter_us = HashMap::with_capacity(n);
-        let mut evictions = HashMap::with_capacity(n);
-        let mut frames_omitted = HashMap::with_capacity(n);
-        let mut frames_dropped_publisher_full = HashMap::with_capacity(n);
-        let mut bytes_sent = HashMap::with_capacity(n);
-        let mut bytes_received = HashMap::with_capacity(n);
-        for name in &self.track_order {
-            if let Some(t) = self.per_track.get(name) {
-                frames_sent.insert(name.clone(), t.frames_sent.load(Ordering::Relaxed));
-                frames_received.insert(name.clone(), t.frames_received.load(Ordering::Relaxed));
-                frame_jitter_us.insert(name.clone(), t.jitter.lock().jitter_us);
-                evictions.insert(name.clone(), t.evictions.load(Ordering::Relaxed));
-                frames_omitted.insert(name.clone(), t.frames_omitted.load(Ordering::Relaxed));
-                frames_dropped_publisher_full
-                    .insert(name.clone(), t.frames_dropped_publisher_full.load(Ordering::Relaxed));
-                bytes_sent.insert(name.clone(), t.bytes_sent.load(Ordering::Relaxed));
-                bytes_received.insert(name.clone(), t.bytes_received.load(Ordering::Relaxed));
-            }
-        }
+        let per_track = |read: fn(&TrackMetrics) -> u64| -> HashMap<String, u64> {
+            self.track_order.iter().map(|n| (n.clone(), read(&self.per_track[n]))).collect()
+        };
 
         let (match_p50, match_p95) = {
             let ring = self.match_deltas.lock();
@@ -321,35 +303,35 @@ impl MetricsRegistry {
             let ring = self.rtt_samples.lock();
             (ring.mean(), ring.percentile(0.95))
         };
-        let rtt_last_raw = self.rtt_last.load(Ordering::Relaxed);
-        let rtt_us_last = (rtt_last_raw != 0).then_some(rtt_last_raw);
+        let rtt_us_last = Some(self.rtt_last.load(Ordering::Relaxed)).filter(|&v| v != 0);
 
         let (e2e_p50, e2e_p95) = {
             let ring = self.e2e_samples.lock();
             (ring.percentile(0.50), ring.percentile(0.95))
         };
 
-        let last_blocker_track = {
-            let idx = self.last_blocker_track.load(Ordering::Relaxed);
-            (idx != usize::MAX).then(|| self.track_order.get(idx).cloned()).flatten()
-        };
+        // `usize::MAX` ("none") is out of range too.
+        let last_blocker_track =
+            self.track_order.get(self.last_blocker_track.load(Ordering::Relaxed)).cloned();
 
         PortalMetrics {
             sync: SyncMetrics {
                 observations_emitted: self.observations_emitted.load(Ordering::Relaxed),
                 stale_observations_emitted: self.stale_observations_emitted.load(Ordering::Relaxed),
                 states_dropped: self.states_dropped.load(Ordering::Relaxed),
-                frames_omitted,
+                frames_omitted: per_track(|t| t.frames_omitted.load(Ordering::Relaxed)),
                 match_delta_us_p50: match_p50,
                 match_delta_us_p95: match_p95,
                 last_blocker_track,
             },
             transport: TransportMetrics {
-                frames_sent,
-                frames_received,
-                frames_dropped_publisher_full,
-                bytes_sent,
-                bytes_received,
+                frames_sent: per_track(|t| t.frames_sent.load(Ordering::Relaxed)),
+                frames_received: per_track(|t| t.frames_received.load(Ordering::Relaxed)),
+                frames_dropped_publisher_full: per_track(|t| {
+                    t.frames_dropped_publisher_full.load(Ordering::Relaxed)
+                }),
+                bytes_sent: per_track(|t| t.bytes_sent.load(Ordering::Relaxed)),
+                bytes_received: per_track(|t| t.bytes_received.load(Ordering::Relaxed)),
                 states_sent: self.states_sent.load(Ordering::Relaxed),
                 states_received: self.states_received.load(Ordering::Relaxed),
                 actions_sent: self.actions_sent.load(Ordering::Relaxed),
@@ -357,11 +339,15 @@ impl MetricsRegistry {
                 actions_dropped_stale: self.actions_dropped_stale.load(Ordering::Relaxed),
                 telemetry_sent: self.telemetry_sent.load(Ordering::Relaxed),
                 telemetry_received: self.telemetry_received.load(Ordering::Relaxed),
-                frame_jitter_us,
+                frame_jitter_us: per_track(|t| t.jitter.lock().jitter_us),
                 state_jitter_us: self.state_jitter.lock().jitter_us,
                 action_jitter_us: self.action_jitter.lock().jitter_us,
             },
-            buffers: BufferMetrics { video_fill, state_fill, evictions },
+            buffers: BufferMetrics {
+                video_fill,
+                state_fill,
+                evictions: per_track(|t| t.evictions.load(Ordering::Relaxed)),
+            },
             rtt: RttMetrics {
                 rtt_us_last,
                 rtt_us_mean: rtt_mean,
@@ -401,11 +387,19 @@ impl MetricsRegistry {
         self.pings_sent.store(0, Ordering::Relaxed);
         self.pongs_received.store(0, Ordering::Relaxed);
         for t in self.per_track.values() {
-            t.reset();
+            t.frames_sent.store(0, Ordering::Relaxed);
+            t.frames_received.store(0, Ordering::Relaxed);
+            t.evictions.store(0, Ordering::Relaxed);
+            t.frames_omitted.store(0, Ordering::Relaxed);
+            t.frames_dropped_publisher_full.store(0, Ordering::Relaxed);
+            t.bytes_sent.store(0, Ordering::Relaxed);
+            t.bytes_received.store(0, Ordering::Relaxed);
+            *t.jitter.lock() = JitterState::default();
         }
     }
 }
 
+#[derive(Default)]
 #[doc(hidden)]
 pub struct TrackMetrics {
     pub frames_sent: AtomicU64,
@@ -418,26 +412,7 @@ pub struct TrackMetrics {
     pub jitter: Mutex<JitterState>,
 }
 
-impl Default for TrackMetrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TrackMetrics {
-    pub fn new() -> Self {
-        Self {
-            frames_sent: AtomicU64::new(0),
-            frames_received: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-            frames_omitted: AtomicU64::new(0),
-            frames_dropped_publisher_full: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
-            bytes_received: AtomicU64::new(0),
-            jitter: Mutex::new(JitterState::default()),
-        }
-    }
-
     pub fn record_sent(&self) {
         self.frames_sent.fetch_add(1, Ordering::Relaxed);
     }
@@ -474,24 +449,13 @@ impl TrackMetrics {
     pub fn record_dropped_publisher_full(&self) {
         self.frames_dropped_publisher_full.fetch_add(1, Ordering::Relaxed);
     }
-
-    fn reset(&self) {
-        self.frames_sent.store(0, Ordering::Relaxed);
-        self.frames_received.store(0, Ordering::Relaxed);
-        self.evictions.store(0, Ordering::Relaxed);
-        self.frames_omitted.store(0, Ordering::Relaxed);
-        self.frames_dropped_publisher_full.store(0, Ordering::Relaxed);
-        self.bytes_sent.store(0, Ordering::Relaxed);
-        self.bytes_received.store(0, Ordering::Relaxed);
-        *self.jitter.lock() = JitterState::default();
-    }
 }
 
 #[derive(Default)]
 #[doc(hidden)]
 pub struct JitterState {
-    last_send_ts: Option<u64>,
-    last_recv_ts: Option<u64>,
+    /// `(send_ts, recv_ts)` of the previous sample.
+    last: Option<(u64, u64)>,
     pub jitter_us: u64,
 }
 
@@ -500,16 +464,15 @@ impl JitterState {
     /// `D = (recv − last_recv) − (send − last_send)`. `recv` must be on a
     /// local clock that never steps, or a sync correction reads as jitter.
     pub fn sample(&mut self, send_ts_us: u64, recv_ts_us: u64) {
-        if let (Some(ls), Some(lr)) = (self.last_send_ts, self.last_recv_ts) {
+        if let Some((ls, lr)) = self.last {
             let d_recv = recv_ts_us as i128 - lr as i128;
             let d_send = send_ts_us as i128 - ls as i128;
-            let abs_d = (d_recv - d_send).unsigned_abs() as u64;
+            let abs_d = (d_recv - d_send).unsigned_abs() as u64 as i128;
             let j = self.jitter_us as i128;
-            let next = j + ((abs_d as i128) - j) / 16;
-            self.jitter_us = next.max(0) as u64;
+            // Never negative: `(abs_d - j) / 16 >= -j / 16`.
+            self.jitter_us = (j + (abs_d - j) / 16) as u64;
         }
-        self.last_send_ts = Some(send_ts_us);
-        self.last_recv_ts = Some(recv_ts_us);
+        self.last = Some((send_ts_us, recv_ts_us));
     }
 }
 
@@ -518,22 +481,19 @@ impl JitterState {
 #[doc(hidden)]
 pub struct SampleRing {
     buf: Vec<u64>,
-    cap: usize,
     idx: usize,
     len: usize,
 }
 
 impl SampleRing {
     pub fn new(cap: usize) -> Self {
-        Self { buf: vec![0; cap], cap, idx: 0, len: 0 }
+        Self { buf: vec![0; cap], idx: 0, len: 0 }
     }
 
     pub fn push(&mut self, v: u64) {
         self.buf[self.idx] = v;
-        self.idx = (self.idx + 1) % self.cap;
-        if self.len < self.cap {
-            self.len += 1;
-        }
+        self.idx = (self.idx + 1) % self.buf.len();
+        self.len = (self.len + 1).min(self.buf.len());
     }
 
     pub fn clear(&mut self) {
